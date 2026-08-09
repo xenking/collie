@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { KeyboardEvent, MutableRefObject, PointerEvent } from "react";
+import type { MutableRefObject } from "react";
 import { Loader2, Mic, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -585,21 +585,15 @@ export function VoiceInput({
     setState(socket ? "stopping" : "idle");
   }
 
-  function handlePointerDown(event: PointerEvent<HTMLButtonElement>): void {
-    if (!event.isPrimary) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    void start();
-  }
-
-  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
-    if (event.repeat || (event.key !== " " && event.key !== "Enter")) return;
-    event.preventDefault();
-    void start();
-  }
-
-  function handleKeyUp(event: KeyboardEvent<HTMLButtonElement>): void {
-    if (event.key !== " " && event.key !== "Enter") return;
-    event.preventDefault();
+  function toggle(): void {
+    if (recovery === "failed") {
+      retry();
+      return;
+    }
+    if (state === "idle") {
+      void start();
+      return;
+    }
     stop();
   }
 
@@ -609,9 +603,9 @@ export function VoiceInput({
   return (
     <Button
       type="button"
-      variant={retrying ? "outline" : state === "idle" ? "default" : "destructive"}
+      variant={retrying ? "outline" : "default"}
       size="icon"
-      className={`size-11 shrink-0 rounded-full ${state === "idle" || retrying ? "" : "text-destructive-foreground"}`}
+      className="size-11 shrink-0 rounded-full"
       disabled={disabled || recovering}
       aria-label={
         retrying
@@ -619,17 +613,11 @@ export function VoiceInput({
           : recovering
             ? "Reconnecting voice"
             : state === "idle"
-              ? "Hold to talk"
-              : "Release to send voice input"
+              ? "Start voice input"
+              : "Stop voice input"
       }
       aria-pressed={state !== "idle"}
-      onClick={retrying ? retry : undefined}
-      onPointerDown={retrying || recovering ? undefined : handlePointerDown}
-      onPointerUp={retrying || recovering ? undefined : stop}
-      onPointerCancel={retrying || recovering ? undefined : stop}
-      onPointerLeave={retrying || recovering ? undefined : stop}
-      onKeyDown={retrying || recovering ? undefined : handleKeyDown}
-      onKeyUp={retrying || recovering ? undefined : handleKeyUp}
+      onClick={toggle}
     >
       {retrying ? (
         <RotateCcw className="size-4" />

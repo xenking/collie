@@ -788,7 +788,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               onError={(message) => setStatus(message, "error")}
             />
           )}
-          {(!voiceEnabled || input.trim()) && (
+          {(!voiceEnabled || (input.trim() && voice === null)) && (
             forcingSend ? (
               // The pre-flight refused and the user is being offered the override. Labelled for what it
               // actually does — TYPE the text into whatever is on screen — not "send", because the

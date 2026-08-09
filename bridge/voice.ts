@@ -13,6 +13,7 @@ const TTS_SPEED = 1.015;
 const STT_FINAL_SILENCE = Buffer.alloc((STT_SAMPLE_RATE * 2) / 5);
 const STT_FINALIZATION_TIMEOUT_MS = 5_000;
 const WEBSOCKET_CONNECT_TIMEOUT_MS = 10_000;
+const RECONNECT_GRACE_MS = 60_000;
 
 export type VoiceSocketData = {
   paneId: string;
@@ -124,6 +125,7 @@ type SttTurn = {
 type TtsTurn = {
   generation: number;
   streamId: string;
+  text: string;
 };
 
 type TtsResponse = {
@@ -167,15 +169,37 @@ export class TurnController {
   #ttsKeepalive: ReturnType<typeof setInterval> | null = null;
   #handedOff = false;
   #closed = false;
+  readonly #socketData: VoiceSocketData;
+  private ws: TurnSocket | null;
 
   constructor(
     private readonly cfg: TurnConfig,
     private readonly audit: TurnAudit,
-    private readonly ws: TurnSocket,
-  ) {}
+    ws: TurnSocket,
+  ) {
+    this.ws = ws;
+    this.#socketData = ws.data;
+  }
 
   owns(ws: VoiceSocket): boolean {
     return this.ws === ws;
+  }
+
+  get detached(): boolean {
+    return this.ws === null;
+  }
+
+  attach(ws: VoiceSocket): boolean {
+    if (this.#closed || !this.#handedOff || this.ws !== null) return false;
+    this.ws = ws;
+    return true;
+  }
+
+  detach(ws: VoiceSocket): boolean {
+    if (!this.owns(ws) || !this.#handedOff) return false;
+    this.ws = null;
+    this.#pauseSpeechForReconnect();
+    return true;
   }
 
   get handedOff(): boolean {
@@ -191,6 +215,7 @@ export class TurnController {
     this.#tts?.close();
     this.#stt = null;
     this.#tts = null;
+    this.ws = null;
   }
 
   async start(): Promise<void> {
@@ -203,7 +228,7 @@ export class TurnController {
     this.#phase = "listening";
     this.#pendingStart = generation;
     this.#pendingEnd = null;
-    send(this.ws, { kind: "clear", generation });
+    this.#send({ kind: "clear", generation });
     this.#state();
 
     if (prior) {
@@ -233,7 +258,7 @@ export class TurnController {
   audio(data: Uint8Array): void {
     const turn = this.#sttTurn;
     if (!turn || turn.generation !== this.#generation || this.#phase !== "listening") {
-      send(this.ws, { kind: "error", message: "Microphone stream is not ready" });
+      this.#send({ kind: "error", message: "Microphone stream is not ready" });
       return;
     }
     try {
@@ -249,13 +274,13 @@ export class TurnController {
     return true;
   }
 
-  /** A replacement browser socket resumes a completed remote handoff; active turns are never resumed. */
+  /** A replacement browser socket resumes a completed remote handoff and any queued speech. */
   resume(): boolean {
-    if (this.#closed || this.#phase !== "idle") return false;
+    if (this.#closed || this.ws === null || (this.#phase !== "idle" && this.#phase !== "working")) return false;
     this.#handedOff = true;
+    this.#resumeQueuedSpeech();
     return true;
   }
-
 
   release(): void {
     this.#handedOff = false;
@@ -267,12 +292,16 @@ export class TurnController {
 
   speak(text: string): boolean {
     if (this.#closed || !this.#handedOff || !text.trim()) return false;
+    if (this.ws === null) {
+      this.#queuedSpeech.push(text);
+      return true;
+    }
     if (this.#speech || this.#awaitingPlayback) {
       this.#queuedSpeech.push(text);
       return true;
     }
     if (this.#phase !== "working" && this.#phase !== "idle") return false;
-    const speech = { generation: this.#generation, streamId: crypto.randomUUID() };
+    const speech = { generation: this.#generation, streamId: crypto.randomUUID(), text };
     this.#speech = speech;
     void this.#beginSpeech(speech, text);
     return true;
@@ -282,20 +311,50 @@ export class TurnController {
     const speech = this.#awaitingPlayback;
     if (
       !speech ||
-      generation !== this.#generation ||
-      generation !== speech.generation ||
       streamId !== speech.streamId ||
+      generation !== speech.generation ||
       this.#phase !== "speaking"
-    ) return;
+    ) {
+      return;
+    }
     this.#awaitingPlayback = null;
     this.#phase = "idle";
     this.#state();
+    this.#resumeQueuedSpeech();
+  }
+
+  #resumeQueuedSpeech(): void {
+    if (this.ws === null || this.#speech || this.#awaitingPlayback) return;
     const next = this.#queuedSpeech.shift();
     if (next) this.speak(next);
   }
 
+  #pauseSpeechForReconnect(): void {
+    const activeSpeech = this.#speech;
+    const replay = activeSpeech ?? this.#awaitingPlayback;
+    this.#speech = null;
+    this.#awaitingPlayback = null;
+    if (replay) this.#queuedSpeech.unshift(replay.text);
+    if (activeSpeech) {
+      try {
+        this.#tts?.send(JSON.stringify({ stream_id: activeSpeech.streamId, cancel: true }));
+      } catch {
+        this.#onTtsClose(this.#tts);
+      }
+    }
+    if (this.#phase === "speaking") this.#phase = "idle";
+  }
+
+  #send(message: Record<string, unknown>): void {
+    if (this.ws) send(this.ws, message);
+  }
+
+  #sendBinary(bytes: Uint8Array): void {
+    this.ws?.send(bytes);
+  }
+
   #state(caption?: { role: "user" | "assistant"; text: string; provisional: boolean }): void {
-    send(this.ws, { kind: "voice-state", generation: this.#generation, phase: this.#phase, ...(caption ? { caption } : {}) });
+    this.#send({ kind: "voice-state", generation: this.#generation, phase: this.#phase, ...(caption ? { caption } : {}) });
   }
 
   #isCurrent(generation: number): boolean {
@@ -317,7 +376,7 @@ export class TurnController {
     const turn = { generation, finalText: "", finalizing: false };
     this.#sttTurn = turn;
     this.#pendingStart = null;
-    send(this.ws, { kind: "recording", generation });
+    this.#send({ kind: "recording", generation });
     if (this.#pendingEnd === generation) this.#finalizeStt(turn);
   }
 
@@ -405,14 +464,14 @@ export class TurnController {
       const text = turn.finalText.trim();
       this.audit.record({
         action: "voice.transcript",
-        paneId: this.ws.data.paneId,
-        session: this.ws.data.session,
-        device: this.ws.data.device,
+        paneId: this.#socketData.paneId,
+        session: this.#socketData.session,
+        device: this.#socketData.device,
         detail: { text, length: text.length },
       });
       this.#phase = text ? "working" : "idle";
       this.#state(text ? { role: "user", text, provisional: false } : undefined);
-      send(this.ws, { kind: "final", generation: turn.generation, text });
+      this.#send({ kind: "final", generation: turn.generation, text });
     }
     void this.#beginPendingStt();
   }
@@ -503,7 +562,7 @@ export class TurnController {
       this.#speech = null;
       if (!this.#isCurrent(speech.generation) || this.#phase !== "speaking") return;
       this.#awaitingPlayback = speech;
-      send(this.ws, { kind: "tts-end", generation: speech.generation, streamId });
+      this.#send({ kind: "tts-end", generation: speech.generation, streamId });
       return;
     }
     if (!speech || speech.streamId !== streamId || !this.#isCurrent(speech.generation)) return;
@@ -513,8 +572,8 @@ export class TurnController {
       return;
     }
     if (typeof response.audio !== "string") return;
-    send(this.ws, { kind: "tts", generation: speech.generation, streamId, sampleRate: SAMPLE_RATE });
-    this.ws.send(Buffer.from(response.audio, "base64"));
+    this.#send({ kind: "tts", generation: speech.generation, streamId, sampleRate: SAMPLE_RATE });
+    this.#sendBinary(Buffer.from(response.audio, "base64"));
   }
 
   #onTtsClose(tts: WebSocket | null): void {
@@ -544,7 +603,7 @@ export class TurnController {
     this.#queuedSpeech = [];
     this.#phase = "idle";
     this.#state();
-    send(this.ws, { kind: "error", message });
+    this.#send({ kind: "error", message });
     if (error) console.warn(`[voice] ${message}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
@@ -555,6 +614,7 @@ export class TurnController {
  */
 export class VoiceBroker {
   #relays = new Map<string, TurnController>();
+  #reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly cfg: Config,
@@ -562,33 +622,41 @@ export class VoiceBroker {
   ) {}
 
   async open(ws: VoiceSocket): Promise<void> {
-    const prior = this.#relays.get(ws.data.sessionFile);
-    if (prior) prior.close();
+    const session = ws.data.sessionFile;
+    const prior = this.#relays.get(session);
+    if (prior?.attach(ws)) {
+      this.#clearReconnectExpiry(session);
+      this.#recordConnect(ws);
+      send(ws, { kind: "ready" });
+      return;
+    }
+    this.#clearReconnectExpiry(session);
+    if (prior) {
+      prior.close();
+      this.#relays.delete(session);
+    }
     try {
-      await this.#setRemote(ws.data.sessionFile, "remote-start");
+      await this.#setRemote(session, "remote-start");
     } catch (error) {
       send(ws, { kind: "error", message: "Laptop voice relay is unavailable" });
       ws.close(1011, "voice relay unavailable");
       console.warn(`[voice] couldn't activate laptop relay: ${error instanceof Error ? error.message : String(error)}`);
       return;
     }
-    this.#relays.set(ws.data.sessionFile, new TurnController(this.cfg, this.audit, ws));
-    this.audit.record({
-      action: "voice.connect",
-      paneId: ws.data.paneId,
-      session: ws.data.session,
-      device: ws.data.device,
-      detail: {},
-    });
+    this.#relays.set(session, new TurnController(this.cfg, this.audit, ws));
+    this.#recordConnect(ws);
     send(ws, { kind: "ready" });
   }
 
   close(ws: VoiceSocket): void {
-    const relay = this.#relays.get(ws.data.sessionFile);
+    const session = ws.data.sessionFile;
+    const relay = this.#relays.get(session);
     if (!relay || !relay.owns(ws)) return;
-    void this.#setRemote(ws.data.sessionFile, "remote-release").catch(() => undefined);
-    relay.close();
-    this.#relays.delete(ws.data.sessionFile);
+    if (relay.detach(ws)) {
+      this.#scheduleReconnectExpiry(session, relay);
+      return;
+    }
+    this.#releaseRelay(session, relay);
   }
 
   async message(ws: VoiceSocket, message: string | Uint8Array): Promise<void> {
@@ -639,7 +707,40 @@ export class VoiceBroker {
     const relay = this.#relays.get(sessionFile);
     if (!relay) return false;
     relay.release();
+    if (relay.detached) this.#releaseRelay(sessionFile, relay);
     return true;
+  }
+
+  #recordConnect(ws: VoiceSocket): void {
+    this.audit.record({
+      action: "voice.connect",
+      paneId: ws.data.paneId,
+      session: ws.data.session,
+      device: ws.data.device,
+      detail: {},
+    });
+  }
+
+  #clearReconnectExpiry(session: string): void {
+    const timer = this.#reconnectTimers.get(session);
+    if (timer) clearTimeout(timer);
+    this.#reconnectTimers.delete(session);
+  }
+
+  #scheduleReconnectExpiry(session: string, relay: TurnController): void {
+    if (this.#reconnectTimers.has(session)) return;
+    this.#reconnectTimers.set(session, setTimeout(() => {
+      this.#reconnectTimers.delete(session);
+      if (this.#relays.get(session) === relay && relay.detached) this.#releaseRelay(session, relay);
+    }, RECONNECT_GRACE_MS));
+  }
+
+  #releaseRelay(session: string, relay: TurnController): void {
+    this.#clearReconnectExpiry(session);
+    if (this.#relays.get(session) !== relay) return;
+    void this.#setRemote(session, "remote-release").catch(() => undefined);
+    relay.close();
+    this.#relays.delete(session);
   }
 
   async #setRemote(session: string, kind: "remote-start" | "remote-release"): Promise<void> {

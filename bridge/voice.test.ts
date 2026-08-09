@@ -245,7 +245,7 @@ describe("Soniox proxy contracts", () => {
 });
 
 describe("VoiceBroker remote lease", () => {
-  test("releases a browser relay that closes after successful handoff", async () => {
+  test("queues remote replies while a handed-off browser reconnects", async () => {
     const nativeFetch = globalThis.fetch;
     const nativeWebSocket = globalThis.WebSocket;
     const tokenFile = join(tmpdir(), `collie-voice-${crypto.randomUUID()}.token`);
@@ -258,7 +258,7 @@ describe("VoiceBroker remote lease", () => {
       return new Response(null, { status: 204 });
     });
     try {
-      const browser = relay();
+      const firstBrowser = relay();
       const broker = new VoiceBroker({
         sonioxApiKey: "key",
         sonioxTtsVoice: "voice",
@@ -266,15 +266,34 @@ describe("VoiceBroker remote lease", () => {
         voiceControlTokenFile: tokenFile,
       } as Config, { record() {} } as never);
 
-      await broker.open(browser as never);
-      await broker.message(browser as never, JSON.stringify({ kind: "start" }));
+      await broker.open(firstBrowser as never);
+      await broker.message(firstBrowser as never, JSON.stringify({ kind: "start" }));
       const stt = FakeSonioxSocket.connections[0];
-      await broker.message(browser as never, JSON.stringify({ kind: "end" }));
+      await broker.message(firstBrowser as never, JSON.stringify({ kind: "end" }));
       stt?.message({ tokens: [{ text: "Привет", is_final: true }, { text: "<fin>", is_final: true }] });
-      await broker.message(browser as never, JSON.stringify({ kind: "handoff", generation: 1 }));
-      broker.close(browser as never);
+      await broker.message(firstBrowser as never, JSON.stringify({ kind: "handoff", generation: 1 }));
+      broker.close(firstBrowser as never);
       await new Promise(resolve => setTimeout(resolve, 0));
 
+      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start"]);
+      expect(broker.speak("/session", "Ответ")).toBe(true);
+
+      const reconnectedBrowser = relay();
+      await broker.open(reconnectedBrowser as never);
+      await broker.message(reconnectedBrowser as never, JSON.stringify({ kind: "resume" }));
+      const tts = FakeSonioxSocket.connections[1];
+      if (!tts) throw new Error("missing TTS socket");
+      await tts.sentOnce.promise;
+      const id = streamId(tts);
+      tts.message({ stream_id: id, audio: Buffer.from([1, 0]).toString("base64") });
+
+      expect(reconnectedBrowser.messages).toContain(JSON.stringify({ kind: "resumed", accepted: true }));
+      expect(reconnectedBrowser.binary).toHaveLength(1);
+      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start"]);
+
+      broker.release("/session");
+      broker.close(reconnectedBrowser as never);
+      await new Promise(resolve => setTimeout(resolve, 0));
       expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start", "remote-release"]);
     } finally {
       Reflect.set(globalThis, "fetch", nativeFetch);
@@ -283,7 +302,7 @@ describe("VoiceBroker remote lease", () => {
     }
   });
 
-  test("restores remote ownership after a browser relay reconnects", async () => {
+  test("keeps remote ownership during the reconnect grace", async () => {
     const nativeFetch = globalThis.fetch;
     const tokenFile = join(tmpdir(), `collie-voice-${crypto.randomUUID()}.token`);
     const remoteEvents: Array<{ kind: string }> = [];
@@ -308,7 +327,7 @@ describe("VoiceBroker remote lease", () => {
 
       broker.close(browser as never);
       await new Promise(resolve => setTimeout(resolve, 0));
-      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start", "remote-release"]);
+      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start"]);
     } finally {
       Reflect.set(globalThis, "fetch", nativeFetch);
       await rm(tokenFile, { force: true });

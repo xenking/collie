@@ -29,7 +29,7 @@ vi.mock("./voice-input", () => ({
   }) {
     voiceInput.onTranscript = props.onTranscript;
     voiceInput.onVoiceStateChange = props.onVoiceStateChange;
-    return props.showControl ? <button type="button" disabled={props.disabled} aria-label="Hold to talk" /> : null;
+    return props.showControl ? <button type="button" disabled={props.disabled} aria-label="Start voice input" /> : null;
   },
 }));
 
@@ -124,23 +124,32 @@ function renderComposerWithStatus(overrides: Partial<ComponentProps<typeof Compo
 describe("Composer — voice capability", () => {
   it("hides microphone capture until the bridge enables it", () => {
     renderComposer();
-    expect(screen.queryByRole("button", { name: "Hold to talk" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start voice input" })).not.toBeInTheDocument();
   });
 
-  it("uses the Telegram-style trailing action: hold-to-talk when empty, Send when typed", async () => {
+  it("uses one Telegram-style trailing action: tap-to-toggle when empty, Send when typed", async () => {
     const user = userEvent.setup();
     renderComposer({ voiceEnabled: true });
 
-    expect(screen.getByRole("button", { name: "Hold to talk" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Start voice input" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
 
     const input = screen.getByPlaceholderText("Type a reply…");
     await user.type(input, "Привет");
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "Hold to talk" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start voice input" })).not.toBeInTheDocument();
 
     await user.clear(input);
-    expect(screen.getByRole("button", { name: "Hold to talk" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Start voice input" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
+
+    act(() => voiceInput.onVoiceStateChange!({
+      generation: 1,
+      phase: "listening",
+      caption: { role: "user", text: "Привет", provisional: true },
+    }));
+    expect(input).toHaveValue("Привет");
+    expect(screen.getByRole("button", { name: "Start voice input" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
   });
 });
