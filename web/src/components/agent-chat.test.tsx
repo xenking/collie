@@ -52,14 +52,14 @@ function renderChat(overrides: Partial<ComponentProps<typeof AgentChat>> = {}) {
 }
 
 describe("AgentChat — voice capability", () => {
-  it("shows push-to-talk only when the bridge enables voice", async () => {
+  it("shows voice control only when the bridge enables voice", async () => {
     server.use(
       http.get("/api/config", () =>
         HttpResponse.json({ push: false, vapidPublicKey: "", voice: true }),
       ),
     );
     renderChat();
-    expect(await screen.findByRole("button", { name: "Hold to talk" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Start voice input" })).toBeEnabled();
   });
 });
 

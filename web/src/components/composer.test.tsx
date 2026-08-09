@@ -45,10 +45,11 @@ function renderComposer(overrides: Partial<ComponentProps<typeof Composer>> = {}
     text: "pane output",
     terminalDraft: null,
     rawTerminalDraft: null,
-    prefs: { wrap: true, fontSize: 11, rawTerminal: false },
+    prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle" },
     setWrap: vi.fn(),
     stepFontSize: vi.fn(),
     setRawTerminal: vi.fn(),
+    setVoiceButtonMode: vi.fn(),
     onSent: vi.fn(),
     ...overrides,
   };
@@ -75,10 +76,11 @@ function renderComposerWithStatus(overrides: Partial<ComponentProps<typeof Compo
     text: "pane output",
     terminalDraft: null,
     rawTerminalDraft: null,
-    prefs: { wrap: true, fontSize: 11, rawTerminal: false },
+    prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle" },
     setWrap: vi.fn(),
     stepFontSize: vi.fn(),
     setRawTerminal: vi.fn(),
+    setVoiceButtonMode: vi.fn(),
     onSent: vi.fn(),
     ...overrides,
   };
@@ -100,12 +102,12 @@ function renderComposerWithStatus(overrides: Partial<ComponentProps<typeof Compo
 describe("Composer — voice capability", () => {
   it("hides microphone capture until the bridge enables it", () => {
     renderComposer();
-    expect(screen.queryByRole("button", { name: "Hold to talk" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start voice input" })).not.toBeInTheDocument();
   });
 
   it("renders microphone capture when the bridge enables it", () => {
     renderComposer({ voiceEnabled: true });
-    expect(screen.getByRole("button", { name: "Hold to talk" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Start voice input" })).toBeEnabled();
   });
 });
 
@@ -245,10 +247,11 @@ describe("Composer — send", () => {
       text: "pane output",
       terminalDraft: null,
       rawTerminalDraft: null,
-      prefs: { wrap: true, fontSize: 11, rawTerminal: false },
+      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle" },
       setWrap: vi.fn(),
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
+      setVoiceButtonMode: vi.fn(),
       onSent: vi.fn(),
     };
     const router = createMemoryRouter([
@@ -395,10 +398,11 @@ function renderDraftHarness(overrides: Partial<ComponentProps<typeof Composer>> 
       readOnly: false,
       dialogPresent: false,
       text: "pane output",
-      prefs: { wrap: true, fontSize: 11, rawTerminal: false },
+      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle" },
       setWrap: vi.fn(),
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
+      setVoiceButtonMode: vi.fn(),
       onSent: vi.fn(),
       ...rest,
       terminalDraft: stable,
@@ -665,10 +669,11 @@ describe("Composer — in-flight echo suppression (match-last-sent)", () => {
       text: "pane output",
       terminalDraft: draft,
       rawTerminalDraft: draft,
-      prefs: { wrap: true, fontSize: 11, rawTerminal: false },
+      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle" },
       setWrap: vi.fn(),
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
+      setVoiceButtonMode: vi.fn(),
       onSent: vi.fn(),
     };
     return (
@@ -1048,6 +1053,18 @@ describe("Composer — display prefs behind the gear", () => {
     expect(screen.getByRole("switch", { name: "Wrap lines" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Raw terminal" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Decrease font size" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Switch" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Push to talk" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("forwards the selected voice button mode", async () => {
+    const user = userEvent.setup();
+    const props = renderComposer();
+
+    await user.click(screen.getByRole("button", { name: "Display settings" }));
+    await user.click(screen.getByRole("button", { name: "Push to talk" }));
+
+    expect(props.setVoiceButtonMode).toHaveBeenCalledWith("push-to-talk");
   });
 
   it("the Display dock shares the single drawer slot with Keys", async () => {
@@ -1199,10 +1216,11 @@ describe("Composer — draft persistence", () => {
       text: "pane output",
       terminalDraft: null,
       rawTerminalDraft: null,
-      prefs: { wrap: true, fontSize: 11, rawTerminal: false },
+      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle" },
       setWrap: vi.fn(),
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
+      setVoiceButtonMode: vi.fn(),
       onSent: vi.fn(),
       ...overrides,
     };

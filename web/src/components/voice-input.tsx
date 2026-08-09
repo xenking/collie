@@ -3,10 +3,12 @@ import type { KeyboardEvent, MutableRefObject, PointerEvent } from "react";
 import { Mic, Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import type { VoiceButtonMode } from "@/hooks/use-display-prefs";
 
 type VoiceInputProps = {
   paneId: string;
   session?: string;
+  mode: VoiceButtonMode;
   disabled: boolean;
   onTranscript: (text: string) => Promise<boolean>;
   onTranscriptChange: (text: string | null) => void;
@@ -106,10 +108,18 @@ function websocketUrl(paneId: string, session?: string): string {
 }
 
 /**
- * Russian push-to-talk over the bridge proxy. The browser has microphone access; only the server has
+ * Russian voice input over the bridge proxy. The browser has microphone access; only the server has
  * SONIOX_API_KEY, and the final text takes Collie's existing guarded reply route into OMP.
  */
-export function VoiceInput({ paneId, session, disabled, onTranscript, onTranscriptChange, onError }: VoiceInputProps) {
+export function VoiceInput({
+  paneId,
+  session,
+  mode,
+  disabled,
+  onTranscript,
+  onTranscriptChange,
+  onError,
+}: VoiceInputProps) {
   const socketRef = useRef<WebSocket | null>(null);
   const connectingRef = useRef<Promise<WebSocket> | null>(null);
   const captureRef = useRef<Capture | null>(null);
@@ -296,27 +306,32 @@ export function VoiceInput({ paneId, session, disabled, onTranscript, onTranscri
     setState(socket ? "stopping" : "idle");
   }
 
-  function handlePointerDown(event: PointerEvent<HTMLButtonElement>) {
-    if (!event.isPrimary) return;
+  function handlePointerDown(event: PointerEvent<HTMLButtonElement>): void {
+    if (mode !== "push-to-talk" || !event.isPrimary) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     void start();
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
-    if (event.repeat || (event.key !== " " && event.key !== "Enter")) return;
+  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
+    if (mode !== "push-to-talk" || event.repeat || (event.key !== " " && event.key !== "Enter")) return;
     event.preventDefault();
     void start();
   }
 
-  function handleKeyUp(event: KeyboardEvent<HTMLButtonElement>) {
-    if (event.key !== " " && event.key !== "Enter") return;
+  function handleKeyUp(event: KeyboardEvent<HTMLButtonElement>): void {
+    if (mode !== "push-to-talk" || (event.key !== " " && event.key !== "Enter")) return;
     event.preventDefault();
     stop();
   }
 
   function handleClick(): void {
-    // Fallback for browsers that deliver a click but lose the matching pointerup.
-    if (wantsRecordingRef.current) stop();
+    if (mode === "push-to-talk") {
+      if (wantsRecordingRef.current) stop();
+    } else if (wantsRecordingRef.current) {
+      stop();
+    } else {
+      void start();
+    }
   }
 
   return (
@@ -326,12 +341,20 @@ export function VoiceInput({ paneId, session, disabled, onTranscript, onTranscri
       size="icon"
       className="rounded-full text-muted-foreground"
       disabled={disabled}
-      aria-label={state === "idle" ? "Hold to talk" : "Release to send voice input"}
+      aria-label={
+        state === "idle"
+          ? mode === "push-to-talk"
+            ? "Hold to talk"
+            : "Start voice input"
+          : mode === "push-to-talk"
+            ? "Release to send voice input"
+            : "Stop and send voice input"
+      }
       aria-pressed={state !== "idle"}
       onPointerDown={handlePointerDown}
-      onPointerUp={stop}
-      onPointerCancel={stop}
-      onPointerLeave={stop}
+      onPointerUp={mode === "push-to-talk" ? stop : undefined}
+      onPointerCancel={mode === "push-to-talk" ? stop : undefined}
+      onPointerLeave={mode === "push-to-talk" ? stop : undefined}
       onKeyDown={handleKeyDown}
       onKeyUp={handleKeyUp}
       onClick={handleClick}

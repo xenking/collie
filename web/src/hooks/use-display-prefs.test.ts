@@ -5,31 +5,39 @@ import { useDisplayPrefs } from "./use-display-prefs";
 const STORAGE_KEY = "collie:display-prefs:v4";
 
 describe("useDisplayPrefs", () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => window.localStorage.clear());
 
   it("returns defaults when localStorage is empty", () => {
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false });
+    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle" });
   });
 
   it("persists wrap=true and reloads it on mount", () => {
     const { result } = renderHook(() => useDisplayPrefs());
     act(() => result.current.setWrap(true));
     expect(result.current.prefs.wrap).toBe(true);
-    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).wrap).toBe(true);
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY)!).wrap).toBe(true);
   });
 
   it("persists wrap=false and reloads it on mount", () => {
     const { result } = renderHook(() => useDisplayPrefs());
     act(() => result.current.setWrap(false));
     expect(result.current.prefs.wrap).toBe(false);
-    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).wrap).toBe(false);
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY)!).wrap).toBe(false);
   });
 
   it("loads persisted prefs from localStorage on mount", () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ wrap: false, fontSize: 14, rawTerminal: true }));
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ wrap: false, fontSize: 14, rawTerminal: true, voiceButtonMode: "push-to-talk" }),
+    );
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: false, fontSize: 14, rawTerminal: true });
+    expect(result.current.prefs).toEqual({
+      wrap: false,
+      fontSize: 14,
+      rawTerminal: true,
+      voiceButtonMode: "push-to-talk",
+    });
   });
 
   it("persists rawTerminal and reloads it on mount (the escape hatch survives a reload)", () => {
@@ -37,9 +45,16 @@ describe("useDisplayPrefs", () => {
     expect(result.current.prefs.rawTerminal).toBe(false);
     act(() => result.current.setRawTerminal(true));
     expect(result.current.prefs.rawTerminal).toBe(true);
-    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).rawTerminal).toBe(true);
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY)!).rawTerminal).toBe(true);
     const { result: reloaded } = renderHook(() => useDisplayPrefs());
     expect(reloaded.current.prefs.rawTerminal).toBe(true);
+  });
+
+  it("persists the selected voice button mode", () => {
+    const { result } = renderHook(() => useDisplayPrefs());
+    act(() => result.current.setVoiceButtonMode("push-to-talk"));
+    expect(result.current.prefs.voiceButtonMode).toBe("push-to-talk");
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY)!).voiceButtonMode).toBe("push-to-talk");
   });
 
   it("setFontSize clamps below minimum to 9", () => {
@@ -73,14 +88,14 @@ describe("useDisplayPrefs", () => {
   });
 
   it("falls back to defaults on malformed JSON", () => {
-    localStorage.setItem(STORAGE_KEY, "not-json{{{");
+    window.localStorage.setItem(STORAGE_KEY, "not-json{{{");
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false });
+    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle" });
   });
 
   it("falls back to defaults when stored value is not an object", () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(42));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(42));
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false });
+    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle" });
   });
 });

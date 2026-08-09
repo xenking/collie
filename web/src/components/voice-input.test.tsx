@@ -68,6 +68,7 @@ describe("VoiceInput", () => {
       <StrictMode>
         <VoiceInput
           paneId="w1:p4"
+          mode="toggle"
           disabled={false}
           onTranscript={onTranscript}
           onTranscriptChange={onTranscriptChange}
@@ -76,13 +77,13 @@ describe("VoiceInput", () => {
       </StrictMode>,
     );
 
-    const button = screen.getByRole("button", { name: "Hold to talk" });
-    fireEvent.keyDown(button, { key: " " });
+    const button = screen.getByRole("button", { name: "Start voice input" });
+    fireEvent.click(button);
     await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
     await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"start"}'));
     FakeSocket.instances[0].emit({ kind: "recording" });
     await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce());
-    fireEvent.keyUp(button, { key: " " });
+    fireEvent.click(screen.getByRole("button", { name: "Stop and send voice input" }));
     FakeSocket.instances[0].emit({ kind: "transcript", text: "Привет" });
     FakeSocket.instances[0].emit({ kind: "final", text: "Привет" });
 
@@ -93,10 +94,30 @@ describe("VoiceInput", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
-  it("stops an active PTT turn when the browser lost pointerup but delivers click", async () => {
+  it("stops an active voice turn on its second click", async () => {
     render(
       <VoiceInput
         paneId="w1:p4"
+        mode="toggle"
+        disabled={false}
+        onTranscript={vi.fn(async () => true)}
+        onTranscriptChange={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Start voice input" });
+    fireEvent.click(button);
+    await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"start"}'));
+    fireEvent.click(screen.getByRole("button", { name: "Stop and send voice input" }));
+    expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"end"}');
+  });
+
+  it("ends only on release in push-to-talk mode", async () => {
+    render(
+      <VoiceInput
+        paneId="w1:p4"
+        mode="push-to-talk"
         disabled={false}
         onTranscript={vi.fn(async () => true)}
         onTranscriptChange={vi.fn()}
@@ -108,31 +129,29 @@ describe("VoiceInput", () => {
     Object.defineProperty(button, "setPointerCapture", { value: vi.fn() });
     fireEvent.pointerDown(button, { pointerId: 1, isPrimary: true });
     await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"start"}'));
-    fireEvent.click(button);
+    fireEvent.pointerUp(button, { pointerId: 1, isPrimary: true });
     expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"end"}');
   });
 
-  it("returns to idle when PTT ends while its socket is still connecting", async () => {
+  it("returns to idle when the second click ends a socket still connecting", async () => {
     FakeSocket.autoReady = false;
     render(
       <VoiceInput
         paneId="w1:p4"
         disabled={false}
+        mode="toggle"
         onTranscript={vi.fn(async () => true)}
         onTranscriptChange={vi.fn()}
         onError={vi.fn()}
       />,
     );
 
-    const button = screen.getByRole("button", { name: "Hold to talk" });
-    Object.defineProperty(button, "setPointerCapture", { value: vi.fn() });
-    fireEvent.pointerDown(button, { pointerId: 1, isPrimary: true });
+    fireEvent.click(screen.getByRole("button", { name: "Start voice input" }));
     await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
-    fireEvent.pointerUp(button, { pointerId: 1, isPrimary: true });
-    fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "Stop and send voice input" }));
     FakeSocket.instances[0].emit({ kind: "ready" });
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Hold to talk" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start voice input" })).toBeInTheDocument());
     expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"release"}');
   });
 

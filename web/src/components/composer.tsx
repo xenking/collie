@@ -62,6 +62,7 @@ interface ComposerProps {
   setWrap: (wrap: boolean) => void;
   stepFontSize: (delta: number) => void;
   setRawTerminal: (raw: boolean) => void;
+  setVoiceButtonMode: (mode: DisplayPrefs["voiceButtonMode"]) => void;
   /** Snap the mirror to the live tail (follow + revalidate + scroll) after a successful send. */
   onSent: () => void;
 }
@@ -128,7 +129,7 @@ function ComposerDock({
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { paneId, session, agent, isShell, gone, readOnly, dialogPresent, voiceEnabled = false, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, onSent },
+  { paneId, session, agent, isShell, gone, readOnly, dialogPresent, voiceEnabled = false, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setVoiceButtonMode, onSent },
   ref,
 ) {
   const revalidator = useRevalidator();
@@ -632,6 +633,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               setWrap={setWrap}
               stepFontSize={stepFontSize}
               setRawTerminal={setRawTerminal}
+              setVoiceButtonMode={setVoiceButtonMode}
             />
           </ComposerDock>
         )}
@@ -735,6 +737,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               paneId={paneId}
               session={session}
               disabled={locked || dialogPresent || sending}
+              mode={prefs.voiceButtonMode}
               onTranscript={(transcript) => send(transcript, false)}
               onTranscriptChange={setVoiceTranscript}
               onError={(message) => setStatus(message, "error")}

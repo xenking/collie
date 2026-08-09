@@ -3,6 +3,8 @@ import { useCallback, useState } from "react";
 // Terminal mirror display preferences, persisted in localStorage.
 // Safe to call in SSR contexts (localStorage guarded throughout).
 
+export type VoiceButtonMode = "toggle" | "push-to-talk";
+
 export interface DisplayPrefs {
   /** Whether the mirror wraps long lines (default: true). The mirror is mostly agent prose, and a
    *  phone shows ~45-50 columns against panes herdr spawns at desktop width (190 in one reporter's
@@ -18,12 +20,14 @@ export interface DisplayPrefs {
    * The universal fallback, made user-controllable.
    */
   rawTerminal: boolean;
+  /** How a voice turn ends: second tap, or releasing a held button. */
+  voiceButtonMode: VoiceButtonMode;
 }
 
 const STORAGE_KEY = "collie:display-prefs:v4";
 export const FONT_MIN = 9;
 export const FONT_MAX = 16;
-const DEFAULTS: DisplayPrefs = { wrap: true, fontSize: 12, rawTerminal: false };
+const DEFAULTS: DisplayPrefs = { wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle" };
 
 function clampFont(n: number): number {
   return Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(n)));
@@ -31,7 +35,7 @@ function clampFont(n: number): number {
 
 function loadPrefs(): DisplayPrefs {
   try {
-    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
+    const raw = typeof window === "undefined" ? null : window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULTS;
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) return DEFAULTS;
@@ -40,6 +44,7 @@ function loadPrefs(): DisplayPrefs {
       wrap: typeof p.wrap === "boolean" ? p.wrap : DEFAULTS.wrap,
       fontSize: typeof p.fontSize === "number" ? clampFont(p.fontSize) : DEFAULTS.fontSize,
       rawTerminal: typeof p.rawTerminal === "boolean" ? p.rawTerminal : DEFAULTS.rawTerminal,
+      voiceButtonMode: p.voiceButtonMode === "push-to-talk" ? "push-to-talk" : DEFAULTS.voiceButtonMode,
     };
   } catch {
     return DEFAULTS;
@@ -48,8 +53,8 @@ function loadPrefs(): DisplayPrefs {
 
 function savePrefs(prefs: DisplayPrefs): void {
   try {
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
     }
   } catch {
     // Ignore quota / SSR write errors.
@@ -66,6 +71,8 @@ export interface UseDisplayPrefsReturn {
   stepFontSize: (delta: number) => void;
   /** Toggle or explicitly set the raw-terminal escape hatch. */
   setRawTerminal: (raw: boolean) => void;
+  /** Select whether the microphone button toggles or runs while held. */
+  setVoiceButtonMode: (mode: VoiceButtonMode) => void;
 }
 
 export function useDisplayPrefs(): UseDisplayPrefsReturn {
@@ -103,5 +110,13 @@ export function useDisplayPrefs(): UseDisplayPrefsReturn {
     });
   }, []);
 
-  return { prefs, setWrap, setFontSize, stepFontSize, setRawTerminal };
+  const setVoiceButtonMode = useCallback((voiceButtonMode: VoiceButtonMode) => {
+    setPrefs((p) => {
+      const next: DisplayPrefs = { ...p, voiceButtonMode };
+      savePrefs(next);
+      return next;
+    });
+  }, []);
+
+  return { prefs, setWrap, setFontSize, stepFontSize, setRawTerminal, setVoiceButtonMode };
 }
