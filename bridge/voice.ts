@@ -161,6 +161,7 @@ export class TurnController {
   #pendingEnd: number | null = null;
   #speech: TtsTurn | null = null;
   #awaitingPlayback: TtsTurn | null = null;
+  #queuedSpeech: string[] = [];
   #sttFinalizationTimeout: ReturnType<typeof setTimeout> | null = null;
   #sttFinalizationTimedOut = false;
   #ttsKeepalive: ReturnType<typeof setInterval> | null = null;
@@ -250,20 +251,19 @@ export class TurnController {
 
   release(): void {
     this.#handedOff = false;
+    this.#queuedSpeech = [];
     if (this.#phase !== "working") return;
     this.#phase = "idle";
     this.#state();
   }
 
   speak(text: string): boolean {
-    if (
-      this.#closed ||
-      !this.#handedOff ||
-      (this.#phase !== "working" && this.#phase !== "idle") ||
-      this.#speech ||
-      this.#awaitingPlayback ||
-      !text.trim()
-    ) return false;
+    if (this.#closed || !this.#handedOff || !text.trim()) return false;
+    if (this.#speech || this.#awaitingPlayback) {
+      this.#queuedSpeech.push(text);
+      return true;
+    }
+    if (this.#phase !== "working" && this.#phase !== "idle") return false;
     const speech = { generation: this.#generation, streamId: crypto.randomUUID() };
     this.#speech = speech;
     void this.#beginSpeech(speech, text);
@@ -282,6 +282,8 @@ export class TurnController {
     this.#awaitingPlayback = null;
     this.#phase = "idle";
     this.#state();
+    const next = this.#queuedSpeech.shift();
+    if (next) this.speak(next);
   }
 
   #state(caption?: { role: "user" | "assistant"; text: string; provisional: boolean }): void {
@@ -518,6 +520,7 @@ export class TurnController {
   }
 
   #cancelSpeech(): void {
+    this.#queuedSpeech = [];
     this.#awaitingPlayback = null;
     const speech = this.#speech;
     if (!speech) return;
@@ -530,6 +533,7 @@ export class TurnController {
   }
 
   #fail(message: string, error?: unknown): void {
+    this.#queuedSpeech = [];
     this.#phase = "idle";
     this.#state();
     send(this.ws, { kind: "error", message });

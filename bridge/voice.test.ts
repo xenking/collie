@@ -95,7 +95,7 @@ describe("Soniox proxy contracts", () => {
     expect(voiceTokenMatches("short", "longer")).toBe(false);
   });
 
-  test("reuses persistent Soniox sockets and waits for browser playback before becoming idle", async () => {
+  test("queues remote replies until browser playback ends", async () => {
     const nativeWebSocket = globalThis.WebSocket;
     let controller: TurnController | null = null;
     FakeSonioxSocket.connections = [];
@@ -125,12 +125,12 @@ describe("Soniox proxy contracts", () => {
       const id = streamId(tts);
       tts.message({ stream_id: id, audio: Buffer.from([1, 0]).toString("base64") });
       expect(browser.binary).toHaveLength(1);
+      expect(controller.speak("Следующий ответ")).toBe(true);
       tts.message({ stream_id: id, terminated: true });
       expect(browser.messages).toContain(JSON.stringify({ kind: "tts-end", generation: 1, streamId: id }));
 
       controller.playbackEnded(1, id);
       expect(browser.messages).toContain(JSON.stringify({ kind: "voice-state", generation: 1, phase: "idle" }));
-      expect(controller.speak("Следующий ответ")).toBe(true);
       await Promise.resolve();
       const nextId = streamId(tts, -1);
       expect(nextId).not.toBe(id);
