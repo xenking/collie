@@ -3,7 +3,7 @@ import { AArrowDown, AArrowUp } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import type { DisplayPrefs, VoiceButtonMode } from "@/hooks/use-display-prefs";
+import type { DisplayPrefs, VoiceButtonMode, VoiceResultMode } from "@/hooks/use-display-prefs";
 import { FONT_MAX, FONT_MIN } from "@/hooks/use-display-prefs";
 
 // The mirror's display prefs, as LABELLED rows behind the composer's ⚙ toggle.
@@ -24,6 +24,7 @@ interface DisplayPrefsContentProps {
   stepFontSize: (delta: number) => void;
   setRawTerminal: (raw: boolean) => void;
   setVoiceButtonMode: (mode: VoiceButtonMode) => void;
+  setVoiceResultMode: (mode: VoiceResultMode) => void;
 }
 
 // One settings row: name (+ optional explanation) on the left, control on the right. Module-level so
@@ -57,6 +58,7 @@ export function DisplayPrefsContent({
   setWrap,
   stepFontSize,
   setVoiceButtonMode,
+  setVoiceResultMode,
   setRawTerminal,
 }: DisplayPrefsContentProps) {
   return (
@@ -111,6 +113,34 @@ export function DisplayPrefsContent({
               onClick={() => setVoiceButtonMode("push-to-talk")}
             >
               Push to talk
+            </Button>
+          </div>
+        }
+      />
+      <Row
+        label="Voice result"
+        hint="Send starts OMP immediately. Insert leaves the transcript in the reply box for review."
+        control={
+          <div className="grid grid-cols-2 gap-1 rounded-lg bg-background/60 p-1" aria-label="Voice result mode">
+            <Button
+              type="button"
+              variant={prefs.voiceResultMode === "send" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8 px-2 text-xs font-medium"
+              aria-pressed={prefs.voiceResultMode === "send"}
+              onClick={() => setVoiceResultMode("send")}
+            >
+              Send
+            </Button>
+            <Button
+              type="button"
+              variant={prefs.voiceResultMode === "insert" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8 px-2 text-xs font-medium"
+              aria-pressed={prefs.voiceResultMode === "insert"}
+              onClick={() => setVoiceResultMode("insert")}
+            >
+              Insert
             </Button>
           </div>
         }

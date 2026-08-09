@@ -9,7 +9,7 @@ describe("useDisplayPrefs", () => {
 
   it("returns defaults when localStorage is empty", () => {
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle" });
+    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" });
   });
 
   it("persists wrap=true and reloads it on mount", () => {
@@ -37,6 +37,7 @@ describe("useDisplayPrefs", () => {
       fontSize: 14,
       rawTerminal: true,
       voiceButtonMode: "push-to-talk",
+      voiceResultMode: "send",
     });
   });
 
@@ -90,12 +91,12 @@ describe("useDisplayPrefs", () => {
   it("falls back to defaults on malformed JSON", () => {
     window.localStorage.setItem(STORAGE_KEY, "not-json{{{");
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle" });
+    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" });
   });
 
   it("falls back to defaults when stored value is not an object", () => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(42));
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle" });
+    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" });
   });
 });

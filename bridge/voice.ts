@@ -7,8 +7,12 @@ import type { Config } from "./config.ts";
 
 const STT_URL = "wss://stt-rt.soniox.com/transcribe-websocket";
 const TTS_URL = "wss://tts-rt.soniox.com/tts-websocket";
+const STT_SAMPLE_RATE = 16_000;
 const SAMPLE_RATE = 24_000;
 const TTS_SPEED = 1.015;
+const STT_FINAL_SILENCE = Buffer.alloc((STT_SAMPLE_RATE * 2) / 5);
+const STT_FINALIZATION_TIMEOUT_MS = 5_000;
+const WEBSOCKET_CONNECT_TIMEOUT_MS = 10_000;
 
 export type VoiceSocketData = {
   paneId: string;
@@ -18,14 +22,9 @@ export type VoiceSocketData = {
 };
 
 type VoiceSocket = ServerWebSocket<VoiceSocketData>;
-
-type Relay = {
-  ws: VoiceSocket;
-  stt: WebSocket | null;
-  tts: WebSocket | null;
-  finalText: string;
-  handedOff: boolean;
-};
+type TurnConfig = Pick<Config, "sonioxApiKey" | "sonioxTtsVoice">;
+type TurnAudit = Pick<AuditLog, "record">;
+type TurnSocket = Pick<VoiceSocket, "data" | "send">;
 
 type SttUpdate = {
   final: string;
@@ -40,7 +39,7 @@ export function sttConfig(apiKey: string): Record<string, unknown> {
     api_key: apiKey,
     model: "stt-rt-v5",
     audio_format: "pcm_s16le",
-    sample_rate: 16_000,
+    sample_rate: STT_SAMPLE_RATE,
     num_channels: 1,
     language_hints: ["ru"],
   };
@@ -62,23 +61,26 @@ export function ttsConfig(apiKey: string, voice: string, streamId: string): Reco
 
 /** Collapse only provider-final STT tokens. Partial text is display-only and never submitted. */
 export function sttUpdate(raw: unknown): SttUpdate {
-  if (typeof raw !== "object" || raw === null) return { final: "", partial: "", finished: false };
-  const value = raw as { tokens?: unknown; finished?: unknown; error_message?: unknown };
-  if (typeof value.error_message === "string") {
-    return { final: "", partial: "", finished: false, error: value.error_message };
+  if (!raw || typeof raw !== "object") return { final: "", partial: "", finished: false };
+  if ("error_message" in raw && typeof raw.error_message === "string") {
+    return { final: "", partial: "", finished: false, error: raw.error_message };
   }
   let final = "";
   let partial = "";
-  if (Array.isArray(value.tokens)) {
-    for (const token of value.tokens) {
-      if (typeof token !== "object" || token === null) continue;
-      const t = token as { text?: unknown; is_final?: unknown };
-      if (typeof t.text !== "string") continue;
-      if (t.is_final === true) final += t.text;
-      else partial += t.text;
+  let finished = "finished" in raw && raw.finished === true;
+  if ("tokens" in raw && Array.isArray(raw.tokens)) {
+    for (const token of raw.tokens) {
+      if (!token || typeof token !== "object" || !("text" in token) || typeof token.text !== "string") continue;
+      // Soniox's manual-finalization marker completes the turn; it is protocol, never user text.
+      if ("is_final" in token && token.is_final === true && token.text === "<fin>") {
+        finished = true;
+        continue;
+      }
+      if ("is_final" in token && token.is_final === true) final += token.text;
+      else partial += token.text;
     }
   }
-  return { final, partial, finished: value.finished === true };
+  return { final, partial, finished };
 }
 
 /** The bridge and localhost daemon share the daemon's owner-only token; constant-time once sized. */
@@ -89,14 +91,450 @@ export function voiceTokenMatches(presented: string | null, expected: string): b
 
 function connect(url: string): Promise<WebSocket> {
   const deferred = Promise.withResolvers<WebSocket>();
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let settled = false;
+  const settle = (complete: () => void): void => {
+    if (settled) return;
+    settled = true;
+    if (timeout) clearTimeout(timeout);
+    complete();
+  };
   const ws = new WebSocket(url);
-  ws.addEventListener("open", () => deferred.resolve(ws), { once: true });
-  ws.addEventListener("error", () => deferred.reject(new Error("Soniox WebSocket connection failed")), { once: true });
+  timeout = setTimeout(() => {
+    settle(() => deferred.reject(new Error("Soniox WebSocket connection timed out")));
+    ws.close();
+  }, WEBSOCKET_CONNECT_TIMEOUT_MS);
+  ws.addEventListener("open", () => settle(() => deferred.resolve(ws)), { once: true });
+  ws.addEventListener("error", () => settle(() => deferred.reject(new Error("Soniox WebSocket connection failed"))), { once: true });
   return deferred.promise;
 }
 
-function send(ws: VoiceSocket, message: Record<string, unknown>): void {
+function send(ws: TurnSocket, message: Record<string, unknown>): void {
   ws.send(JSON.stringify(message));
+}
+
+export type VoicePhase = "idle" | "listening" | "finalizing" | "working" | "speaking";
+
+type SttTurn = {
+  generation: number;
+  finalText: string;
+  finalizing: boolean;
+};
+
+type TtsTurn = {
+  generation: number;
+  streamId: string;
+};
+
+type TtsResponse = {
+  stream_id?: unknown;
+  audio?: unknown;
+  terminated?: unknown;
+  error_message?: unknown;
+};
+
+function ttsResponse(raw: unknown): TtsResponse | null {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    stream_id: "stream_id" in raw ? raw.stream_id : undefined,
+    audio: "audio" in raw ? raw.audio : undefined,
+    terminated: "terminated" in raw ? raw.terminated : undefined,
+    error_message: "error_message" in raw ? raw.error_message : undefined,
+  };
+}
+
+/**
+ * The authoritative lifecycle for one browser relay and one OMP session.
+ *
+ * Generation changes before cancellation so a late provider callback can never revive interrupted
+ * audio. STT/TTS sockets deliberately outlive individual PTT and reply turns; Soniox stream IDs do not.
+ */
+export class TurnController {
+  #generation = 0;
+  #phase: VoicePhase = "idle";
+  #stt: WebSocket | null = null;
+  #tts: WebSocket | null = null;
+  #openingStt: Promise<WebSocket> | null = null;
+  #openingTts: Promise<WebSocket> | null = null;
+  #sttTurn: SttTurn | null = null;
+  #pendingStart: number | null = null;
+  #pendingEnd: number | null = null;
+  #speech: TtsTurn | null = null;
+  #awaitingPlayback: TtsTurn | null = null;
+  #sttFinalizationTimeout: ReturnType<typeof setTimeout> | null = null;
+  #sttFinalizationTimedOut = false;
+  #ttsKeepalive: ReturnType<typeof setInterval> | null = null;
+  #handedOff = false;
+  #closed = false;
+
+  constructor(
+    private readonly cfg: TurnConfig,
+    private readonly audit: TurnAudit,
+    private readonly ws: TurnSocket,
+  ) {}
+
+  owns(ws: VoiceSocket): boolean {
+    return this.ws === ws;
+  }
+
+  get handedOff(): boolean {
+    return this.#handedOff;
+  }
+
+  close(): void {
+    this.#closed = true;
+    this.#clearSttFinalizationTimeout();
+    if (this.#ttsKeepalive) clearInterval(this.#ttsKeepalive);
+    this.#ttsKeepalive = null;
+    this.#stt?.close();
+    this.#tts?.close();
+    this.#stt = null;
+    this.#tts = null;
+  }
+
+  async start(): Promise<void> {
+    if (this.#closed) return;
+    const prior = this.#sttTurn;
+    const generation = ++this.#generation;
+    this.#cancelSpeech();
+    this.#awaitingPlayback = null;
+    this.#handedOff = false;
+    this.#phase = "listening";
+    this.#pendingStart = generation;
+    this.#pendingEnd = null;
+    send(this.ws, { kind: "clear", generation });
+    this.#state();
+
+    if (prior) {
+      this.#finalizeStt(prior);
+      return;
+    }
+    await this.#beginPendingStt();
+  }
+
+  end(): void {
+    const generation = this.#generation;
+    const turn = this.#sttTurn;
+    if (!turn) {
+      if (this.#pendingStart === generation) {
+        this.#pendingEnd = generation;
+        this.#phase = "finalizing";
+        this.#state();
+      }
+      return;
+    }
+    if (turn.generation !== generation || turn.finalizing || this.#phase !== "listening") return;
+    this.#phase = "finalizing";
+    this.#state();
+    this.#finalizeStt(turn);
+  }
+
+  audio(data: Uint8Array): void {
+    const turn = this.#sttTurn;
+    if (!turn || turn.generation !== this.#generation || this.#phase !== "listening") {
+      send(this.ws, { kind: "error", message: "Microphone stream is not ready" });
+      return;
+    }
+    try {
+      this.#stt?.send(data);
+    } catch {
+      this.#onSttClose(this.#stt);
+    }
+  }
+
+  handoff(generation: unknown): boolean {
+    if (generation !== this.#generation || this.#phase !== "working") return false;
+    this.#handedOff = true;
+    return true;
+  }
+
+  release(): void {
+    this.#handedOff = false;
+    if (this.#phase !== "working") return;
+    this.#phase = "idle";
+    this.#state();
+  }
+
+  speak(text: string): boolean {
+    if (
+      this.#closed ||
+      !this.#handedOff ||
+      this.#phase !== "working" ||
+      this.#speech ||
+      this.#awaitingPlayback ||
+      !text.trim()
+    ) return false;
+    const speech = { generation: this.#generation, streamId: crypto.randomUUID() };
+    this.#speech = speech;
+    void this.#beginSpeech(speech, text);
+    return true;
+  }
+
+  playbackEnded(generation: unknown, streamId: unknown): void {
+    const speech = this.#awaitingPlayback;
+    if (
+      !speech ||
+      generation !== this.#generation ||
+      generation !== speech.generation ||
+      streamId !== speech.streamId ||
+      this.#phase !== "speaking"
+    ) return;
+    this.#awaitingPlayback = null;
+    this.#phase = "idle";
+    this.#state();
+  }
+
+  #state(caption?: { role: "user" | "assistant"; text: string; provisional: boolean }): void {
+    send(this.ws, { kind: "voice-state", generation: this.#generation, phase: this.#phase, ...(caption ? { caption } : {}) });
+  }
+
+  #isCurrent(generation: number): boolean {
+    return !this.#closed && generation === this.#generation;
+  }
+
+  async #beginPendingStt(): Promise<void> {
+    const generation = this.#pendingStart;
+    if (generation === null || this.#sttTurn || !this.#isCurrent(generation)) return;
+    let stt: WebSocket;
+    try {
+      stt = await this.#ensureStt();
+    } catch (error) {
+      if (this.#isCurrent(generation)) this.#fail("Could not start speech recognition", error);
+      return;
+    }
+    if (this.#stt !== stt || this.#sttTurn || this.#pendingStart !== generation || !this.#isCurrent(generation)) return;
+
+    const turn = { generation, finalText: "", finalizing: false };
+    this.#sttTurn = turn;
+    this.#pendingStart = null;
+    send(this.ws, { kind: "recording", generation });
+    if (this.#pendingEnd === generation) this.#finalizeStt(turn);
+  }
+
+  async #ensureStt(): Promise<WebSocket> {
+    if (this.#stt) return this.#stt;
+    if (this.#openingStt) return this.#openingStt;
+    const opening = connect(STT_URL);
+    this.#openingStt = opening;
+    try {
+      const stt = await opening;
+      if (this.#closed) {
+        stt.close();
+        throw new Error("voice relay is closed");
+      }
+      this.#stt = stt;
+      stt.addEventListener("message", (event) => this.#onSttMessage(stt, event));
+      stt.addEventListener("close", () => this.#onSttClose(stt));
+      stt.send(JSON.stringify(sttConfig(this.cfg.sonioxApiKey)));
+      return stt;
+    } finally {
+      if (this.#openingStt === opening) this.#openingStt = null;
+    }
+  }
+
+  #finalizeStt(turn: SttTurn): void {
+    if (turn.finalizing) return;
+    turn.finalizing = true;
+    const stt = this.#stt;
+    try {
+      stt?.send(STT_FINAL_SILENCE);
+      stt?.send(JSON.stringify({ type: "finalize" }));
+      this.#scheduleSttFinalizationTimeout(turn);
+    } catch {
+      stt?.close();
+      this.#onSttClose(stt);
+    }
+  }
+
+  #clearSttFinalizationTimeout(): void {
+    if (this.#sttFinalizationTimeout) clearTimeout(this.#sttFinalizationTimeout);
+    this.#sttFinalizationTimeout = null;
+  }
+
+  #scheduleSttFinalizationTimeout(turn: SttTurn): void {
+    this.#clearSttFinalizationTimeout();
+    this.#sttFinalizationTimedOut = false;
+    this.#sttFinalizationTimeout = setTimeout(() => {
+      this.#sttFinalizationTimeout = null;
+      if (this.#sttTurn !== turn) return;
+      this.#sttFinalizationTimedOut = true;
+      const stt = this.#stt;
+      stt?.close();
+      this.#onSttClose(stt);
+    }, STT_FINALIZATION_TIMEOUT_MS);
+  }
+
+  #onSttMessage(stt: WebSocket, event: MessageEvent): void {
+    if (this.#stt !== stt || typeof event.data !== "string") return;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    const turn = this.#sttTurn;
+    if (!turn) return;
+    const update = sttUpdate(raw);
+    if (update.error) {
+      this.#clearSttFinalizationTimeout();
+      this.#sttTurn = null;
+      stt.close();
+      if (this.#isCurrent(turn.generation)) this.#fail(update.error);
+      return;
+    }
+    turn.finalText += update.final;
+    const caption = `${turn.finalText}${update.partial}`;
+    if (this.#isCurrent(turn.generation)) {
+      this.#state(caption ? { role: "user", text: caption, provisional: true } : undefined);
+    }
+    if (!update.finished) return;
+
+    this.#clearSttFinalizationTimeout();
+    this.#sttTurn = null;
+    if (this.#isCurrent(turn.generation)) {
+      const text = turn.finalText.trim();
+      this.audit.record({
+        action: "voice.transcript",
+        paneId: this.ws.data.paneId,
+        session: this.ws.data.session,
+        device: this.ws.data.device,
+        detail: { text, length: text.length },
+      });
+      this.#phase = text ? "working" : "idle";
+      this.#state(text ? { role: "user", text, provisional: false } : undefined);
+      send(this.ws, { kind: "final", generation: turn.generation, text });
+    }
+    void this.#beginPendingStt();
+  }
+
+  #onSttClose(stt: WebSocket | null): void {
+    if (!stt || this.#stt !== stt) return;
+    this.#clearSttFinalizationTimeout();
+    const timedOut = this.#sttFinalizationTimedOut;
+    this.#sttFinalizationTimedOut = false;
+    this.#stt = null;
+    const turn = this.#sttTurn;
+    this.#sttTurn = null;
+    if (turn && this.#isCurrent(turn.generation)) {
+      this.#fail(timedOut ? "Speech recognition did not finish" : "Speech recognition connection closed");
+    }
+    void this.#beginPendingStt();
+  }
+
+  async #beginSpeech(speech: TtsTurn, text: string): Promise<void> {
+    let tts: WebSocket;
+    try {
+      tts = await this.#ensureTts();
+    } catch (error) {
+      if (this.#speech === speech && this.#isCurrent(speech.generation)) {
+        this.#speech = null;
+        this.#fail("Could not start speech playback", error);
+      }
+      return;
+    }
+    if (this.#tts !== tts || this.#speech !== speech || !this.#isCurrent(speech.generation)) return;
+    try {
+      tts.send(JSON.stringify(ttsConfig(this.cfg.sonioxApiKey, this.cfg.sonioxTtsVoice, speech.streamId)));
+      tts.send(JSON.stringify({ text, text_end: true, stream_id: speech.streamId }));
+      if (!this.#ttsKeepalive) {
+        this.#ttsKeepalive = setInterval(() => {
+          try {
+            this.#tts?.send(JSON.stringify({ keep_alive: true }));
+          } catch {
+            this.#onTtsClose(this.#tts);
+          }
+        }, 20_000);
+      }
+      this.#phase = "speaking";
+      this.#state({ role: "assistant", text, provisional: false });
+    } catch (error) {
+      if (this.#speech === speech && this.#isCurrent(speech.generation)) {
+        this.#speech = null;
+        this.#fail("Could not start speech playback", error);
+      }
+    }
+  }
+
+  async #ensureTts(): Promise<WebSocket> {
+    if (this.#tts) return this.#tts;
+    if (this.#openingTts) return this.#openingTts;
+    const opening = connect(TTS_URL);
+    this.#openingTts = opening;
+    try {
+      const tts = await opening;
+      if (this.#closed) {
+        tts.close();
+        throw new Error("voice relay is closed");
+      }
+      this.#tts = tts;
+      tts.addEventListener("message", (event) => this.#onTtsMessage(tts, event));
+      tts.addEventListener("close", () => this.#onTtsClose(tts));
+      return tts;
+    } finally {
+      if (this.#openingTts === opening) this.#openingTts = null;
+    }
+  }
+
+  #onTtsMessage(tts: WebSocket, event: MessageEvent): void {
+    if (this.#tts !== tts || typeof event.data !== "string") return;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    const response = ttsResponse(raw);
+    if (!response) return;
+    const streamId = typeof response.stream_id === "string" ? response.stream_id : null;
+    if (!streamId) return;
+    const speech = this.#speech;
+    if (response.terminated === true) {
+      if (!speech || speech.streamId !== streamId) return;
+      this.#speech = null;
+      if (!this.#isCurrent(speech.generation) || this.#phase !== "speaking") return;
+      this.#awaitingPlayback = speech;
+      send(this.ws, { kind: "tts-end", generation: speech.generation, streamId });
+      return;
+    }
+    if (!speech || speech.streamId !== streamId || !this.#isCurrent(speech.generation)) return;
+    if (typeof response.error_message === "string") {
+      this.#speech = null;
+      this.#fail(response.error_message);
+      return;
+    }
+    if (typeof response.audio !== "string") return;
+    send(this.ws, { kind: "tts", generation: speech.generation, streamId, sampleRate: SAMPLE_RATE });
+    this.ws.send(Buffer.from(response.audio, "base64"));
+  }
+
+  #onTtsClose(tts: WebSocket | null): void {
+    if (!tts || this.#tts !== tts) return;
+    this.#tts = null;
+    if (this.#ttsKeepalive) clearInterval(this.#ttsKeepalive);
+    this.#ttsKeepalive = null;
+    const speech = this.#speech;
+    this.#speech = null;
+    if (speech && this.#isCurrent(speech.generation)) this.#fail("Speech playback connection closed");
+  }
+
+  #cancelSpeech(): void {
+    this.#awaitingPlayback = null;
+    const speech = this.#speech;
+    if (!speech) return;
+    this.#speech = null;
+    try {
+      this.#tts?.send(JSON.stringify({ stream_id: speech.streamId, cancel: true }));
+    } catch {
+      this.#onTtsClose(this.#tts);
+    }
+  }
+
+  #fail(message: string, error?: unknown): void {
+    this.#phase = "idle";
+    this.#state();
+    send(this.ws, { kind: "error", message });
+    if (error) console.warn(`[voice] ${message}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /**
@@ -104,7 +542,7 @@ function send(ws: VoiceSocket, message: Record<string, unknown>): void {
  * by a browser; that keeps OMP's on-disk layout out of the wire protocol.
  */
 export class VoiceBroker {
-  #relays = new Map<string, Relay>();
+  #relays = new Map<string, TurnController>();
 
   constructor(
     private readonly cfg: Config,
@@ -113,16 +551,16 @@ export class VoiceBroker {
 
   async open(ws: VoiceSocket): Promise<void> {
     const prior = this.#relays.get(ws.data.sessionFile);
-    if (prior) prior.ws.close(4000, "replaced by a newer Collie voice client");
+    if (prior) prior.close();
     try {
       await this.#setRemote(ws.data.sessionFile, "remote-start");
     } catch (error) {
       send(ws, { kind: "error", message: "Laptop voice relay is unavailable" });
       ws.close(1011, "voice relay unavailable");
-      console.warn(`[voice] couldn't activate laptop relay: ${(error as Error).message}`);
+      console.warn(`[voice] couldn't activate laptop relay: ${error instanceof Error ? error.message : String(error)}`);
       return;
     }
-    this.#relays.set(ws.data.sessionFile, { ws, stt: null, tts: null, finalText: "", handedOff: false });
+    this.#relays.set(ws.data.sessionFile, new TurnController(this.cfg, this.audit, ws));
     this.audit.record({
       action: "voice.connect",
       paneId: ws.data.paneId,
@@ -135,147 +573,58 @@ export class VoiceBroker {
 
   close(ws: VoiceSocket): void {
     const relay = this.#relays.get(ws.data.sessionFile);
-    if (!relay || relay.ws !== ws) return;
+    if (!relay || !relay.owns(ws)) return;
     if (!relay.handedOff) void this.#setRemote(ws.data.sessionFile, "remote-release").catch(() => undefined);
-    relay.stt?.close();
-    relay.tts?.close();
+    relay.close();
     this.#relays.delete(ws.data.sessionFile);
-    // A hand-off belongs to the browser turn until its final extension `speak` event: a sleeping page
-    // must not make the daemon resume laptop output. Unhanded mic/STT failures release immediately.
   }
 
   async message(ws: VoiceSocket, message: string | Uint8Array): Promise<void> {
     const relay = this.#relays.get(ws.data.sessionFile);
-    if (!relay || relay.ws !== ws) return;
-    if (typeof message !== "string") {
-      if (!relay.stt) return send(ws, { kind: "error", message: "Microphone stream is not ready" });
-      relay.stt.send(message);
-      return;
-    }
-    let event: { kind?: unknown };
+    if (!relay || !relay.owns(ws)) return;
+    if (typeof message !== "string") return relay.audio(message);
+    let raw: unknown;
     try {
-      event = JSON.parse(message) as { kind?: unknown };
+      raw = JSON.parse(message);
     } catch {
       return send(ws, { kind: "error", message: "Invalid voice message" });
     }
-    switch (event.kind) {
+    if (!raw || typeof raw !== "object") return send(ws, { kind: "error", message: "Invalid voice message" });
+    const kind = "kind" in raw ? raw.kind : undefined;
+    const generation = "generation" in raw ? raw.generation : undefined;
+    const streamId = "streamId" in raw ? raw.streamId : undefined;
+    switch (kind) {
       case "start":
-        await this.#startStt(relay);
-        return;
+        return relay.start();
       case "end":
-        relay.stt?.send(new Uint8Array());
-        return;
+        return relay.end();
       case "release":
+        relay.release();
         await this.#setRemote(ws.data.sessionFile, "remote-release").catch(() => undefined);
         return;
       case "handoff":
-        relay.handedOff = true;
+        send(ws, { kind: "handoff-ready", generation, accepted: relay.handoff(generation) });
         return;
+      case "playback-ended":
+        return relay.playbackEnded(generation, streamId);
       case "keepalive":
         return;
       default:
         return send(ws, { kind: "error", message: "Unknown voice message" });
     }
   }
+
   /** Receives a final-only OMP extension event from the local daemon, never from a browser. */
   speak(sessionFile: string, text: string): boolean {
+    return this.#relays.get(sessionFile)?.speak(text) ?? false;
+  }
+
+  /** Releases a browser turn when OMP has no speech to play. */
+  release(sessionFile: string): boolean {
     const relay = this.#relays.get(sessionFile);
     if (!relay) return false;
-    void this.#startTts(relay, text);
+    relay.release();
     return true;
-  }
-
-  async #startStt(relay: Relay): Promise<void> {
-    if (relay.stt) return;
-    this.#stopTts(relay);
-    relay.finalText = "";
-    try {
-      const stt = await connect(STT_URL);
-      relay.stt = stt;
-      stt.addEventListener("message", (event) => {
-        if (relay.stt !== stt || typeof event.data !== "string") return;
-        let raw: unknown;
-        try {
-          raw = JSON.parse(event.data);
-        } catch {
-          return;
-        }
-        const update = sttUpdate(raw);
-        if (update.error) {
-          relay.stt = null;
-          send(relay.ws, { kind: "error", message: update.error });
-          return;
-        }
-        relay.finalText += update.final;
-        send(relay.ws, { kind: "transcript", text: `${relay.finalText}${update.partial}` });
-        if (update.finished) {
-          relay.stt = null;
-          const text = relay.finalText.trim();
-          this.audit.record({
-            action: "voice.transcript",
-            paneId: relay.ws.data.paneId,
-            session: relay.ws.data.session,
-            device: relay.ws.data.device,
-            // The complete transcript is the normal OMP input recorded in the agent journal; audit is
-            // intentionally only a bounded action trail, like every other Collie terminal write.
-            detail: { text, length: text.length },
-          });
-          send(relay.ws, { kind: "final", text });
-        }
-      });
-      stt.addEventListener("close", () => {
-        if (relay.stt === stt) relay.stt = null;
-      });
-      stt.send(JSON.stringify(sttConfig(this.cfg.sonioxApiKey)));
-      send(relay.ws, { kind: "recording" });
-    } catch (error) {
-      send(relay.ws, { kind: "error", message: "Could not start speech recognition" });
-      console.warn(`[voice] couldn't start Soniox STT: ${(error as Error).message}`);
-    }
-  }
-
-  async #startTts(relay: Relay, text: string): Promise<void> {
-    this.#stopTts(relay);
-    const streamId = crypto.randomUUID();
-    try {
-      const tts = await connect(TTS_URL);
-      relay.tts = tts;
-      tts.addEventListener("message", (event) => {
-        if (relay.tts !== tts || typeof event.data !== "string") return;
-        let response: { audio?: unknown; terminated?: unknown; error_message?: unknown };
-        try {
-          response = JSON.parse(event.data) as typeof response;
-        } catch {
-          return;
-        }
-        if (typeof response.error_message === "string") {
-          send(relay.ws, { kind: "error", message: response.error_message });
-          return;
-        }
-        if (typeof response.audio === "string") {
-          send(relay.ws, { kind: "tts", sampleRate: SAMPLE_RATE });
-          relay.ws.send(Buffer.from(response.audio, "base64"));
-        }
-        if (response.terminated === true) {
-          relay.tts = null;
-          send(relay.ws, { kind: "tts-end" });
-          tts.close();
-        }
-      });
-      tts.addEventListener("close", () => {
-        if (relay.tts === tts) relay.tts = null;
-      });
-      tts.send(JSON.stringify(ttsConfig(this.cfg.sonioxApiKey, this.cfg.sonioxTtsVoice, streamId)));
-      tts.send(JSON.stringify({ text, text_end: true, stream_id: streamId }));
-    } catch (error) {
-      send(relay.ws, { kind: "error", message: "Could not start speech playback" });
-      console.warn(`[voice] couldn't start Soniox TTS: ${(error as Error).message}`);
-    }
-  }
-
-  #stopTts(relay: Relay): void {
-    relay.tts?.close();
-    relay.tts = null;
   }
 
   async #setRemote(session: string, kind: "remote-start" | "remote-release"): Promise<void> {
@@ -284,7 +633,11 @@ export class VoiceBroker {
     const response = await fetch(this.cfg.voiceControlUrl, {
       method: "POST",
       headers: { "content-type": "application/json", "x-omp-voice-token": token },
-      body: JSON.stringify({ kind, session }),
+      body: JSON.stringify({
+        kind,
+        session,
+        ...(kind === "remote-start" ? { relayUrl: `http://127.0.0.1:${this.cfg.port}/api/voice/omp` } : {}),
+      }),
     });
     if (!response.ok) throw new Error(`voice control returned ${response.status}: ${(await response.text()).trim()}`);
   }

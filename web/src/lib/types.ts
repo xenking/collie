@@ -34,6 +34,8 @@ export interface AgentView {
    * answers with `available:false, reason:"no-log"`.
    */
   hasSession?: boolean;
+  /** True only when the bridge can bind browser voice to this OMP session. */
+  voiceCapable?: boolean;
   /**
    * Upper bound on the lines a pane read can return (Herdr's scrollback depth + viewport). The only
    * reliable "is there more scrollback" signal — `PaneReadResponse.truncated` is always false even

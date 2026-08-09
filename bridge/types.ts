@@ -88,6 +88,8 @@ export type PaneWire = Omit<AgentView, "agentSession"> & {
    *  has a journal adapter. Says nothing about whether the log is readable — a named session whose
    *  file is missing still answers `available:false` with reason `no-log`. */
   hasSession?: boolean;
+  /** True only for a live OMP pane that gave Herdr its session file; safe for the browser to use. */
+  voiceCapable?: boolean;
 };
 
 /**
@@ -99,7 +101,8 @@ export type PaneWire = Omit<AgentView, "agentSession"> & {
  */
 export function toPaneWire(pane: AgentView, hasJournal: (agent: string) => boolean): PaneWire {
   const { agentSession, ...rest } = pane;
-  return agentSession && hasJournal(pane.agent) ? { ...rest, hasSession: true } : rest;
+  const wire = agentSession && hasJournal(pane.agent) ? { ...rest, hasSession: true } : rest;
+  return pane.agent === "omp" && agentSession?.kind === "path" ? { ...wire, voiceCapable: true } : wire;
 }
 
 /** A Herdr workspace ("space") — a project-scoped container of tabs. From `workspace.list`. */

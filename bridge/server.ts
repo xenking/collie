@@ -134,6 +134,25 @@ export function marksPaneSeen(req: Request, action: string | undefined): boolean
   return action !== undefined && action !== "history";
 }
 
+/** Validates and applies the localhost daemon's final reply handoff. */
+export function voiceRelayResponse(
+  voice: Pick<VoiceBroker, "speak" | "release">,
+  body: unknown,
+): Response {
+  if (!body || typeof body !== "object") return text("bad voice relay request", 400);
+  const kind = "kind" in body ? body.kind : undefined;
+  const session = "session" in body ? body.session : undefined;
+  if (typeof session !== "string") return text("bad voice relay request", 400);
+  if (kind === "release") {
+    if (!voice.release(session)) return text("voice browser relay is not connected", 409);
+    return secure(new Response(null, { status: 204 }));
+  }
+  const speech = "text" in body ? body.text : undefined;
+  if (kind !== "speak" || typeof speech !== "string") return text("bad voice relay request", 400);
+  if (!voice.speak(session, speech)) return text("voice browser relay is not connected", 409);
+  return secure(new Response(null, { status: 204 }));
+}
+
 export function startServer(opts: {
   cfg: Config;
   registry: SessionRegistry;
@@ -210,17 +229,13 @@ export function startServer(opts: {
         if (!(await isVoiceDaemon(req, cfg, server.requestIP(req)?.address ?? null))) {
           return text("voice relay not authorised", 403);
         }
-        let body: { kind?: unknown; session?: unknown; text?: unknown };
+        let body: unknown;
         try {
-          body = (await req.json()) as typeof body;
+          body = await req.json();
         } catch {
           return text("bad voice relay request", 400);
         }
-        if (body.kind !== "speak" || typeof body.session !== "string" || typeof body.text !== "string") {
-          return text("bad voice relay request", 400);
-        }
-        if (!voice.speak(body.session, body.text)) return text("voice browser relay is not connected", 409);
-        return secure(new Response(null, { status: 204 }));
+        return voiceRelayResponse(voice, body);
       }
 
       // ── Live state (polled by the client) ────────────────────────────────

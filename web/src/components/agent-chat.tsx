@@ -116,7 +116,7 @@ export function AgentChat({
   const connecting = isConnecting({ bridge, error, stalled });
   const { newTab } = useSpaceActions();
   // Single display-prefs instance: the View controls (in <Composer>) write it, the mirror reads it.
-  const { prefs, setWrap, stepFontSize, setRawTerminal, setVoiceButtonMode } = useDisplayPrefs();
+  const { prefs, setWrap, stepFontSize, setRawTerminal, setVoiceButtonMode, setVoiceResultMode } = useDisplayPrefs();
   // Raw-terminal escape hatch: when on, every Claude grammar is bypassed and the plain mirror shows,
   // so a mis-detected/mis-rendered dialog can always be driven by hand with the keys pad.
   const grammarsOn = !prefs.rawTerminal;
@@ -869,7 +869,7 @@ export function AgentChat({
             gone={gone}
             readOnly={readOnly}
             dialogPresent={dialogPresent}
-            voiceEnabled={voiceEnabled}
+            voiceEnabled={voiceEnabled && agent?.voiceCapable === true}
             text={text}
             terminalDraft={terminalDraft}
             rawTerminalDraft={rawTerminalDraft}
@@ -878,6 +878,7 @@ export function AgentChat({
             stepFontSize={stepFontSize}
             setRawTerminal={setRawTerminal}
             setVoiceButtonMode={setVoiceButtonMode}
+            setVoiceResultMode={setVoiceResultMode}
             onSent={onSent}
           />
         </div>

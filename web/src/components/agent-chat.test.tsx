@@ -52,14 +52,24 @@ function renderChat(overrides: Partial<ComponentProps<typeof AgentChat>> = {}) {
 }
 
 describe("AgentChat — voice capability", () => {
-  it("shows voice control only when the bridge enables voice", async () => {
+  it("shows voice control for an OMP pane when the bridge enables voice", async () => {
     server.use(
       http.get("/api/config", () =>
         HttpResponse.json({ push: false, vapidPublicKey: "", voice: true }),
       ),
     );
-    renderChat();
+    renderChat({ agent: { ...fixtureAgents[0]!, agent: "omp", voiceCapable: true } });
     expect(await screen.findByRole("button", { name: "Start voice input" })).toBeEnabled();
+  });
+
+  it("hides voice control when Herdr has no live OMP session", async () => {
+    server.use(
+      http.get("/api/config", () =>
+        HttpResponse.json({ push: false, vapidPublicKey: "", voice: true }),
+      ),
+    );
+    renderChat({ agent: { ...fixtureAgents[0]!, agent: "omp" } });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Start voice input" })).not.toBeInTheDocument());
   });
 });
 

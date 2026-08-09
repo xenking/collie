@@ -21,6 +21,7 @@ import {
   resolveStaticPath,
   sendReplySteps,
   startupWarnings,
+  voiceRelayResponse,
   withBuildHeader,
   type ReplySender,
 } from "./server.ts";
@@ -93,6 +94,33 @@ describe("isLoopbackPeer", () => {
     } finally {
       await rm(tokenFile, { force: true });
     }
+  });
+});
+
+describe("voiceRelayResponse", () => {
+  test("forwards speak and releases a silent turn", () => {
+    const calls: string[] = [];
+    const voice = {
+      speak(session: string, text: string): boolean {
+        calls.push(`speak:${session}:${text}`);
+        return true;
+      },
+      release(session: string): boolean {
+        calls.push(`release:${session}`);
+        return true;
+      },
+    };
+    expect(voiceRelayResponse(voice, { kind: "speak", session: "/tmp/omp.jsonl", text: "Готово." }).status).toBe(204);
+    expect(voiceRelayResponse(voice, { kind: "release", session: "/tmp/omp.jsonl" }).status).toBe(204);
+    expect(calls).toEqual(["speak:/tmp/omp.jsonl:Готово.", "release:/tmp/omp.jsonl"]);
+  });
+
+  test("rejects invalid and disconnected relay requests", () => {
+    const offline = { speak: () => false, release: () => false };
+    expect(voiceRelayResponse(offline, { kind: "speak", session: "s", text: "x" }).status).toBe(409);
+    expect(voiceRelayResponse(offline, { kind: "release", session: "s" }).status).toBe(409);
+    expect(voiceRelayResponse(offline, { kind: "speak", session: "s" }).status).toBe(400);
+    expect(voiceRelayResponse(offline, null).status).toBe(400);
   });
 });
 

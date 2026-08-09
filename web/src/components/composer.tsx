@@ -22,7 +22,15 @@ import { isSelfEcho, normalizeDraft } from "@/hooks/use-terminal-draft";
 import { adapterFor } from "@/lib/harness";
 import { sendGuardedReply } from "@/lib/reply-action";
 import { TerminalDraftPreview } from "@/components/terminal-draft-preview";
-import { VoiceInput } from "@/components/voice-input";
+import { VoiceInput, type VoiceState } from "@/components/voice-input";
+
+const VOICE_PHASE_LABEL: Record<VoiceState["phase"], string> = {
+  idle: "Idle",
+  listening: "Listening…",
+  finalizing: "Finalising…",
+  working: "Thinking…",
+  speaking: "Speaking…",
+};
 
 export interface ComposerHandle {
   /** Focus the input and put the caret at the end — used by the mirror-tap-to-focus in AgentChat. */
@@ -63,6 +71,7 @@ interface ComposerProps {
   stepFontSize: (delta: number) => void;
   setRawTerminal: (raw: boolean) => void;
   setVoiceButtonMode: (mode: DisplayPrefs["voiceButtonMode"]) => void;
+  setVoiceResultMode: (mode: DisplayPrefs["voiceResultMode"]) => void;
   /** Snap the mirror to the live tail (follow + revalidate + scroll) after a successful send. */
   onSent: () => void;
 }
@@ -129,7 +138,7 @@ function ComposerDock({
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { paneId, session, agent, isShell, gone, readOnly, dialogPresent, voiceEnabled = false, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setVoiceButtonMode, onSent },
+  { paneId, session, agent, isShell, gone, readOnly, dialogPresent, voiceEnabled = false, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setVoiceButtonMode, setVoiceResultMode, onSent },
   ref,
 ) {
   const revalidator = useRevalidator();
@@ -176,8 +185,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // update) or after a 6s safety timeout. Shows "You sent: …" so the user knows the message landed.
   const [lastSent, setLastSent] = useState<string | null>(null);
   const [justSent, setJustSent] = useState(false); // brief ✓ on the send button after a send
-  // `""` is a real live transcript with no recognised token yet; only `null` means no capture.
-  const [voiceTranscript, setVoiceTranscript] = useState<string | null>(null);
+  const [voice, setVoice] = useState<VoiceState | null>(null);
   // Terminal-draft preview bookkeeping. The composer input is EXCLUSIVELY phone-owned — a host draft
   // is never written into it implicitly; it only surfaces in a read-only preview the user can
   // deliberately Take over. There is no user-facing dismiss — the preview is honest state (a draft
@@ -299,7 +307,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the hold clears (see lib/self-update.ts). Keyed by pane so panes don't clobber each other's hold.
   useHoldReload(
     `composer:${paneId}`,
-    input.trim() !== "" || uploading || voiceTranscript !== null,
+    input.trim() !== "" || uploading || voice !== null,
   );
 
   // Preview appearance latch. A STABLE, non-echo, not-already-handled draft flips the preview on —
@@ -634,6 +642,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               stepFontSize={stepFontSize}
               setRawTerminal={setRawTerminal}
               setVoiceButtonMode={setVoiceButtonMode}
+              setVoiceResultMode={setVoiceResultMode}
             />
           </ComposerDock>
         )}
@@ -710,10 +719,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             onTakeOver={adapter?.draftIsOpaque?.(effectiveRaw) ? null : takeOverDraft}
           />
         )}
-        {voiceTranscript !== null && (
-          <div className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground" role="status">
+        {voice && (
+          <div className="mb-2 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" role="status" aria-live="polite">
             <Mic className="size-3.5 shrink-0" />
-            <span className="min-w-0 truncate">{voiceTranscript || "Listening…"}</span>
+            <span className="shrink-0">{VOICE_PHASE_LABEL[voice.phase]}</span>
+            {voice.caption && (
+              <span className={`min-w-0 truncate ${voice.caption.provisional ? "opacity-60" : ""}`}>
+                {voice.caption.role === "assistant" ? "OMP: " : "You: "}{voice.caption.text}
+              </span>
+            )}
           </div>
         )}
         <div className="flex items-end gap-2">
@@ -738,8 +752,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               session={session}
               disabled={locked || dialogPresent || sending}
               mode={prefs.voiceButtonMode}
-              onTranscript={(transcript) => send(transcript, false)}
-              onTranscriptChange={setVoiceTranscript}
+              onTranscript={(transcript) => {
+                if (prefs.voiceResultMode === "send") {
+                  updateInput(transcript);
+                  return send(transcript, true);
+                }
+                updateInput((input) => (input ? `${input} ${transcript}` : transcript));
+                inputRef.current?.focus();
+                return Promise.resolve(false);
+              }}
+              onVoiceStateChange={setVoice}
               onError={(message) => setStatus(message, "error")}
             />
           )}
