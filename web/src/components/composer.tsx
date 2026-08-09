@@ -753,15 +753,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               disabled={locked || dialogPresent || sending}
               mode={prefs.voiceButtonMode}
               onTranscript={(transcript) => {
-                if (prefs.voiceResultMode === "send") {
-                  updateInput(transcript);
-                  return send(transcript, true);
-                }
-                updateInput((input) => (input ? `${input} ${transcript}` : transcript));
-                inputRef.current?.focus();
+                if (prefs.voiceResultMode === "send") return send(transcript, true);
                 return Promise.resolve(false);
               }}
-              onVoiceStateChange={setVoice}
+              onVoiceStateChange={(next) => {
+                if (next?.caption?.role === "user") {
+                  updateInput(next.caption.text);
+                  setVoice({ ...next, caption: undefined });
+                  return;
+                }
+                setVoice(next);
+              }}
               onError={(message) => setStatus(message, "error")}
             />
           )}

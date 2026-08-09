@@ -13,11 +13,21 @@ import { Composer } from "./composer";
 
 const voiceInput = vi.hoisted(() => ({
   onTranscript: null as null | ((text: string) => Promise<boolean>),
+  onVoiceStateChange: null as null | ((state: {
+    generation: number;
+    phase: "idle" | "listening" | "finalizing" | "working" | "speaking";
+    caption?: { role: "user" | "assistant"; text: string; provisional: boolean };
+  } | null) => void),
 }));
 
 vi.mock("./voice-input", () => ({
-  VoiceInput(props: { disabled: boolean; onTranscript: (text: string) => Promise<boolean> }) {
+  VoiceInput(props: {
+    disabled: boolean;
+    onTranscript: (text: string) => Promise<boolean>;
+    onVoiceStateChange: NonNullable<typeof voiceInput.onVoiceStateChange>;
+  }) {
     voiceInput.onTranscript = props.onTranscript;
+    voiceInput.onVoiceStateChange = props.onVoiceStateChange;
     return <button type="button" disabled={props.disabled} aria-label="Start voice input" />;
   },
 }));
@@ -125,7 +135,7 @@ describe("Composer — voice capability", () => {
 });
 
 describe("Composer — voice delivery", () => {
-  it("shows a send-mode transcript in the composer until the guarded send accepts it", async () => {
+  it("streams the final voice caption into the composer before the handoff callback", async () => {
     const transcript = "Проверка голосового ввода";
     const calls: string[] = [];
     let releaseTyped!: () => void;
@@ -141,10 +151,18 @@ describe("Composer — voice delivery", () => {
     );
     const props = renderComposer({ voiceEnabled: true });
     const box = screen.getByPlaceholderText(/type a reply/i);
-    let sent!: Promise<boolean>;
-    act(() => { sent = voiceInput.onTranscript!(transcript); });
+    act(() => voiceInput.onVoiceStateChange!({
+      generation: 1,
+      phase: "working",
+      caption: { role: "user", text: transcript, provisional: false },
+    }));
 
     await waitFor(() => expect(box).toHaveValue(transcript));
+    expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+    expect(screen.getByRole("status")).not.toHaveTextContent(`You: ${transcript}`);
+
+    let sent!: Promise<boolean>;
+    act(() => { sent = voiceInput.onTranscript!(transcript); });
     releaseTyped();
     await expect(sent).resolves.toBe(true);
     await waitFor(() => expect(box).toHaveValue(""));
