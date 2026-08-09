@@ -70,7 +70,6 @@ interface ComposerProps {
   setWrap: (wrap: boolean) => void;
   stepFontSize: (delta: number) => void;
   setRawTerminal: (raw: boolean) => void;
-  setVoiceButtonMode: (mode: DisplayPrefs["voiceButtonMode"]) => void;
   setVoiceResultMode: (mode: DisplayPrefs["voiceResultMode"]) => void;
   /** Snap the mirror to the live tail (follow + revalidate + scroll) after a successful send. */
   onSent: () => void;
@@ -138,7 +137,7 @@ function ComposerDock({
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { paneId, session, agent, isShell, gone, readOnly, dialogPresent, voiceEnabled = false, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setVoiceButtonMode, setVoiceResultMode, onSent },
+  { paneId, session, agent, isShell, gone, readOnly, dialogPresent, voiceEnabled = false, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setVoiceResultMode, onSent },
   ref,
 ) {
   const revalidator = useRevalidator();
@@ -641,7 +640,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               setWrap={setWrap}
               stepFontSize={stepFontSize}
               setRawTerminal={setRawTerminal}
-              setVoiceButtonMode={setVoiceButtonMode}
               setVoiceResultMode={setVoiceResultMode}
             />
           </ComposerDock>
@@ -746,27 +744,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           >
             {uploading ? <Loader2 className="size-4 animate-spin" /> : <ImagePlus className="size-4" />}
           </Button>
-          {voiceEnabled && (
-            <VoiceInput
-              paneId={paneId}
-              session={session}
-              disabled={locked || dialogPresent || sending}
-              mode={prefs.voiceButtonMode}
-              onTranscript={(transcript) => {
-                if (prefs.voiceResultMode === "send") return send(transcript, true);
-                return Promise.resolve(false);
-              }}
-              onVoiceStateChange={(next) => {
-                if (next?.caption?.role === "user") {
-                  updateInput(next.caption.text);
-                  setVoice({ ...next, caption: undefined });
-                  return;
-                }
-                setVoice(next);
-              }}
-              onError={(message) => setStatus(message, "error")}
-            />
-          )}
           <ChatInput
             ref={inputRef}
             value={input}
@@ -790,45 +767,68 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             disabled={locked}
             rows={1}
           />
-          {forcingSend ? (
-            // The pre-flight refused and the user is being offered the override. Labelled for what it
-            // actually does — TYPE the text into whatever is on screen — not "send", because the
-            // submit key is still conditional on the verify step behind it.
-            <Button
-              variant="destructive"
-              className="h-11 shrink-0 rounded-full px-4 text-sm font-semibold"
-              onClick={onSendClick}
-              disabled={locked || !input.trim() || sending}
-              aria-label="Type anyway?"
-            >
-              Type anyway?
-            </Button>
-          ) : confirmingSend ? (
-            <Button
-              variant="destructive"
-              className="h-11 shrink-0 rounded-full px-4 text-sm font-semibold"
-              onClick={onSendClick}
-              disabled={locked || !input.trim() || sending}
-              aria-label="Really send?"
-            >
-              Really send?
-            </Button>
-          ) : (
-            <Button
-              size="icon"
-              className="size-11 shrink-0 rounded-full"
-              onClick={onSendClick}
-              disabled={locked || !input.trim() || sending}
-              aria-label="Send"
-            >
-              {sending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : justSent ? (
-                <Check className="size-4" />
-              ) : (
-                <Send className="size-4" />
-              )}
-            </Button>
+          {voiceEnabled && (
+            <VoiceInput
+              paneId={paneId}
+              session={session}
+              showControl={!input.trim() || voice !== null}
+              disabled={locked || dialogPresent || sending}
+              onTranscript={(transcript) => {
+                if (prefs.voiceResultMode === "send") return send(transcript, true);
+                return Promise.resolve(false);
+              }}
+              onVoiceStateChange={(next) => {
+                if (next?.caption?.role === "user") {
+                  updateInput(next.caption.text);
+                  setVoice({ ...next, caption: undefined });
+                  return;
+                }
+                setVoice(next);
+              }}
+              onError={(message) => setStatus(message, "error")}
+            />
+          )}
+          {(!voiceEnabled || input.trim()) && (
+            forcingSend ? (
+              // The pre-flight refused and the user is being offered the override. Labelled for what it
+              // actually does — TYPE the text into whatever is on screen — not "send", because the
+              // submit key is still conditional on the verify step behind it.
+              <Button
+                variant="destructive"
+                className="h-11 shrink-0 rounded-full px-4 text-sm font-semibold"
+                onClick={onSendClick}
+                disabled={locked || !input.trim() || sending}
+                aria-label="Type anyway?"
+              >
+                Type anyway?
+              </Button>
+            ) : confirmingSend ? (
+              <Button
+                variant="destructive"
+                className="h-11 shrink-0 rounded-full px-4 text-sm font-semibold"
+                onClick={onSendClick}
+                disabled={locked || !input.trim() || sending}
+                aria-label="Really send?"
+              >
+                Really send?
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                className="size-11 shrink-0 rounded-full"
+                onClick={onSendClick}
+                disabled={locked || !input.trim() || sending}
+                aria-label="Send"
+              >
+                {sending ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : justSent ? (
+                  <Check className="size-4" />
+                ) : (
+                  <Send className="size-4" />
+                )}
+              </Button>
+            )
           )}
         </div>
       </div>

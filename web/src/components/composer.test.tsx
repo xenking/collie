@@ -23,12 +23,13 @@ const voiceInput = vi.hoisted(() => ({
 vi.mock("./voice-input", () => ({
   VoiceInput(props: {
     disabled: boolean;
+    showControl: boolean;
     onTranscript: (text: string) => Promise<boolean>;
     onVoiceStateChange: NonNullable<typeof voiceInput.onVoiceStateChange>;
   }) {
     voiceInput.onTranscript = props.onTranscript;
     voiceInput.onVoiceStateChange = props.onVoiceStateChange;
-    return <button type="button" disabled={props.disabled} aria-label="Start voice input" />;
+    return props.showControl ? <button type="button" disabled={props.disabled} aria-label="Hold to talk" /> : null;
   },
 }));
 
@@ -66,11 +67,10 @@ function renderComposer(overrides: Partial<ComponentProps<typeof Composer>> = {}
     text: "pane output",
     terminalDraft: null,
     rawTerminalDraft: null,
-    prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" },
+    prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceResultMode: "send" },
     setWrap: vi.fn(),
     stepFontSize: vi.fn(),
     setRawTerminal: vi.fn(),
-    setVoiceButtonMode: vi.fn(),
     setVoiceResultMode: vi.fn(),
     onSent: vi.fn(),
     ...overrides,
@@ -98,11 +98,10 @@ function renderComposerWithStatus(overrides: Partial<ComponentProps<typeof Compo
     text: "pane output",
     terminalDraft: null,
     rawTerminalDraft: null,
-    prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" },
+    prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceResultMode: "send" },
     setWrap: vi.fn(),
     stepFontSize: vi.fn(),
     setRawTerminal: vi.fn(),
-    setVoiceButtonMode: vi.fn(),
     setVoiceResultMode: vi.fn(),
     onSent: vi.fn(),
     ...overrides,
@@ -125,12 +124,24 @@ function renderComposerWithStatus(overrides: Partial<ComponentProps<typeof Compo
 describe("Composer — voice capability", () => {
   it("hides microphone capture until the bridge enables it", () => {
     renderComposer();
-    expect(screen.queryByRole("button", { name: "Start voice input" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Hold to talk" })).not.toBeInTheDocument();
   });
 
-  it("renders microphone capture when the bridge enables it", () => {
+  it("uses the Telegram-style trailing action: hold-to-talk when empty, Send when typed", async () => {
+    const user = userEvent.setup();
     renderComposer({ voiceEnabled: true });
-    expect(screen.getByRole("button", { name: "Start voice input" })).toBeEnabled();
+
+    expect(screen.getByRole("button", { name: "Hold to talk" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
+
+    const input = screen.getByPlaceholderText("Type a reply…");
+    await user.type(input, "Привет");
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Hold to talk" })).not.toBeInTheDocument();
+
+    await user.clear(input);
+    expect(screen.getByRole("button", { name: "Hold to talk" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
   });
 });
 
@@ -307,11 +318,10 @@ describe("Composer — send", () => {
       text: "pane output",
       terminalDraft: null,
       rawTerminalDraft: null,
-      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" },
+      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceResultMode: "send" },
       setWrap: vi.fn(),
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
-      setVoiceButtonMode: vi.fn(),
       setVoiceResultMode: vi.fn(),
       onSent: vi.fn(),
     };
@@ -459,11 +469,10 @@ function renderDraftHarness(overrides: Partial<ComponentProps<typeof Composer>> 
       readOnly: false,
       dialogPresent: false,
       text: "pane output",
-      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" },
+      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceResultMode: "send" },
       setWrap: vi.fn(),
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
-      setVoiceButtonMode: vi.fn(),
       setVoiceResultMode: vi.fn(),
       onSent: vi.fn(),
       ...rest,
@@ -731,11 +740,10 @@ describe("Composer — in-flight echo suppression (match-last-sent)", () => {
       text: "pane output",
       terminalDraft: draft,
       rawTerminalDraft: draft,
-      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" },
+      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceResultMode: "send" },
       setWrap: vi.fn(),
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
-      setVoiceButtonMode: vi.fn(),
       setVoiceResultMode: vi.fn(),
       onSent: vi.fn(),
     };
@@ -1116,19 +1124,8 @@ describe("Composer — display prefs behind the gear", () => {
     expect(screen.getByRole("switch", { name: "Wrap lines" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Raw terminal" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Decrease font size" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Switch" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Push to talk" })).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("forwards the selected voice button mode", async () => {
-    const user = userEvent.setup();
-    const props = renderComposer();
-
-    await user.click(screen.getByRole("button", { name: "Display settings" }));
-    await user.click(screen.getByRole("button", { name: "Push to talk" }));
-
-    expect(props.setVoiceButtonMode).toHaveBeenCalledWith("push-to-talk");
-  });
 
   it("forwards the selected voice result mode", async () => {
     const user = userEvent.setup();
@@ -1289,11 +1286,10 @@ describe("Composer — draft persistence", () => {
       text: "pane output",
       terminalDraft: null,
       rawTerminalDraft: null,
-      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" },
+      prefs: { wrap: true, fontSize: 11, rawTerminal: false, voiceResultMode: "send" },
       setWrap: vi.fn(),
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
-      setVoiceButtonMode: vi.fn(),
       setVoiceResultMode: vi.fn(),
       onSent: vi.fn(),
       ...overrides,

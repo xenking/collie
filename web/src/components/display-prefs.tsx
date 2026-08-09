@@ -3,7 +3,7 @@ import { AArrowDown, AArrowUp } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import type { DisplayPrefs, VoiceButtonMode, VoiceResultMode } from "@/hooks/use-display-prefs";
+import type { DisplayPrefs, VoiceResultMode } from "@/hooks/use-display-prefs";
 import { FONT_MAX, FONT_MIN } from "@/hooks/use-display-prefs";
 
 // The mirror's display prefs, as LABELLED rows behind the composer's ⚙ toggle.
@@ -23,7 +23,6 @@ interface DisplayPrefsContentProps {
   setWrap: (wrap: boolean) => void;
   stepFontSize: (delta: number) => void;
   setRawTerminal: (raw: boolean) => void;
-  setVoiceButtonMode: (mode: VoiceButtonMode) => void;
   setVoiceResultMode: (mode: VoiceResultMode) => void;
 }
 
@@ -57,7 +56,6 @@ export function DisplayPrefsContent({
   prefs,
   setWrap,
   stepFontSize,
-  setVoiceButtonMode,
   setVoiceResultMode,
   setRawTerminal,
 }: DisplayPrefsContentProps) {
@@ -87,34 +85,6 @@ export function DisplayPrefsContent({
             onCheckedChange={setRawTerminal}
             aria-label="Raw terminal"
           />
-        }
-      />
-      <Row
-        label="Voice button"
-        hint="Switch starts and stops on tap. Push to talk records only while held."
-        control={
-          <div className="grid grid-cols-2 gap-1 rounded-lg bg-background/60 p-1" aria-label="Voice button mode">
-            <Button
-              type="button"
-              variant={prefs.voiceButtonMode === "toggle" ? "secondary" : "ghost"}
-              size="sm"
-              className="h-8 px-2 text-xs font-medium"
-              aria-pressed={prefs.voiceButtonMode === "toggle"}
-              onClick={() => setVoiceButtonMode("toggle")}
-            >
-              Switch
-            </Button>
-            <Button
-              type="button"
-              variant={prefs.voiceButtonMode === "push-to-talk" ? "secondary" : "ghost"}
-              size="sm"
-              className="h-8 px-2 text-xs font-medium"
-              aria-pressed={prefs.voiceButtonMode === "push-to-talk"}
-              onClick={() => setVoiceButtonMode("push-to-talk")}
-            >
-              Push to talk
-            </Button>
-          </div>
         }
       />
       <Row

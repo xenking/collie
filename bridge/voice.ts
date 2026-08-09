@@ -249,6 +249,14 @@ export class TurnController {
     return true;
   }
 
+  /** A replacement browser socket resumes a completed remote handoff; active turns are never resumed. */
+  resume(): boolean {
+    if (this.#closed || this.#phase !== "idle") return false;
+    this.#handedOff = true;
+    return true;
+  }
+
+
   release(): void {
     this.#handedOff = false;
     this.#queuedSpeech = [];
@@ -608,6 +616,9 @@ export class VoiceBroker {
         return;
       case "handoff":
         send(ws, { kind: "handoff-ready", generation, accepted: relay.handoff(generation) });
+        return;
+      case "resume":
+        send(ws, { kind: "resumed", accepted: relay.resume() });
         return;
       case "playback-ended":
         return relay.playbackEnded(generation, streamId);

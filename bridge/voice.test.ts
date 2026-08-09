@@ -282,4 +282,36 @@ describe("VoiceBroker remote lease", () => {
       await rm(tokenFile, { force: true });
     }
   });
+
+  test("restores remote ownership after a browser relay reconnects", async () => {
+    const nativeFetch = globalThis.fetch;
+    const tokenFile = join(tmpdir(), `collie-voice-${crypto.randomUUID()}.token`);
+    const remoteEvents: Array<{ kind: string }> = [];
+    await writeFile(tokenFile, "token", { mode: 0o600 });
+    Reflect.set(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+      remoteEvents.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 204 });
+    });
+    try {
+      const browser = relay();
+      const broker = new VoiceBroker({
+        sonioxApiKey: "key",
+        sonioxTtsVoice: "voice",
+        voiceControlUrl: "http://127.0.0.1:49371/speech",
+        voiceControlTokenFile: tokenFile,
+      } as Config, { record() {} } as never);
+
+      await broker.open(browser as never);
+      await broker.message(browser as never, JSON.stringify({ kind: "resume" }));
+
+      expect(browser.messages).toContain(JSON.stringify({ kind: "resumed", accepted: true }));
+
+      broker.close(browser as never);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start", "remote-release"]);
+    } finally {
+      Reflect.set(globalThis, "fetch", nativeFetch);
+      await rm(tokenFile, { force: true });
+    }
+  });
 });

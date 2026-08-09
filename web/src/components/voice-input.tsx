@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, MutableRefObject, PointerEvent } from "react";
-import { Mic } from "lucide-react";
+import { Loader2, Mic, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import type { VoiceButtonMode } from "@/hooks/use-display-prefs";
 
 export type VoicePhase = "idle" | "listening" | "finalizing" | "working" | "speaking";
 
@@ -16,7 +15,7 @@ export type VoiceState = {
 type VoiceInputProps = {
   paneId: string;
   session?: string;
-  mode: VoiceButtonMode;
+  showControl: boolean;
   disabled: boolean;
   onTranscript: (text: string) => Promise<boolean>;
   onVoiceStateChange: (state: VoiceState | null) => void;
@@ -39,9 +38,11 @@ type VoiceMessage =
   | { kind: "tts"; generation: number; streamId: string; sampleRate: number }
   | { kind: "tts-end"; generation: number; streamId: string }
   | { kind: "handoff-ready"; generation: number; accepted: boolean }
+  | { kind: "resumed"; accepted: boolean }
   | { kind: "error"; message: string };
 
 type State = "idle" | "connecting" | "recording" | "stopping" | "sending";
+type Recovery = "reconnecting" | "failed" | null;
 
 function isVoicePhase(value: unknown): value is VoicePhase {
   return value === "idle" || value === "listening" || value === "finalizing" || value === "working" || value === "speaking";
@@ -74,6 +75,10 @@ function parseVoiceMessage(raw: unknown): VoiceMessage | null {
       return generation === null || !("accepted" in raw) || typeof raw.accepted !== "boolean"
         ? null
         : { kind: "handoff-ready", generation, accepted: raw.accepted };
+    case "resumed":
+      return !("accepted" in raw) || typeof raw.accepted !== "boolean"
+        ? null
+        : { kind: "resumed", accepted: raw.accepted };
     case "error":
       return !("message" in raw) || typeof raw.message !== "string" ? null : { kind: "error", message: raw.message };
     case "voice-state": {
@@ -98,6 +103,7 @@ function parseVoiceMessage(raw: unknown): VoiceMessage | null {
 }
 
 const STT_SAMPLE_RATE = 16_000;
+const RECONNECT_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000];
 
 /** Convert microphone floats to the exact mono PCM format the bridge accepts. */
 export function pcm16(input: Float32Array, inputRate: number): Int16Array<ArrayBuffer> {
@@ -200,7 +206,7 @@ function websocketUrl(paneId: string, session?: string): string {
 export function VoiceInput({
   paneId,
   session,
-  mode,
+  showControl,
   disabled,
   onTranscript,
   onVoiceStateChange,
@@ -218,23 +224,28 @@ export function VoiceInput({
   const handedOffRef = useRef(false);
   const handoffRef = useRef<Handoff | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptsRef = useRef(0);
   const voiceRef = useRef<VoiceState | null>(null);
   const showOverlayRef = useRef(true);
   const nextAudioRef = useRef<{ generation: number; streamId: string; sampleRate: number } | null>(null);
   const callbacksRef = useRef({ onTranscript, onVoiceStateChange, onError });
   callbacksRef.current = { onTranscript, onVoiceStateChange, onError };
   const [state, setState] = useState<State>("idle");
+  const [recovery, setRecovery] = useState<Recovery>(null);
 
   useEffect(
     () => {
       disposedRef.current = false;
       return () => {
+        disposedRef.current = true;
         wantsRecordingRef.current = false;
         sttReadyRef.current = false;
         bufferedAudioRef.current = [];
         settleHandoff(false);
         releaseRemote();
         if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         stopCapture(captureRef);
         playerRef.current.dispose();
         socketRef.current?.close();
@@ -243,6 +254,14 @@ export function VoiceInput({
     },
     [],
   );
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") scheduleReconnect(0);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [paneId, session]);
 
   function releaseRemote(): void {
     const socket = socketRef.current;
@@ -283,6 +302,60 @@ export function VoiceInput({
     callbacksRef.current.onError(message);
   }
 
+  function scheduleReconnect(delay?: number): void {
+    if (
+      disposedRef.current ||
+      !handedOffRef.current ||
+      socketRef.current?.readyState === WebSocket.OPEN ||
+      connectingRef.current ||
+      reconnectTimerRef.current
+    ) return;
+    if (document.visibilityState === "hidden") {
+      setRecovery("reconnecting");
+      return;
+    }
+    const retryDelay = delay ?? RECONNECT_DELAYS_MS[reconnectAttemptsRef.current++];
+    if (retryDelay === undefined) {
+      setRecovery("failed");
+      callbacksRef.current.onError("Voice reconnect failed. Tap Reconnect to retry.");
+      return;
+    }
+    setRecovery("reconnecting");
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      void connect().catch(() => scheduleReconnect());
+    }, retryDelay);
+  }
+
+  function retry(): void {
+    if (disposedRef.current) return;
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = null;
+    reconnectAttemptsRef.current = 0;
+    setRecovery("reconnecting");
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      resume(socket);
+      return;
+    }
+    void connect().catch(() => {
+      if (handedOffRef.current) scheduleReconnect();
+      else {
+        setRecovery("failed");
+        callbacksRef.current.onError("Voice reconnect failed. Tap Reconnect to retry.");
+      }
+    });
+  }
+
+  function resume(socket: WebSocket): void {
+    if (!handedOffRef.current) return;
+    try {
+      socket.send(JSON.stringify({ kind: "resume" }));
+    } catch {
+      socket.close();
+    }
+  }
+
   function connect(): Promise<WebSocket> {
     if (socketRef.current?.readyState === WebSocket.OPEN) return Promise.resolve(socketRef.current);
     if (connectingRef.current) return connectingRef.current;
@@ -316,7 +389,10 @@ export function VoiceInput({
           heartbeatRef.current = setInterval(() => {
             if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ kind: "keepalive" }));
           }, 15_000);
+          reconnectAttemptsRef.current = 0;
+          setRecovery(null);
           deferred.resolve(socket);
+          resume(socket);
           return;
         case "recording": {
           if (message.generation !== voiceRef.current?.generation) return;
@@ -356,6 +432,14 @@ export function VoiceInput({
         case "handoff-ready":
           settleHandoff(message.accepted, message.generation);
           return;
+        case "resumed":
+          if (message.accepted) {
+            setRecovery(null);
+            return;
+          }
+          setRecovery("failed");
+          callbacksRef.current.onError("Voice reconnect was rejected. Tap Reconnect to retry.");
+          return;
         case "tts":
           if (message.generation === voiceRef.current?.generation && voiceRef.current.phase === "speaking") {
             nextAudioRef.current = message;
@@ -373,15 +457,28 @@ export function VoiceInput({
           reportError(message.message);
       }
     };
-    socket.onerror = () => deferred.reject(new Error("Voice connection failed"));
+    socket.onerror = () => {
+      deferred.reject(new Error("Voice connection failed"));
+      socket.close();
+    };
     socket.onclose = () => {
-      if (socketRef.current === socket) socketRef.current = null;
+      if (socketRef.current !== socket) return;
+      socketRef.current = null;
       connectingRef.current = null;
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
       heartbeatRef.current = null;
       settleHandoff(false);
-      if (!disposedRef.current && (wantsRecordingRef.current || voiceRef.current?.phase === "working" || voiceRef.current?.phase === "speaking")) {
-        reportError("Voice connection closed");
+      if (disposedRef.current) return;
+      if (handedOffRef.current) {
+        nextAudioRef.current = null;
+        playerRef.current.stop();
+        publishVoice(null);
+        setState("idle");
+        scheduleReconnect();
+        return;
+      }
+      if (wantsRecordingRef.current || voiceRef.current?.phase === "working" || voiceRef.current?.phase === "speaking") {
+        reportError("Voice recording interrupted");
       }
     };
     return deferred.promise;
@@ -450,6 +547,10 @@ export function VoiceInput({
 
   async function start(): Promise<void> {
     if (disabled || wantsRecordingRef.current || state !== "idle") return;
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = null;
+    reconnectAttemptsRef.current = 0;
+    setRecovery(null);
     settleHandoff(false);
     wantsRecordingRef.current = true;
     sttReadyRef.current = false;
@@ -485,59 +586,60 @@ export function VoiceInput({
   }
 
   function handlePointerDown(event: PointerEvent<HTMLButtonElement>): void {
-    if (mode !== "push-to-talk" || !event.isPrimary) return;
+    if (!event.isPrimary) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     void start();
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
-    if (mode !== "push-to-talk" || event.repeat || (event.key !== " " && event.key !== "Enter")) return;
+    if (event.repeat || (event.key !== " " && event.key !== "Enter")) return;
     event.preventDefault();
     void start();
   }
 
   function handleKeyUp(event: KeyboardEvent<HTMLButtonElement>): void {
-    if (mode !== "push-to-talk" || (event.key !== " " && event.key !== "Enter")) return;
+    if (event.key !== " " && event.key !== "Enter") return;
     event.preventDefault();
     stop();
   }
 
-  function handleClick(): void {
-    if (mode === "push-to-talk") {
-      if (wantsRecordingRef.current) stop();
-    } else if (wantsRecordingRef.current) {
-      stop();
-    } else {
-      void start();
-    }
-  }
-
+  if (!showControl && recovery !== "failed") return null;
+  const recovering = recovery === "reconnecting";
+  const retrying = recovery === "failed";
   return (
     <Button
       type="button"
-      variant={state === "idle" ? "ghost" : "destructive"}
+      variant={retrying ? "outline" : state === "idle" ? "default" : "destructive"}
       size="icon"
-      className={`rounded-full ${state === "idle" ? "text-muted-foreground" : "text-destructive-foreground"}`}
-      disabled={disabled}
+      className={`size-11 shrink-0 rounded-full ${state === "idle" || retrying ? "" : "text-destructive-foreground"}`}
+      disabled={disabled || recovering}
       aria-label={
-        state === "idle"
-          ? mode === "push-to-talk"
-            ? "Hold to talk"
-            : "Start voice input"
-          : mode === "push-to-talk"
-            ? "Release to send voice input"
-            : "Stop and send voice input"
+        retrying
+          ? "Reconnect voice"
+          : recovering
+            ? "Reconnecting voice"
+            : state === "idle"
+              ? "Hold to talk"
+              : "Release to send voice input"
       }
       aria-pressed={state !== "idle"}
-      onPointerDown={handlePointerDown}
-      onPointerUp={mode === "push-to-talk" ? stop : undefined}
-      onPointerCancel={mode === "push-to-talk" ? stop : undefined}
-      onPointerLeave={mode === "push-to-talk" ? stop : undefined}
-      onKeyDown={handleKeyDown}
-      onKeyUp={handleKeyUp}
-      onClick={handleClick}
+      onClick={retrying ? retry : undefined}
+      onPointerDown={retrying || recovering ? undefined : handlePointerDown}
+      onPointerUp={retrying || recovering ? undefined : stop}
+      onPointerCancel={retrying || recovering ? undefined : stop}
+      onPointerLeave={retrying || recovering ? undefined : stop}
+      onKeyDown={retrying || recovering ? undefined : handleKeyDown}
+      onKeyUp={retrying || recovering ? undefined : handleKeyUp}
     >
-      {state === "idle" ? <Mic className="size-4" /> : <span aria-hidden="true" className="size-3 rounded-[1px] bg-current" />}
+      {retrying ? (
+        <RotateCcw className="size-4" />
+      ) : recovering ? (
+        <Loader2 className="size-4 animate-spin" />
+      ) : state === "idle" ? (
+        <Mic className="size-4" />
+      ) : (
+        <span aria-hidden="true" className="size-3 rounded-[1px] bg-current" />
+      )}
     </Button>
   );
 }

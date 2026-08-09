@@ -3,7 +3,6 @@ import { useCallback, useState } from "react";
 // Terminal mirror display preferences, persisted in localStorage.
 // Safe to call in SSR contexts (localStorage guarded throughout).
 
-export type VoiceButtonMode = "toggle" | "push-to-talk";
 export type VoiceResultMode = "send" | "insert";
 
 export interface DisplayPrefs {
@@ -21,8 +20,6 @@ export interface DisplayPrefs {
    * The universal fallback, made user-controllable.
    */
   rawTerminal: boolean;
-  /** How a voice turn ends: second tap, or releasing a held button. */
-  voiceButtonMode: VoiceButtonMode;
   /** Whether a final voice transcript is sent now or left in the composer for review. */
   voiceResultMode: VoiceResultMode;
 }
@@ -31,7 +28,7 @@ const STORAGE_KEY = "collie:display-prefs:v4";
 export const FONT_MIN = 9;
 export const FONT_MAX = 16;
 const DEFAULTS: DisplayPrefs = {
-  wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send",
+  wrap: true, fontSize: 12, rawTerminal: false, voiceResultMode: "send",
 };
 
 function clampFont(n: number): number {
@@ -49,7 +46,6 @@ function loadPrefs(): DisplayPrefs {
       wrap: typeof p.wrap === "boolean" ? p.wrap : DEFAULTS.wrap,
       fontSize: typeof p.fontSize === "number" ? clampFont(p.fontSize) : DEFAULTS.fontSize,
       rawTerminal: typeof p.rawTerminal === "boolean" ? p.rawTerminal : DEFAULTS.rawTerminal,
-      voiceButtonMode: p.voiceButtonMode === "push-to-talk" ? "push-to-talk" : DEFAULTS.voiceButtonMode,
       voiceResultMode: p.voiceResultMode === "insert" ? "insert" : DEFAULTS.voiceResultMode,
     };
   } catch {
@@ -77,8 +73,6 @@ export interface UseDisplayPrefsReturn {
   stepFontSize: (delta: number) => void;
   /** Toggle or explicitly set the raw-terminal escape hatch. */
   setRawTerminal: (raw: boolean) => void;
-  /** Select whether the microphone button toggles or runs while held. */
-  setVoiceButtonMode: (mode: VoiceButtonMode) => void;
   /** Send final speech immediately, or leave it in the composer for review. */
   setVoiceResultMode: (mode: VoiceResultMode) => void;
 }
@@ -118,13 +112,6 @@ export function useDisplayPrefs(): UseDisplayPrefsReturn {
     });
   }, []);
 
-  const setVoiceButtonMode = useCallback((voiceButtonMode: VoiceButtonMode) => {
-    setPrefs((p) => {
-      const next: DisplayPrefs = { ...p, voiceButtonMode };
-      savePrefs(next);
-      return next;
-    });
-  }, []);
 
   const setVoiceResultMode = useCallback((voiceResultMode: VoiceResultMode) => {
     setPrefs((p) => {
@@ -134,5 +121,5 @@ export function useDisplayPrefs(): UseDisplayPrefsReturn {
     });
   }, []);
 
-  return { prefs, setWrap, setFontSize, stepFontSize, setRawTerminal, setVoiceButtonMode, setVoiceResultMode };
+  return { prefs, setWrap, setFontSize, stepFontSize, setRawTerminal, setVoiceResultMode };
 }

@@ -9,7 +9,7 @@ describe("useDisplayPrefs", () => {
 
   it("returns defaults when localStorage is empty", () => {
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" });
+    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceResultMode: "send" });
   });
 
   it("persists wrap=true and reloads it on mount", () => {
@@ -36,7 +36,6 @@ describe("useDisplayPrefs", () => {
       wrap: false,
       fontSize: 14,
       rawTerminal: true,
-      voiceButtonMode: "push-to-talk",
       voiceResultMode: "send",
     });
   });
@@ -51,12 +50,6 @@ describe("useDisplayPrefs", () => {
     expect(reloaded.current.prefs.rawTerminal).toBe(true);
   });
 
-  it("persists the selected voice button mode", () => {
-    const { result } = renderHook(() => useDisplayPrefs());
-    act(() => result.current.setVoiceButtonMode("push-to-talk"));
-    expect(result.current.prefs.voiceButtonMode).toBe("push-to-talk");
-    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY)!).voiceButtonMode).toBe("push-to-talk");
-  });
 
   it("setFontSize clamps below minimum to 9", () => {
     const { result } = renderHook(() => useDisplayPrefs());
@@ -91,12 +84,12 @@ describe("useDisplayPrefs", () => {
   it("falls back to defaults on malformed JSON", () => {
     window.localStorage.setItem(STORAGE_KEY, "not-json{{{");
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" });
+    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceResultMode: "send" });
   });
 
   it("falls back to defaults when stored value is not an object", () => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(42));
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceButtonMode: "toggle", voiceResultMode: "send" });
+    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 12, rawTerminal: false, voiceResultMode: "send" });
   });
 });

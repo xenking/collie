@@ -1,7 +1,7 @@
-import { StrictMode } from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode, useState } from "react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { pcm16, VoiceInput } from "./voice-input";
+import { pcm16, VoiceInput, type VoiceState } from "./voice-input";
 
 class FakeSocket {
   static readonly OPEN = 1;
@@ -49,6 +49,19 @@ const stream = {
   getTracks: () => [{ stop: vi.fn() }],
 } as unknown as MediaStream;
 
+async function startVoice(): Promise<HTMLButtonElement> {
+  const button = screen.getByRole("button", { name: "Hold to talk" }) as HTMLButtonElement;
+  Object.defineProperty(button, "setPointerCapture", { configurable: true, value: vi.fn() });
+  fireEvent.pointerDown(button, { pointerId: 1, isPrimary: true });
+  await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"start"}'));
+  return button;
+}
+
+function releaseVoice(button: HTMLElement): void {
+  fireEvent.pointerUp(button, { pointerId: 1, isPrimary: true });
+}
+
+
 describe("VoiceInput", () => {
   beforeEach(() => {
     FakeSocket.instances = [];
@@ -72,7 +85,7 @@ describe("VoiceInput", () => {
       <StrictMode>
         <VoiceInput
           paneId="w1:p4"
-          mode="toggle"
+          showControl
           disabled={false}
           onTranscript={onTranscript}
           onVoiceStateChange={onVoiceStateChange}
@@ -81,14 +94,13 @@ describe("VoiceInput", () => {
       </StrictMode>,
     );
 
-    const button = screen.getByRole("button", { name: "Start voice input" });
-    fireEvent.click(button);
+    const button = await startVoice();
     await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
     await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce());
     await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"start"}'));
     FakeSocket.instances[0].emit({ kind: "voice-state", generation: 1, phase: "listening" });
     FakeSocket.instances[0].emit({ kind: "recording", generation: 1 });
-    fireEvent.click(screen.getByRole("button", { name: "Stop and send voice input" }));
+    releaseVoice(button);
     FakeSocket.instances[0].emit({
       kind: "voice-state",
       generation: 1,
@@ -112,11 +124,137 @@ describe("VoiceInput", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it("reconnects a handed-off relay after the mobile socket closes", async () => {
+    const onTranscript = vi.fn(async () => true);
+    const onError = vi.fn();
+    render(
+      <VoiceInput
+        paneId="w1:p4"
+        showControl
+        disabled={false}
+        onTranscript={onTranscript}
+        onVoiceStateChange={vi.fn()}
+        onError={onError}
+      />,
+    );
+
+    const button = await startVoice();
+    releaseVoice(button);
+    FakeSocket.instances[0]?.emit({ kind: "voice-state", generation: 1, phase: "working" });
+    FakeSocket.instances[0]?.emit({ kind: "final", generation: 1, text: "Привет" });
+    await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"handoff","generation":1}'));
+    FakeSocket.instances[0]?.emit({ kind: "handoff-ready", generation: 1, accepted: true });
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Привет"));
+
+    FakeSocket.instances[0]?.close();
+
+    await waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+    expect(FakeSocket.instances[1]?.send).toHaveBeenCalledWith('{"kind":"resume"}');
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("does not reconnect a handed-off relay after the composer unmounts", async () => {
+    const onTranscript = vi.fn(async () => true);
+    const { unmount } = render(
+      <VoiceInput
+        paneId="w1:p4"
+        showControl
+        disabled={false}
+        onTranscript={onTranscript}
+        onVoiceStateChange={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+
+    const button = await startVoice();
+    releaseVoice(button);
+    FakeSocket.instances[0]?.emit({ kind: "voice-state", generation: 1, phase: "working" });
+    FakeSocket.instances[0]?.emit({ kind: "final", generation: 1, text: "Привет" });
+    await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"handoff","generation":1}'));
+    FakeSocket.instances[0]?.emit({ kind: "handoff-ready", generation: 1, accepted: true });
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Привет"));
+
+    unmount();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it("waits for unlock before reconnecting a handed-off relay", async () => {
+    let visibility = "hidden";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    try {
+      const onTranscript = vi.fn(async () => true);
+      render(
+        <VoiceInput
+          paneId="w1:p4"
+          showControl
+          disabled={false}
+          onTranscript={onTranscript}
+          onVoiceStateChange={vi.fn()}
+          onError={vi.fn()}
+        />,
+      );
+
+      const button = await startVoice();
+      releaseVoice(button);
+      FakeSocket.instances[0]?.emit({ kind: "voice-state", generation: 1, phase: "working" });
+      FakeSocket.instances[0]?.emit({ kind: "final", generation: 1, text: "Привет" });
+      await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"handoff","generation":1}'));
+      FakeSocket.instances[0]?.emit({ kind: "handoff-ready", generation: 1, accepted: true });
+      await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Привет"));
+
+      FakeSocket.instances[0]?.close();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(FakeSocket.instances).toHaveLength(1);
+
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      await waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+      expect(FakeSocket.instances[1]?.send).toHaveBeenCalledWith('{"kind":"resume"}');
+    } finally {
+      delete (document as { visibilityState?: unknown }).visibilityState;
+    }
+  });
+
+  it("offers a manual retry when reconnect resume is rejected", async () => {
+    const onTranscript = vi.fn(async () => true);
+    const onError = vi.fn();
+    render(
+      <VoiceInput
+        paneId="w1:p4"
+        showControl
+        disabled={false}
+        onTranscript={onTranscript}
+        onVoiceStateChange={vi.fn()}
+        onError={onError}
+      />,
+    );
+
+    const button = await startVoice();
+    releaseVoice(button);
+    FakeSocket.instances[0]?.emit({ kind: "voice-state", generation: 1, phase: "working" });
+    FakeSocket.instances[0]?.emit({ kind: "final", generation: 1, text: "Привет" });
+    await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"handoff","generation":1}'));
+    FakeSocket.instances[0]?.emit({ kind: "handoff-ready", generation: 1, accepted: true });
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Привет"));
+
+    FakeSocket.instances[0]?.close();
+    await waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+    await waitFor(() => expect(FakeSocket.instances[1]?.send).toHaveBeenCalledWith('{"kind":"resume"}'));
+    act(() => FakeSocket.instances[1]?.emit({ kind: "resumed", accepted: false }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("Voice reconnect was rejected. Tap Reconnect to retry."));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Reconnect voice" }));
+    await waitFor(() => {
+      expect(FakeSocket.instances[1]?.send.mock.calls.filter(([message]) => message === '{"kind":"resume"}')).toHaveLength(2);
+    });
+  });
+
   it("stops an active voice turn on its second click", async () => {
     render(
       <VoiceInput
         paneId="w1:p4"
-        mode="toggle"
+        showControl
         disabled={false}
         onTranscript={vi.fn(async () => true)}
         onVoiceStateChange={vi.fn()}
@@ -124,10 +262,8 @@ describe("VoiceInput", () => {
       />,
     );
 
-    const button = screen.getByRole("button", { name: "Start voice input" });
-    fireEvent.click(button);
-    await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"start"}'));
-    fireEvent.click(screen.getByRole("button", { name: "Stop and send voice input" }));
+    const button = await startVoice();
+    releaseVoice(button);
     expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"end"}');
   });
 
@@ -135,7 +271,7 @@ describe("VoiceInput", () => {
     render(
       <VoiceInput
         paneId="w1:p4"
-        mode="toggle"
+        showControl
         disabled={false}
         onTranscript={vi.fn(async () => true)}
         onVoiceStateChange={vi.fn()}
@@ -143,17 +279,17 @@ describe("VoiceInput", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Start voice input" }));
+    const button = await startVoice();
     await waitFor(() => expect(FakeAudioContext.processors).toHaveLength(1));
     FakeSocket.instances[0].emit({ kind: "voice-state", generation: 1, phase: "listening" });
     FakeSocket.instances[0].emit({ kind: "recording", generation: 1 });
-    fireEvent.click(screen.getByRole("button", { name: "Stop and send voice input" }));
+    releaseVoice(button);
     FakeAudioContext.processors[0]?.onaudioprocess?.({
       inputBuffer: { getChannelData: () => new Float32Array(4096) },
     } as unknown as AudioProcessingEvent);
     FakeSocket.instances[0].emit({ kind: "voice-state", generation: 1, phase: "idle" });
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Start voice input" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Hold to talk" })).toBeTruthy());
 
     expect(FakeSocket.instances[0].send.mock.calls.filter(([message]) => message instanceof ArrayBuffer)).toHaveLength(0);
   });
@@ -162,7 +298,7 @@ describe("VoiceInput", () => {
     render(
       <VoiceInput
         paneId="w1:p4"
-        mode="push-to-talk"
+        showControl
         disabled={false}
         onTranscript={vi.fn(async () => true)}
         onVoiceStateChange={vi.fn()}
@@ -170,11 +306,51 @@ describe("VoiceInput", () => {
       />,
     );
 
-    const button = screen.getByRole("button", { name: "Hold to talk" });
-    Object.defineProperty(button, "setPointerCapture", { value: vi.fn() });
-    fireEvent.pointerDown(button, { pointerId: 1, isPrimary: true });
-    await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"start"}'));
-    fireEvent.pointerUp(button, { pointerId: 1, isPrimary: true });
+    const button = await startVoice();
+    releaseVoice(button);
+    expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"end"}');
+  });
+
+  it("keeps a held PTT control mounted when a provisional caption fills the composer", async () => {
+    function ComposerVoiceHarness() {
+      const [input, setInput] = useState("");
+      const [voice, setVoice] = useState<VoiceState | null>(null);
+      return (
+        <>
+          <output>{input}</output>
+          <VoiceInput
+            paneId="w1:p4"
+            showControl={!input.trim() || voice !== null}
+            disabled={false}
+            onTranscript={vi.fn(async () => true)}
+            onVoiceStateChange={(next) => {
+              if (next?.caption?.role === "user") {
+                setInput(next.caption.text);
+                setVoice({ ...next, caption: undefined });
+                return;
+              }
+              setVoice(next);
+            }}
+            onError={vi.fn()}
+          />
+        </>
+      );
+    }
+
+    render(<ComposerVoiceHarness />);
+    const button = await startVoice();
+    act(() => {
+      FakeSocket.instances[0]?.emit({
+        kind: "voice-state",
+        generation: 1,
+        phase: "listening",
+        caption: { role: "user", text: "Привет", provisional: true },
+      });
+    });
+    await waitFor(() => expect(screen.getByText("Привет")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Release to send voice input" })).toBe(button);
+
+    releaseVoice(button);
     expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"end"}');
   });
 
@@ -183,18 +359,20 @@ describe("VoiceInput", () => {
     render(
       <VoiceInput
         paneId="w1:p4"
+        showControl
         disabled={false}
-        mode="toggle"
         onTranscript={vi.fn(async () => true)}
         onVoiceStateChange={vi.fn()}
         onError={vi.fn()}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Start voice input" }));
+    const button = screen.getByRole("button", { name: "Hold to talk" });
+    Object.defineProperty(button, "setPointerCapture", { configurable: true, value: vi.fn() });
+    fireEvent.pointerDown(button, { pointerId: 1, isPrimary: true });
     await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
     await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce());
-    fireEvent.click(screen.getByRole("button", { name: "Stop and send voice input" }));
+    releaseVoice(button);
     FakeSocket.instances[0].emit({ kind: "ready" });
     await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"start"}'));
     FakeSocket.instances[0].emit({ kind: "recording", generation: 1 });
@@ -207,7 +385,7 @@ describe("VoiceInput", () => {
     render(
       <VoiceInput
         paneId="w1:p4"
-        mode="toggle"
+        showControl
         disabled={false}
         onTranscript={vi.fn(async () => true)}
         onVoiceStateChange={onVoiceStateChange}
@@ -215,8 +393,7 @@ describe("VoiceInput", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Start voice input" }));
-    await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"start"}'));
+    await startVoice();
     FakeSocket.instances[0].emit({
       kind: "voice-state",
       generation: 1,
