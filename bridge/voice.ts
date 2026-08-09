@@ -259,7 +259,7 @@ export class TurnController {
     if (
       this.#closed ||
       !this.#handedOff ||
-      this.#phase !== "working" ||
+      (this.#phase !== "working" && this.#phase !== "idle") ||
       this.#speech ||
       this.#awaitingPlayback ||
       !text.trim()
@@ -574,7 +574,7 @@ export class VoiceBroker {
   close(ws: VoiceSocket): void {
     const relay = this.#relays.get(ws.data.sessionFile);
     if (!relay || !relay.owns(ws)) return;
-    if (!relay.handedOff) void this.#setRemote(ws.data.sessionFile, "remote-release").catch(() => undefined);
+    void this.#setRemote(ws.data.sessionFile, "remote-release").catch(() => undefined);
     relay.close();
     this.#relays.delete(ws.data.sessionFile);
   }

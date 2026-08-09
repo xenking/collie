@@ -1,6 +1,10 @@
+import { rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, jest, test } from "bun:test";
 
-import { sttConfig, sttUpdate, ttsConfig, TurnController, voiceTokenMatches } from "./voice.ts";
+import type { Config } from "./config.ts";
+import { sttConfig, sttUpdate, ttsConfig, TurnController, VoiceBroker, voiceTokenMatches } from "./voice.ts";
 
 class FakeSonioxSocket extends EventTarget {
   static connections: FakeSonioxSocket[] = [];
@@ -43,8 +47,9 @@ function relay() {
   };
 }
 
-function streamId(socket: FakeSonioxSocket): string {
-  const config = socket.sent.find((message) => typeof message === "string" && message.includes("\"stream_id\""));
+function streamId(socket: FakeSonioxSocket, index = 0): string {
+  const configs = socket.sent.filter((message) => typeof message === "string" && message.includes("\"stream_id\""));
+  const config = configs.at(index);
   if (typeof config !== "string") throw new Error("missing TTS configuration");
   const match = /"stream_id":"([^"]+)"/.exec(config);
   if (!match?.[1]) throw new Error("missing TTS stream ID");
@@ -125,6 +130,12 @@ describe("Soniox proxy contracts", () => {
 
       controller.playbackEnded(1, id);
       expect(browser.messages).toContain(JSON.stringify({ kind: "voice-state", generation: 1, phase: "idle" }));
+      expect(controller.speak("Следующий ответ")).toBe(true);
+      await Promise.resolve();
+      const nextId = streamId(tts, -1);
+      expect(nextId).not.toBe(id);
+      tts.message({ stream_id: nextId, terminated: true });
+      controller.playbackEnded(1, nextId);
       await controller.start();
       expect(FakeSonioxSocket.connections).toHaveLength(2);
     } finally {
@@ -229,6 +240,46 @@ describe("Soniox proxy contracts", () => {
     } finally {
       controller?.close();
       Reflect.set(globalThis, "WebSocket", nativeWebSocket);
+    }
+  });
+});
+
+describe("VoiceBroker remote lease", () => {
+  test("releases a browser relay that closes after successful handoff", async () => {
+    const nativeFetch = globalThis.fetch;
+    const nativeWebSocket = globalThis.WebSocket;
+    const tokenFile = join(tmpdir(), `collie-voice-${crypto.randomUUID()}.token`);
+    const remoteEvents: Array<{ kind: string }> = [];
+    FakeSonioxSocket.connections = [];
+    await writeFile(tokenFile, "token", { mode: 0o600 });
+    Reflect.set(globalThis, "WebSocket", FakeSonioxSocket);
+    Reflect.set(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+      remoteEvents.push(JSON.parse(String(init?.body)));
+      return new Response(null, { status: 204 });
+    });
+    try {
+      const browser = relay();
+      const broker = new VoiceBroker({
+        sonioxApiKey: "key",
+        sonioxTtsVoice: "voice",
+        voiceControlUrl: "http://127.0.0.1:49371/speech",
+        voiceControlTokenFile: tokenFile,
+      } as Config, { record() {} } as never);
+
+      await broker.open(browser as never);
+      await broker.message(browser as never, JSON.stringify({ kind: "start" }));
+      const stt = FakeSonioxSocket.connections[0];
+      await broker.message(browser as never, JSON.stringify({ kind: "end" }));
+      stt?.message({ tokens: [{ text: "Привет", is_final: true }, { text: "<fin>", is_final: true }] });
+      await broker.message(browser as never, JSON.stringify({ kind: "handoff", generation: 1 }));
+      broker.close(browser as never);
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start", "remote-release"]);
+    } finally {
+      Reflect.set(globalThis, "fetch", nativeFetch);
+      Reflect.set(globalThis, "WebSocket", nativeWebSocket);
+      await rm(tokenFile, { force: true });
     }
   });
 });
