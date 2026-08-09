@@ -38,6 +38,10 @@ const KEYS = [
   "HERDR_SOCKET_PATH",
   "HERDR_PLUGIN_STATE_DIR",
   "COLLIE_HERDR_DIAL",
+  "SONIOX_API_KEY",
+  "SONIOX_TTS_VOICE",
+  "OMP_VOICE_CONTROL_URL",
+  "OMP_VOICE_CONTROL_TOKEN_FILE",
 ];
 
 let saved: Record<string, string | undefined>;
@@ -84,6 +88,10 @@ describe("loadConfig", () => {
     expect(cfg.multiSession).toBe(true);
     // tailscale serve is used by default (reverse-proxy bypass is opt-in).
     expect(cfg.skipServe).toBe(false);
+    expect(cfg.sonioxApiKey).toBe("");
+    expect(cfg.sonioxTtsVoice).toBe("Adrian");
+    expect(cfg.voiceControlUrl).toBe("http://127.0.0.1:49371/speech");
+    expect(cfg.voiceControlTokenFile).toEndWith("/.config/omp-voice-control/token");
   });
 
   test("parses COLLIE_MULTI_SESSION as a boolean toggle (default on)", () => {
@@ -166,6 +174,11 @@ describe("loadConfig", () => {
     const cfg = loadConfig();
     expect(cfg.deviceHeader).toBe("X-Device-Id");
     expect(cfg.deviceAllowlist).toEqual(["phone", "laptop"]);
+  });
+
+  test("reads the Soniox key without preserving surrounding whitespace", () => {
+    process.env.SONIOX_API_KEY = "  soniox-secret  ";
+    expect(loadConfig().sonioxApiKey).toBe("soniox-secret");
   });
 
   test("parses integer env vars and falls back to the default on garbage", () => {

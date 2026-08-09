@@ -1,3 +1,4 @@
+import { rm, writeFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 
 import {
@@ -10,7 +11,9 @@ import {
   guard,
   historyParams,
   isHostAllowed,
+  isLoopbackPeer,
   isReservedAuthPath,
+  isVoiceDaemon,
   keysPane,
   normalizeTabLabel,
   paneReadResponse,
@@ -61,12 +64,38 @@ function cfg(overrides: Partial<Config> = {}): Config {
     vapidPublic: "",
     vapidPrivate: "",
     vapidSubject: "mailto:admin@example.com",
+    sonioxApiKey: "",
+    sonioxTtsVoice: "Adrian",
+    voiceControlUrl: "http://127.0.0.1:49371/speech",
+    voiceControlTokenFile: "/tmp/voice-token",
     stateDir: "/tmp/state",
     multiSession: true,
     skipServe: false,
     ...overrides,
   };
 }
+describe("isLoopbackPeer", () => {
+  test("uses the transport peer rather than a spoofable Host header", () => {
+    expect(isLoopbackPeer("127.0.0.1")).toBe(true);
+    expect(isLoopbackPeer("::1")).toBe(true);
+    expect(isLoopbackPeer("100.64.0.1")).toBe(false);
+    expect(isLoopbackPeer(null)).toBe(false);
+  });
+
+  test("requires both a loopback peer and the daemon token", async () => {
+    const tokenFile = `/tmp/collie-voice-token-${crypto.randomUUID()}`;
+    await writeFile(tokenFile, "local-token\n", { mode: 0o600 });
+    try {
+      const request = req({ host: "127.0.0.1:8787", "x-omp-voice-token": "local-token" });
+      expect(await isVoiceDaemon(request, cfg({ voiceControlTokenFile: tokenFile }), "127.0.0.1")).toBe(true);
+      expect(await isVoiceDaemon(request, cfg({ voiceControlTokenFile: tokenFile }), "100.64.0.1")).toBe(false);
+      expect(await isVoiceDaemon(req({ host: "127.0.0.1:8787" }), cfg({ voiceControlTokenFile: tokenFile }), "127.0.0.1")).toBe(false);
+    } finally {
+      await rm(tokenFile, { force: true });
+    }
+  });
+});
+
 
 describe("checkAccess — same-origin / CSRF gate", () => {
   test("allows a request with no Origin header (same-origin GET)", () => {

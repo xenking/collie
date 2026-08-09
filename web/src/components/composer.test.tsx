@@ -41,6 +41,7 @@ function renderComposer(overrides: Partial<ComponentProps<typeof Composer>> = {}
     gone: false,
     readOnly: false,
     dialogPresent: false,
+    voiceEnabled: false,
     text: "pane output",
     terminalDraft: null,
     rawTerminalDraft: null,
@@ -70,6 +71,7 @@ function renderComposerWithStatus(overrides: Partial<ComponentProps<typeof Compo
     gone: false,
     readOnly: false,
     dialogPresent: false,
+    voiceEnabled: false,
     text: "pane output",
     terminalDraft: null,
     rawTerminalDraft: null,
@@ -94,6 +96,19 @@ function renderComposerWithStatus(overrides: Partial<ComponentProps<typeof Compo
   render(<RouterProvider router={router} />);
   return props;
 }
+
+describe("Composer — voice capability", () => {
+  it("hides microphone capture until the bridge enables it", () => {
+    renderComposer();
+    expect(screen.queryByRole("button", { name: "Hold to talk" })).not.toBeInTheDocument();
+  });
+
+  it("renders microphone capture when the bridge enables it", () => {
+    renderComposer({ voiceEnabled: true });
+    expect(screen.getByRole("button", { name: "Hold to talk" })).toBeEnabled();
+  });
+});
+
 
 describe("Composer — send", () => {
   // #34: a dialog owns the TUI's keyboard. Sending free text at one loses the message AND makes the

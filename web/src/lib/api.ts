@@ -372,6 +372,7 @@ export function fetchConfig(): Promise<BridgeConfig> {
   return req<BridgeConfig>("/api/config");
 }
 
+
 /**
  * Set (or clear) the global notification snooze. `snoozedUntil` is an epoch-ms deadline; `null`
  * resumes immediately. Affects every device — it's a quiet-hours switch, not a per-device toggle.

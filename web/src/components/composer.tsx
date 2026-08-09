@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, ReactNode } from "react";
 import { useRevalidator } from "react-router";
-import { Check, ImagePlus, Keyboard, Loader2, Send, Settings2, Slash, X, Zap } from "lucide-react";
+import { Check, ImagePlus, Keyboard, Loader2, Mic, Send, Settings2, Slash, X, Zap } from "lucide-react";
 
 import type { DisplayPrefs } from "@/hooks/use-display-prefs";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
@@ -22,6 +22,7 @@ import { isSelfEcho, normalizeDraft } from "@/hooks/use-terminal-draft";
 import { adapterFor } from "@/lib/harness";
 import { sendGuardedReply } from "@/lib/reply-action";
 import { TerminalDraftPreview } from "@/components/terminal-draft-preview";
+import { VoiceInput } from "@/components/voice-input";
 
 export interface ComposerHandle {
   /** Focus the input and put the caret at the end — used by the mirror-tap-to-focus in AgentChat. */
@@ -43,6 +44,8 @@ interface ComposerProps {
   /** A dialog (prompt/wizard/preview/multi-select) is on screen, so the TUI's keyboard belongs to it.
    * Free-text sending is refused while true — see send(). Answer it with its own buttons instead. */
   dialogPresent: boolean;
+  /** The bridge can create a temporary STT key; absent/false hides voice rather than prompting for a dead mic. */
+  voiceEnabled?: boolean;
   /** Latest pane text — clears the pending-send preview once the mirror echoes the send back. */
   text: string;
   /** A user draft stranded on the terminal's "❯" input line (extractInputDraft), STABILISED across
@@ -125,7 +128,7 @@ function ComposerDock({
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { paneId, session, agent, isShell, gone, readOnly, dialogPresent, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, onSent },
+  { paneId, session, agent, isShell, gone, readOnly, dialogPresent, voiceEnabled = false, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, onSent },
   ref,
 ) {
   const revalidator = useRevalidator();
@@ -172,6 +175,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // update) or after a 6s safety timeout. Shows "You sent: …" so the user knows the message landed.
   const [lastSent, setLastSent] = useState<string | null>(null);
   const [justSent, setJustSent] = useState(false); // brief ✓ on the send button after a send
+  // `""` is a real live transcript with no recognised token yet; only `null` means no capture.
+  const [voiceTranscript, setVoiceTranscript] = useState<string | null>(null);
   // Terminal-draft preview bookkeeping. The composer input is EXCLUSIVELY phone-owned — a host draft
   // is never written into it implicitly; it only surfaces in a read-only preview the user can
   // deliberately Take over. There is no user-facing dismiss — the preview is honest state (a draft
@@ -291,7 +296,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // is SAFE on its own — it lives on the "❯" line and its preview re-derives after a reload — so it
   // never holds. When held, the self-updater shows the "tap to update" banner instead and updates once
   // the hold clears (see lib/self-update.ts). Keyed by pane so panes don't clobber each other's hold.
-  useHoldReload(`composer:${paneId}`, input.trim() !== "" || uploading);
+  useHoldReload(
+    `composer:${paneId}`,
+    input.trim() !== "" || uploading || voiceTranscript !== null,
+  );
 
   // Preview appearance latch. A STABLE, non-echo, not-already-handled draft flips the preview on —
   // this is the ONLY gate that waits for the 1.5s stability, so a blip or an in-flight send never
@@ -700,6 +708,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             onTakeOver={adapter?.draftIsOpaque?.(effectiveRaw) ? null : takeOverDraft}
           />
         )}
+        {voiceTranscript !== null && (
+          <div className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground" role="status">
+            <Mic className="size-3.5 shrink-0" />
+            <span className="min-w-0 truncate">{voiceTranscript || "Listening…"}</span>
+          </div>
+        )}
         <div className="flex items-end gap-2">
           {/* Attach image — messenger-style, left of the input, always available (previously buried
               in the keyboard-only quick-key strip). preventDefault keeps the textarea focused so the
@@ -716,6 +730,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           >
             {uploading ? <Loader2 className="size-4 animate-spin" /> : <ImagePlus className="size-4" />}
           </Button>
+          {voiceEnabled && (
+            <VoiceInput
+              paneId={paneId}
+              session={session}
+              disabled={locked || dialogPresent || sending}
+              onTranscript={(transcript) => send(transcript, false)}
+              onTranscriptChange={setVoiceTranscript}
+              onError={(message) => setStatus(message, "error")}
+            />
+          )}
           <ChatInput
             ref={inputRef}
             value={input}

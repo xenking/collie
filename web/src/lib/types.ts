@@ -257,6 +257,8 @@ export type CreateResponse = { ok: true; pane: CreatedPane } | { ok: false; erro
 export interface BridgeConfig {
   push: boolean;
   vapidPublicKey: string;
+  /** The bridge holds a Soniox credential and can proxy the Russian voice conversation. */
+  voice: boolean;
   /** Build id of the bundle the bridge is currently serving (for stale-cache detection). */
   build?: string;
 }

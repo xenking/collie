@@ -144,7 +144,7 @@ export async function getPushState(): Promise<PushState> {
   try {
     cfg = await fetchConfig();
   } catch {
-    cfg = { push: false, vapidPublicKey: "" };
+    cfg = { push: false, vapidPublicKey: "", voice: false };
   }
   if (!cfg.push || !cfg.vapidPublicKey) {
     return { availability: "server-off", subscribed, userDisabled };

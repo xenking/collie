@@ -9,6 +9,7 @@ import { useDisplayPrefs } from "@/hooks/use-display-prefs";
 import { useStableTerminalDraft } from "@/hooks/use-terminal-draft";
 import { isConnecting } from "@/lib/connection";
 import { setStatus } from "@/lib/status";
+import { fetchConfig } from "@/lib/api";
 import { ChatMessageList, type ChatMessageListHandle } from "@/components/ui/chat/chat-message-list";
 import { BottomSheet } from "@/components/ui/sheet";
 import { AppHeader } from "@/components/app-header";
@@ -123,6 +124,23 @@ export function AgentChat({
   // This device isn't allowlisted to type into agents: the backend rejects every write, so the
   // composer drops to read-only (and shows a banner). The mirror still polls (reading is fine).
   const readOnly = isReadOnly(device);
+
+  // This capability is false until the bridge confirms it. An old/unconfigured server therefore
+  // never asks for microphone permission merely to answer 503.
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void fetchConfig()
+      .then((config) => {
+        if (live) setVoiceEnabled(config.voice);
+      })
+      .catch(() => {
+        if (live) setVoiceEnabled(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // Drawers/sheets are mutually exclusive — at most one open. A single value makes that invariant
   // unrepresentable to violate.
@@ -851,6 +869,7 @@ export function AgentChat({
             gone={gone}
             readOnly={readOnly}
             dialogPresent={dialogPresent}
+            voiceEnabled={voiceEnabled}
             text={text}
             terminalDraft={terminalDraft}
             rawTerminalDraft={rawTerminalDraft}

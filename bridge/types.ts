@@ -272,6 +272,8 @@ export type CreateResponse = { ok: true; pane: CreatedPane } | { ok: false; erro
 export interface BridgeConfig {
   push: boolean;
   vapidPublicKey: string;
+  /** The bridge can mint a temporary Soniox STT key for this browser. */
+  voice: boolean;
   /** Build id of the bundle the bridge is currently serving (for stale-cache detection). */
   build?: string;
 }

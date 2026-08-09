@@ -1,4 +1,5 @@
-import { mkdir } from "node:fs/promises";
+import type { Server } from "bun";
+import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, normalize, sep } from "node:path";
 import type { ActivityLedger } from "./activity.ts";
@@ -21,7 +22,7 @@ import { adapterFor, buildJournalRegistry } from "./journal/registry.ts";
 import { TranscriptStore } from "./journal/store.ts";
 import type { JournalAdapter } from "./journal/types.ts";
 import { toPaneWire } from "./types.ts";
-import type {
+import {
   ActionResponse,
   AgentView,
   BridgeConfig,
@@ -32,6 +33,7 @@ import type {
   SnapshotResponse,
   UploadResponse,
 } from "./types.ts";
+import { VoiceBroker, voiceTokenMatches, type VoiceSocketData } from "./voice.ts";
 
 // Image upload limits. Herdr's socket only carries text/keys, so we can't paste an image into the
 // terminal — instead we save it to a host file and the client references its path in the message
@@ -155,12 +157,21 @@ export function startServer(opts: {
   // index.ts, wired to its StateEngine transitions). The routes here only fan preference changes and
   // snooze-clears across every live session's coordinator.
 
-  const server = Bun.serve({
+  const voice = new VoiceBroker(cfg, audit);
+  let server!: Server<VoiceSocketData>;
+  server = Bun.serve<VoiceSocketData>({
     hostname: cfg.host,
     port: cfg.port,
     // Runtime cap on any request body — a chunked/lying client is cut off here even if its
     // Content-Length is absent or false. The upload handler still does its own precise check.
     maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+    websocket: {
+      maxPayloadLength: 256 * 1024,
+      idleTimeout: 75,
+      open: (ws) => void voice.open(ws),
+      message: (ws, message) => void voice.message(ws, message),
+      close: (ws) => voice.close(ws),
+    },
 
     async fetch(req) {
       const url = new URL(req.url);
@@ -172,6 +183,45 @@ export function startServer(opts: {
       const sessionName = url.searchParams.get("session") ?? undefined;
       const unknownSession = () =>
         jsonError(`unknown session: ${sessionName ?? ""}`, 404, req.headers.get("accept-encoding"));
+
+      if (pathname === "/api/voice/media") {
+        const denied = guard(req, cfg, "write");
+        if (denied) return denied;
+        const rt = registry.get(sessionName);
+        if (!rt) return unknownSession();
+        const paneId = url.searchParams.get("pane");
+        const pane = paneId ? rt.engine.current().agents.find((candidate) => candidate.paneId === paneId) : undefined;
+        if (!paneId || !pane || pane.agent !== "omp" || pane.agentSession?.kind !== "path") {
+          return text("voice requires a live OMP pane", 409);
+        }
+        const upgraded = server.upgrade(req, {
+          data: {
+            paneId,
+            session: rt.name,
+            sessionFile: pane.agentSession.value,
+            device: deviceAuth(req, cfg).device,
+          } satisfies VoiceSocketData,
+          headers: SECURITY_HEADERS,
+        });
+        return upgraded ? undefined : text("WebSocket upgrade failed", 400);
+      }
+
+      if (pathname === "/api/voice/omp" && req.method === "POST") {
+        if (!(await isVoiceDaemon(req, cfg, server.requestIP(req)?.address ?? null))) {
+          return text("voice relay not authorised", 403);
+        }
+        let body: { kind?: unknown; session?: unknown; text?: unknown };
+        try {
+          body = (await req.json()) as typeof body;
+        } catch {
+          return text("bad voice relay request", 400);
+        }
+        if (body.kind !== "speak" || typeof body.session !== "string" || typeof body.text !== "string") {
+          return text("bad voice relay request", 400);
+        }
+        if (!voice.speak(body.session, body.text)) return text("voice browser relay is not connected", 409);
+        return secure(new Response(null, { status: 204 }));
+      }
 
       // ── Live state (polled by the client) ────────────────────────────────
       if (pathname === "/api/snapshot") {
@@ -284,6 +334,7 @@ export function startServer(opts: {
         return text("method not allowed", 405);
       }
 
+
       // ── Misc API ─────────────────────────────────────────────────────────
       if (pathname === "/api/config") {
         // Read-level, like the other non-terminal endpoints. Nothing here is secret — the VAPID
@@ -297,6 +348,9 @@ export function startServer(opts: {
         return json({
           push: push.enabled,
           vapidPublicKey: push.publicKey,
+          // Deliberately a capability, never the credential: an unconfigured bridge must not offer
+          // microphone capture only to fail after browser permission was granted.
+          voice: Boolean(cfg.sonioxApiKey),
           build: await buildId(),
         } satisfies BridgeConfig, req.headers.get("accept-encoding"));
       }
@@ -439,6 +493,7 @@ export function startupWarnings(cfg: Config): string[] {
   }
   return warnings;
 }
+
 
 async function readPane(
   herdr: HerdrClient,
@@ -1184,6 +1239,21 @@ export function guard(req: Request, cfg: Config, level: "read" | "write"): Respo
     return text("device not authorised", 403);
   }
   return null;
+}
+
+/** The peer address is transport evidence; Host alone is an untrusted client header. */
+export function isLoopbackPeer(address: string | null): boolean {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+/**
+ * The only non-browser writer is the local OMP Voice daemon. It must originate on loopback and
+ * prove possession of its 0600 token; forwarded/Tailscale requests cannot satisfy both conditions.
+ */
+export async function isVoiceDaemon(req: Request, cfg: Config, peerAddress: string | null): Promise<boolean> {
+  if (!isLoopbackPeer(peerAddress) || !LOOPBACK_HOST.test(req.headers.get("host") ?? "")) return false;
+  const expected = await readFile(cfg.voiceControlTokenFile, "utf8").catch(() => "");
+  return voiceTokenMatches(req.headers.get("x-omp-voice-token"), expected.trim());
 }
 
 /**

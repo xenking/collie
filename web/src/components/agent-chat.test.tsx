@@ -51,6 +51,19 @@ function renderChat(overrides: Partial<ComponentProps<typeof AgentChat>> = {}) {
   return props;
 }
 
+describe("AgentChat — voice capability", () => {
+  it("shows push-to-talk only when the bridge enables voice", async () => {
+    server.use(
+      http.get("/api/config", () =>
+        HttpResponse.json({ push: false, vapidPublicKey: "", voice: true }),
+      ),
+    );
+    renderChat();
+    expect(await screen.findByRole("button", { name: "Hold to talk" })).toBeEnabled();
+  });
+});
+
+
 describe("AgentChat — reply flow", () => {
   it("sends a typed reply and clears the composer on success", async () => {
     const user = userEvent.setup();

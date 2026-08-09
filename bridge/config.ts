@@ -155,6 +155,16 @@ export interface Config {
    * to your MagicDNS name (`collie.<tailnet>.ts.net`), especially in http serve mode.
    */
   publicHosts: string[];
+  /**
+   * Account credential for Soniox STT/TTS. It is used only by the loopback bridge proxy, never
+   * delivered to the browser; empty disables the voice control without affecting text replies.
+   */
+  sonioxApiKey: string;
+  /** Soniox Russian TTS voice name. */
+  sonioxTtsVoice: string;
+  /** Loopback OMP Voice daemon endpoint and its owner-only authentication token file. */
+  voiceControlUrl: string;
+  voiceControlTokenFile: string;
   /** Web Push (VAPID). All three required to enable push; otherwise push is disabled. */
   vapidPublic: string;
   vapidPrivate: string;
@@ -237,6 +247,10 @@ export function loadConfig(): Config {
     deviceAllowlist: envList("COLLIE_DEVICE_ALLOWLIST"),
     allowedOrigins: envList("COLLIE_ALLOWED_ORIGINS"),
     publicHosts: envList("COLLIE_PUBLIC_HOSTS"),
+    sonioxApiKey: (process.env.SONIOX_API_KEY ?? "").trim(),
+    sonioxTtsVoice: (process.env.SONIOX_TTS_VOICE ?? "Adrian").trim() || "Adrian",
+    voiceControlUrl: (process.env.OMP_VOICE_CONTROL_URL ?? "http://127.0.0.1:49371/speech").trim(),
+    voiceControlTokenFile: (process.env.OMP_VOICE_CONTROL_TOKEN_FILE ?? join(homedir(), ".config", "omp-voice-control", "token")).trim(),
     vapidPublic: process.env.COLLIE_VAPID_PUBLIC ?? "",
     vapidPrivate: process.env.COLLIE_VAPID_PRIVATE ?? "",
     vapidSubject: process.env.COLLIE_VAPID_SUBJECT ?? "mailto:admin@example.com",
