@@ -165,7 +165,8 @@
   --color-status-idle: var(--status-idle);
   --color-status-unknown: var(--status-unknown);
 
-  --font-mono: "JetBrains Mono", "Cascadia Mono", "Cascadia Code", "Roboto Mono", ui-monospace,
+  /* Covers only icon ranges; Latin text keeps using the monospace stack below. */
+  --font-mono: "NerdFontSymbols", "JetBrains Mono", "Cascadia Mono", "Cascadia Code", "Roboto Mono", ui-monospace,
     SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
@@ -281,4 +282,12 @@
     width: 100%;
     animation: busy-bar-pulse 1.1s ease-in-out infinite;
   }
+}
+
+/* Browser fallback for the Nerd Font glyphs emitted by OMP and Herdr. */
+@font-face {
+  font-family: "NerdFontSymbols";
+  src: url("/fonts/nerd-symbols.woff2") format("woff2");
+  font-display: swap;
+  unicode-range: U+23FB-23FE, U+2B58, U+E000-F8FF, U+F0000-FFFFD;
 }

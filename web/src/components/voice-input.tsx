@@ -275,6 +275,10 @@ export function VoiceInput({ paneId, session, disabled, onTranscript, onTranscri
       const socket = await connect();
       if (!wantsRecordingRef.current) {
         releaseRemote();
+        if (!disposedRef.current) {
+          setState("idle");
+          callbacksRef.current.onTranscriptChange(null);
+        }
         return;
       }
       socket.send(JSON.stringify({ kind: "start" }));
@@ -310,6 +314,11 @@ export function VoiceInput({ paneId, session, disabled, onTranscript, onTranscri
     stop();
   }
 
+  function handleClick(): void {
+    // Fallback for browsers that deliver a click but lose the matching pointerup.
+    if (wantsRecordingRef.current) stop();
+  }
+
   return (
     <Button
       type="button"
@@ -322,8 +331,10 @@ export function VoiceInput({ paneId, session, disabled, onTranscript, onTranscri
       onPointerDown={handlePointerDown}
       onPointerUp={stop}
       onPointerCancel={stop}
+      onPointerLeave={stop}
       onKeyDown={handleKeyDown}
       onKeyUp={handleKeyUp}
+      onClick={handleClick}
     >
       {state === "idle" ? <Mic className="size-4" /> : <Square className="size-3" />}
     </Button>

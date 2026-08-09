@@ -286,6 +286,6 @@ export class VoiceBroker {
       headers: { "content-type": "application/json", "x-omp-voice-token": token },
       body: JSON.stringify({ kind, session }),
     });
-    if (!response.ok) throw new Error(`voice control returned ${response.status}`);
+    if (!response.ok) throw new Error(`voice control returned ${response.status}: ${(await response.text()).trim()}`);
   }
 }

@@ -6,6 +6,7 @@ import { pcm16, VoiceInput } from "./voice-input";
 class FakeSocket {
   static readonly OPEN = 1;
   static instances: FakeSocket[] = [];
+  static autoReady = true;
   readonly send = vi.fn();
   readyState = FakeSocket.OPEN;
   binaryType = "blob";
@@ -15,7 +16,7 @@ class FakeSocket {
 
   constructor(_url: string) {
     FakeSocket.instances.push(this);
-    queueMicrotask(() => this.emit({ kind: "ready" }));
+    if (FakeSocket.autoReady) queueMicrotask(() => this.emit({ kind: "ready" }));
   }
 
   close() {
@@ -48,6 +49,7 @@ const stream = {
 describe("VoiceInput", () => {
   beforeEach(() => {
     FakeSocket.instances = [];
+    FakeSocket.autoReady = true;
     vi.stubGlobal("WebSocket", FakeSocket);
     vi.stubGlobal("AudioContext", FakeAudioContext);
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FakeSocket });
@@ -89,6 +91,49 @@ describe("VoiceInput", () => {
     expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"handoff"}');
     expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"end"}');
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("stops an active PTT turn when the browser lost pointerup but delivers click", async () => {
+    render(
+      <VoiceInput
+        paneId="w1:p4"
+        disabled={false}
+        onTranscript={vi.fn(async () => true)}
+        onTranscriptChange={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Hold to talk" });
+    Object.defineProperty(button, "setPointerCapture", { value: vi.fn() });
+    fireEvent.pointerDown(button, { pointerId: 1, isPrimary: true });
+    await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"start"}'));
+    fireEvent.click(button);
+    expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"end"}');
+  });
+
+  it("returns to idle when PTT ends while its socket is still connecting", async () => {
+    FakeSocket.autoReady = false;
+    render(
+      <VoiceInput
+        paneId="w1:p4"
+        disabled={false}
+        onTranscript={vi.fn(async () => true)}
+        onTranscriptChange={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Hold to talk" });
+    Object.defineProperty(button, "setPointerCapture", { value: vi.fn() });
+    fireEvent.pointerDown(button, { pointerId: 1, isPrimary: true });
+    await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    fireEvent.pointerUp(button, { pointerId: 1, isPrimary: true });
+    fireEvent.click(button);
+    FakeSocket.instances[0].emit({ kind: "ready" });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Hold to talk" })).toBeInTheDocument());
+    expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"release"}');
   });
 
   it("downsamples microphone floats to Soniox's 16 kHz signed PCM", () => {
