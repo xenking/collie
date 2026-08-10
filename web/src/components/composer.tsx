@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, ReactNode } from "react";
 import { useRevalidator } from "react-router";
-import { Check, ImagePlus, Keyboard, Loader2, Mic, Send, Settings2, Slash, X, Zap } from "lucide-react";
+import { Check, ImagePlus, Keyboard, Loader2, Send, Settings2, Slash, X, Zap } from "lucide-react";
 
 import type { DisplayPrefs } from "@/hooks/use-display-prefs";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
@@ -24,13 +24,6 @@ import { sendGuardedReply } from "@/lib/reply-action";
 import { TerminalDraftPreview } from "@/components/terminal-draft-preview";
 import { VoiceInput, type VoiceState } from "@/components/voice-input";
 
-const VOICE_PHASE_LABEL: Record<VoiceState["phase"], string> = {
-  idle: "Idle",
-  listening: "Listening…",
-  finalizing: "Finalising…",
-  working: "Thinking…",
-  speaking: "Speaking…",
-};
 
 export interface ComposerHandle {
   /** Focus the input and put the caret at the end — used by the mirror-tap-to-focus in AgentChat. */
@@ -716,17 +709,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // string. The preview keeps showing it — the screen really does say that.
             onTakeOver={adapter?.draftIsOpaque?.(effectiveRaw) ? null : takeOverDraft}
           />
-        )}
-        {voice && (
-          <div className="mb-2 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" role="status" aria-live="polite">
-            <Mic className="size-3.5 shrink-0" />
-            <span className="shrink-0">{VOICE_PHASE_LABEL[voice.phase]}</span>
-            {voice.caption && (
-              <span className={`min-w-0 truncate ${voice.caption.provisional ? "opacity-60" : ""}`}>
-                {voice.caption.role === "assistant" ? "OMP: " : "You: "}{voice.caption.text}
-              </span>
-            )}
-          </div>
         )}
         <div className="flex items-end gap-2">
           {/* Attach image — messenger-style, left of the input, always available (previously buried

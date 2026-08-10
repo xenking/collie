@@ -151,11 +151,12 @@ describe("Composer — voice capability", () => {
     expect(input).toHaveValue("Привет");
     expect(screen.getByRole("button", { name: "Start voice input" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });
 
 describe("Composer — voice delivery", () => {
-  it("streams the final voice caption into the composer before the handoff callback", async () => {
+  it("streams the final voice caption into the composer without a status row", async () => {
     const transcript = "Проверка голосового ввода";
     const calls: string[] = [];
     let releaseTyped!: () => void;
@@ -178,8 +179,7 @@ describe("Composer — voice delivery", () => {
     }));
 
     await waitFor(() => expect(box).toHaveValue(transcript));
-    expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
-    expect(screen.getByRole("status")).not.toHaveTextContent(`You: ${transcript}`);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
 
     let sent!: Promise<boolean>;
     act(() => { sent = voiceInput.onTranscript!(transcript); });

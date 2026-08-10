@@ -95,6 +95,33 @@ describe("Soniox proxy contracts", () => {
     expect(voiceTokenMatches("short", "longer")).toBe(false);
   });
 
+  test("accepts over a minute of raw audio before finalization", async () => {
+    const nativeWebSocket = globalThis.WebSocket;
+    let controller: TurnController | null = null;
+    FakeSonioxSocket.connections = [];
+    Reflect.set(globalThis, "WebSocket", FakeSonioxSocket);
+    try {
+      controller = new TurnController(
+        { sonioxApiKey: "key", sonioxTtsVoice: "voice" },
+        { record() {} },
+        relay(),
+      );
+      await controller.start();
+      const stt = FakeSonioxSocket.connections[0];
+      if (!stt) throw new Error("missing STT socket");
+
+      const oneSecond = new Uint8Array(16_000 * 2);
+      for (let second = 0; second < 61; second += 1) controller.audio(oneSecond);
+
+      expect(stt.sent.filter((message) => message instanceof Uint8Array)).toHaveLength(61);
+      controller.end();
+      expect(stt.sent).toContain(JSON.stringify({ type: "finalize" }));
+    } finally {
+      controller?.close();
+      Reflect.set(globalThis, "WebSocket", nativeWebSocket);
+    }
+  });
+
   test("queues remote replies until browser playback ends", async () => {
     const nativeWebSocket = globalThis.WebSocket;
     let controller: TurnController | null = null;
