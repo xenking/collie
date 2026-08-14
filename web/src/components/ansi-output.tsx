@@ -54,8 +54,9 @@ export interface AnsiOutputProps {
   currentMatch?: number;
   /** Reports the current match count back to the parent (drives the find bar's "3/17"). */
   onMatchCount?: (count: number) => void;
-  /** The pane's agent — gates the Claude-only block grammars (prompt-select, chrome). Absent/other
-   *  agents render pure raw output. */
+  /** The pane's agent — picks the adapter whose block grammars run (prompt-select, chrome). Each
+   *  registered adapter contributes its own: claude lifts dialogs and strips chrome, omp strips chrome
+   *  only. An absent/unregistered agent renders pure raw output. */
   agent?: string;
   /** Injected handler for a prompt-select tap (the race guard lives in AgentChat). Absent (or with a
    *  disabled block) means the buttons render but don't act — AnsiOutput never touches the network. */
@@ -328,10 +329,15 @@ export const AnsiOutput = memo(function AnsiOutput({
               </span>
             );
           });
+          const content = line.noWrap && wrap ? (
+            <span className="inline-block max-w-full overflow-hidden align-bottom whitespace-pre break-normal">{segNodes}</span>
+          ) : (
+            segNodes
+          );
           return (
             <Fragment key={li}>
               {li > 0 ? "\n" : null}
-              {segNodes}
+              {content}
             </Fragment>
           );
         })}

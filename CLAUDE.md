@@ -46,6 +46,17 @@ manifest) you MUST:
    Land features as their own commits first, then cut the release commit so the entry can cite them.
 3. **Run `scripts/check-version.sh`** — it must print `✓`.
 
+**A PR from a fork is the exception: leave all four files alone.** Bump nothing, add no CHANGELOG
+entry — send the functional commits only. The version is the maintainer's to pick, because it depends
+on what else lands in the same release and on which axis the *sum* of those changes sits; a bump
+guessed at PR time collides with the `chore(release):` commit that actually cuts the release, and two
+PRs both guessing `0.26.1` conflict with each other. `scripts/check-version.sh` stays green either
+way — all four files simply keep the version they already agree on. The pre-commit hook may object
+locally; `SKIP_VERSION_CHECK=1 git commit …` is the intended escape hatch here. If you'd like a
+CHANGELOG line in your words, put it in the PR description and it'll be used. (Maintainer side: when
+a fork PR does carry a release commit, cherry-pick the functional commits with `-x` and drop that one
+— authorship is preserved and `main` stays unreleased until you cut it.)
+
 Doc-only changes (`*.md`) don't need a bump. This is enforced two ways, but **you are the first
 line — do it as part of the change, not after**:
 
@@ -116,9 +127,18 @@ the unit name; the Herdr action runs from anywhere.
   still-mounted router (unmounting it ate in-progress composer drafts) and pauses polling through
   `lib/idle.ts`. Don't restore it as a security control or re-describe it as one
   ([ADR 0007](./.adr/0007-the-idle-lock-is-a-pause-not-a-gate.md)).
+- **"Type into terminal" is armed by a named choice and dies with the pane view.** Long-pressing Send
+  opens a menu; the hold never arms it alone. It disarms on a pane switch, a composer lock (gone pane,
+  read-only, idle pause), a hidden page, and a failed batch — never persisted, never restored. Don't
+  lift it, and don't add the reply guard's `composerReady` pre-flight to it; the reasoning for both
+  sits in `web/src/components/send-mode-menu.tsx`'s header.
 - **PWA** via `vite-plugin-pwa` (`web/vite.config.ts`): manifest + `sw.js`, registered manually
   from `virtual:pwa-register` in `main.tsx` (bundled = CSP-safe). Install/SW need a **secure
   context** — over plain HTTP they no-op silently (Chrome insecure-origin flag, or HTTPS, to test).
+- **The bundled Nerd Font subsets stay lazy and out of the precache** — `unicode-range` per face,
+  version in the filename, cached first-use by `sw.ts`. Don't add them to `globPatterns`, don't
+  widen a range, don't move subsetting into the build; the reasoning for each sits at the line that
+  would change (`web/src/index.css`, `web/vite.config.ts`, `scripts/build-nerd-font.sh`).
 
 ## Herdr socket gotchas (see HERDR_API.md for the full, verified contract)
 
