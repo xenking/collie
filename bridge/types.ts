@@ -921,6 +921,8 @@ export interface BridgeConfig {
    * `COLLIE_MAX_UPLOAD_MB` still answers for itself when the bytes arrive. See docs/configure.md.
    */
   upload?: UploadCapability;
+  /** Realtime Soniox voice conversation path. Absent when not configured. */
+  voice?: boolean;
 }
 
 /**

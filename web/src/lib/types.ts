@@ -1010,6 +1010,8 @@ export interface BridgeConfig {
    * mid-upgrade operator sees the old picker rather than an empty one.
    */
   upload?: UploadCapability;
+  /** Realtime Soniox voice conversation path. Absent when not configured. */
+  voice?: boolean;
 }
 
 /**

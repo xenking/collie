@@ -214,6 +214,7 @@ PATH. Details and rollback: [`docs/upgrading.md`](./docs/upgrading.md) → *Upgr
 ## [1.5.3] - 2026-09-06
 
 - Release checks and tag fetches stay on HTTPS when a git `insteadOf` rule rewrites GitHub URLs to SSH, so a service without an SSH key can update again, thanks @magoz (#170). ([b3bd127](https://github.com/AltanS/collie/commit/b3bd127))
+- Realtime Russian Soniox push-to-talk is available in every pane; OMP panes additionally stream the final reply back as speech through the local authenticated voice daemon.
 
 ## [1.5.2] - 2026-09-05
 

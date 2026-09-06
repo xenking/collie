@@ -642,6 +642,9 @@ describe("solo zero-tax — routes", () => {
       // The digest's "remind me next digest" dismiss — solo, no crew sibling: it writes the lead's
       // own notify record, and a peer never pushes an update notification of its own.
       "/api/update/snooze",
+      // Realtime Voice uses one browser WebSocket and one localhost-only OMP reply callback.
+      "/api/voice/media",
+      "/api/voice/omp",
       "/api/workspace",
       "/auth",
       "/auth/*",
@@ -704,6 +707,10 @@ const CONFIG_KEYS = {
   vapidPublic: true,
   vapidPrivate: true,
   vapidSubject: true,
+  sonioxApiKey: true,
+  sonioxTtsVoice: true,
+  voiceControlUrl: true,
+  voiceControlTokenFile: true,
   stateDir: true,
   multiSession: true,
   skipServe: true,
@@ -740,6 +747,8 @@ describe("solo zero-tax — config", () => {
       "readLines",
       "skipServe",
       "socketPath",
+      "sonioxApiKey",
+      "sonioxTtsVoice",
       "stateDir",
       "submitKeys",
       "tailscaleHosts",
@@ -752,6 +761,8 @@ describe("solo zero-tax — config", () => {
       "vapidPrivate",
       "vapidPublic",
       "vapidSubject",
+      "voiceControlTokenFile",
+      "voiceControlUrl",
       "zellijBin",
     ]);
     expect(keys.filter((k) => /crew|peer|lead|federat/i.test(k))).toEqual([]);

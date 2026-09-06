@@ -191,6 +191,11 @@ export function getSttCapability(): SttCapability | null {
   return currentStt;
 }
 
+/** Whether the bridge configured its realtime Soniox voice path. */
+export function getVoiceCapability(): boolean {
+  return currentVoice;
+}
+
 /**
  * What this collie accepts as an attachment, or `null` when nothing has said otherwise (no read yet,
  * a failed read, or a bridge older than the field). Consumers go through lib/attachments.ts, which
