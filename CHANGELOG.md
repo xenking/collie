@@ -26,6 +26,10 @@ PATH. Details and rollback: [`docs/upgrading.md`](./docs/upgrading.md) → *Upgr
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-09-06
+
+- Realtime Russian Soniox push-to-talk is available in every pane; OMP panes additionally stream the final reply back as speech through the local authenticated voice daemon.
+
 ## [1.5.2] - 2026-09-05
 
 - STT releases its admission slot immediately when a recording is cancelled, thanks @en-ver (#163). ([43c9cfe](https://github.com/AltanS/collie/commit/43c9cfe))

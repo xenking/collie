@@ -885,6 +885,8 @@ export interface BridgeConfig {
    * feature is absent, not disabled.
    */
   stt?: SttCapability;
+  /** Realtime Soniox voice conversation path. Absent when not configured. */
+  voice?: boolean;
 }
 
 /**

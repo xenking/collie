@@ -55,6 +55,7 @@ let currentMux: MuxConfig | null = null;
 // are the same value on purpose, because both mean "there is no microphone here" (ADR 0029). Absent
 // is the feature being off, so nothing has to distinguish them.
 let currentStt: SttCapability | null = null;
+let currentVoice = false;
 let inflight: Promise<void> | null = null;
 let loaded = false;
 const listeners = new Set<() => void>();
@@ -81,6 +82,7 @@ export function loadOperatorCommands(): Promise<void> {
       applyOperatorFonts(currentFonts, designPrefs().font);
       currentMux = cfg.mux ?? null;
       currentStt = cfg.stt ?? null;
+      currentVoice = cfg.voice === true;
       loaded = true;
       emit();
     } catch {
@@ -129,6 +131,11 @@ export function getMuxConfig(): MuxConfig | null {
  */
 export function getSttCapability(): SttCapability | null {
   return currentStt;
+}
+
+/** Whether the bridge configured its realtime Soniox voice path. */
+export function getVoiceCapability(): boolean {
+  return currentVoice;
 }
 
 /**
@@ -209,6 +216,7 @@ export function __resetOperatorCommands(): void {
   currentFonts = [];
   currentMux = null;
   currentStt = null;
+  currentVoice = false;
   inflight = null;
   loaded = false;
   listeners.clear();

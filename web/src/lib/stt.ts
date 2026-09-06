@@ -4,7 +4,12 @@ import type { SttResult } from "@/lib/api";
 import { isApiErrorCode } from "@/lib/api-error-codes";
 import { describeApiError } from "@/lib/api-error-message";
 import { t } from "@/lib/i18n";
-import { getSttCapability, loadOperatorCommands, subscribeOperatorConfig } from "@/lib/operator-config";
+import {
+  getSttCapability,
+  getVoiceCapability,
+  loadOperatorCommands,
+  subscribeOperatorConfig,
+} from "@/lib/operator-config";
 import type { SttCapability } from "@/lib/types";
 
 /** The refusal half of one transcription attempt — the only shape `sttErrorMessage` has words for. */
@@ -84,6 +89,19 @@ export function useSttCapability(): SttCapability | null {
   // Evaluated per render rather than memoised: it reads browser globals that do not change within a
   // page, and a memo keyed on nothing would only hide that.
   return capability !== null && sttRecordingSupported() ? capability : null;
+}
+
+/** Realtime Soniox voice is available only when both bridge and browser can serve it. */
+export function useVoiceCapability(): boolean {
+  useEffect(() => {
+    void loadOperatorCommands();
+  }, []);
+  const configured = useSyncExternalStore(
+    subscribeOperatorConfig,
+    getVoiceCapability,
+    getVoiceCapability,
+  );
+  return configured && globalThis.isSecureContext && Boolean(navigator.mediaDevices?.getUserMedia);
 }
 
 /**

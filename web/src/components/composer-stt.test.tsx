@@ -165,6 +165,20 @@ describe("Composer — the record button is drawn only when there is a microphon
     expect(screen.getByPlaceholderText(/type a reply/i).className).toContain("pr-11");
   });
 
+  it("uses the realtime Soniox control instead of the clip recorder when configured", async () => {
+    const user = userEvent.setup();
+    server.use(configHandler({ push: false, vapidPublicKey: "", voice: true }));
+    renderComposer();
+
+    const box = await screen.findByPlaceholderText(/type a reply/i);
+    expect(await screen.findByRole("button", { name: /start voice input/i })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /record a voice message/i })).toBeNull();
+
+    await user.type(box, "x");
+    expect(screen.queryByRole("button", { name: /start voice input/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
+  });
+
   it("renders no microphone in an insecure context, even with a provider configured", async () => {
     // The guard #115 forgot: over plain HTTP `navigator.mediaDevices` is simply absent, so a button
     // would render and do nothing. Nothing on the phone fixes that, so it is hidden, not disabled.

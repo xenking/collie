@@ -816,6 +816,8 @@ export interface BridgeConfig {
    * decides whether to draw a button, not where the audio goes.
    */
   stt?: SttCapability;
+  /** Realtime Soniox voice conversation path. Absent when not configured. */
+  voice?: boolean;
 }
 
 /**

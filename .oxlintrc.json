@@ -181,6 +181,49 @@
       "rules": {
         "anti-slop/no-module-mocking": "off"
       }
+    },
+    {
+      // Voice decodes untrusted Soniox/WebSocket/browser payloads at these exact I/O boundaries.
+      "files": [
+        "**/bridge/voice.ts",
+        "**/web/src/components/voice-input.tsx"
+      ],
+      "rules": {
+        "anti-slop/no-known-value-widening": "off",
+        "anti-slop/no-runtime-typeof": "off",
+        "anti-slop/no-unknown-parameters": "off"
+      }
+    },
+    {
+      // Soniox config and WebSocket frames are open provider-owned objects until serialized or parsed here.
+      "files": [
+        "**/bridge/voice.ts"
+      ],
+      "rules": {
+        "anti-slop/no-unsafe-dictionary-type": "off"
+      }
+    },
+    {
+      // These tests implement browser/WebSocket fakes whose assertions are checked by their fixtures.
+      "files": [
+        "**/bridge/voice.test.ts",
+        "**/web/src/components/voice-input.test.tsx"
+      ],
+      "rules": {
+        "anti-slop/no-chained-type-assertions": "off",
+        "anti-slop/no-runtime-typeof": "off",
+        "anti-slop/no-unknown-parameters": "off",
+        "anti-slop/require-safety-comment-for-type-assertion": "off"
+      }
+    },
+    {
+      // voiceRelayResponse is the parser boundary for the localhost daemon's untyped HTTP JSON body.
+      "files": [
+        "**/bridge/server.ts"
+      ],
+      "rules": {
+        "anti-slop/no-unknown-parameters": "off"
+      }
     }
   ]
 }

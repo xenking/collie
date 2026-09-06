@@ -1842,6 +1842,7 @@ export function AgentChat({
                   scope={scope}
                   agent={agent?.agent}
                   isShell={isShell}
+                  replySpeechSupported={agent?.agent === "omp" && agent.hasSession === true}
                   // The state, as the WORD on the composer's status strip. It used to be the pane
                   // header's caption line; the dot badged onto the agent's tile up there stays, because
                   // the two carry the range together (status-badge.tsx). `stale` is the same

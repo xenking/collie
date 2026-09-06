@@ -2,11 +2,17 @@ import "@testing-library/jest-dom/vitest";
 import { afterAll, afterEach, beforeAll, beforeEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { setupServer } from "msw/node";
+import { JSDOM } from "jsdom";
 
 import { handlers, resetTypedDraft } from "./handlers";
 import { __resetConnectionHealth } from "@/lib/connection-health";
 import { __resetPairing } from "@/lib/pairing";
 import { __resetDraftPrune } from "@/lib/drafts";
+
+// Node exposes a disabled process-level localStorage; use jsdom's native Storage in test globals.
+const storageWindow = new JSDOM("", { url: "http://localhost" }).window;
+globalThis.Storage = storageWindow.Storage;
+globalThis.localStorage = storageWindow.localStorage;
 
 // One MSW server for all tests; tests add per-case overrides with `server.use(...)`.
 export const server = setupServer(...handlers);
@@ -38,7 +44,10 @@ afterEach(() => {
   server.resetHandlers();
   resetTypedDraft(); // the fake pane's input line, so a draft can't leak into the next test
 });
-afterAll(() => server.close());
+afterAll(() => {
+  server.close();
+  storageWindow.close();
+});
 
 // jsdom gaps that the terminal mirror / sheets touch.
 if (!Element.prototype.scrollIntoView) {

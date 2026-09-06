@@ -42,8 +42,9 @@ import { scopeKey, type Scope } from "@/lib/scope";
 import { DirectTypingStrip } from "@/components/direct-typing-strip";
 import { RecordingStrip } from "@/components/recording-strip";
 import { useSttRecorder } from "@/hooks/use-stt-recorder";
-import { useHandsFree, useSttCapability } from "@/lib/stt";
+import { useHandsFree, useSttCapability, useVoiceCapability } from "@/lib/stt";
 import { NoEchoNotice } from "@/components/no-echo-notice";
+import { VoiceInput, type VoiceState } from "@/components/voice-input";
 
 export interface ComposerHandle {
   /** Focus the input and put the caret at the end — used by the mirror-tap-to-focus in AgentChat. */
@@ -58,6 +59,8 @@ interface ComposerProps {
   agent: string | undefined | null;
   /** True for a bare shell pane (tweaks the placeholder copy, and is its own status word). */
   isShell: boolean;
+  /** Only a path-backed OMP pane can hand replies to the local speech daemon. */
+  replySpeechSupported?: boolean;
   /**
    * What the pane is DOING, as the word on the status strip above the controls row. Undefined only
    * when there is no pane left to describe (`gone`), where the strip stands empty.
@@ -228,7 +231,7 @@ function ComposerDock({
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { paneId, scope, agent, isShell, status, stale, gone, readOnly, hostBlock, composing, dialogPresent, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setTapToFocus, onSent },
+  { paneId, scope, agent, isShell, replySpeechSupported = false, status, stale, gone, readOnly, hostBlock, composing, dialogPresent, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setTapToFocus, onSent },
   ref,
 ) {
   const revalidator = useRevalidator();
@@ -284,6 +287,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // pane view is keyed by paneId, so without this, stepping over to another tab mid-reply ate the
   // message. Lazy initialiser so the restore happens on the mount, before first paint.
   const [input, setInput] = useState(() => loadDraft(scope, paneId) ?? "");
+  const [voiceState, setVoiceState] = useState<VoiceState | null>(null);
   // Mirror of `input` for the write-through path: updateInput needs the previous value to apply a
   // functional update AND to persist the result, without either reading stale state or doing the
   // save inside a (double-invoked) state updater.
@@ -456,13 +460,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // predicate in lib/stt.ts, so the button here and the row in Settings can never disagree. Absent
   // is the feature being off: no button at all, not a disabled one.
   const stt = useSttCapability();
+  const voiceEnabled = useVoiceCapability();
   const handsFree = useHandsFree();
   // The microphone is armed state, and it obeys the same rules as "Type into terminal": it dies on a
   // pane switch, on any composer lock, and on a hidden page, and it is never persisted. The clip is
   // DISCARDED on each of those, not finished — see the hook's header for why an orphaned transcript
   // is worse than no transcript.
   const recorder = useSttRecorder({
-    enabled: stt?.available === true && !locked && !direct.active,
+    enabled: !voiceEnabled && stt?.available === true && !locked && !direct.active,
     paneKey: `${scopeId}\0${paneId}`,
     suspended: locked || direct.active,
     onTranscript: acceptTranscript,
@@ -488,7 +493,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // an EMPTY box, which is the one state where Send can do nothing anyway; the first character typed
   // hands the button straight back. `direct.active` keeps it, because there the same button is the
   // "stop typing into the terminal" control and that must not be displaceable.
-  const micIsPrimary = stt !== null && !direct.active && input.trim() === "";
+  const micIsPrimary = !voiceEnabled && stt !== null && !direct.active && input.trim() === "";
+  const customVoiceVisible =
+    voiceEnabled && !direct.active && (input.trim() === "" || voiceState !== null);
 
   /**
    * What happens to a finished transcript.
@@ -508,15 +515,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
    *  • **The composer can't send at all** (locked, or a dialog owns the keyboard). `send()` would
    *    refuse anyway; inserting keeps the words.
    */
-  function acceptTranscript(transcript: string) {
+  async function acceptTranscript(transcript: string): Promise<boolean> {
     const draftEmpty = inputValueRef.current.trim() === "";
     const mayHandsFree =
       handsFree && draftEmpty && noEchoRef.current === null && !locked && !dialogPresent;
-    if (mayHandsFree) {
-      void send(transcript, false);
-      return;
-    }
+    if (mayHandsFree) return send(transcript, false);
     insertTranscript(transcript);
+    return false;
   }
 
   /** Splice a transcript into the draft AT THE CARET (the field is where the operator left it, and
@@ -1350,6 +1355,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             />
           )}
         </Collapse>
+        <Collapse open={voiceState !== null}>
+          {voiceState !== null && (
+            <p className="px-1 pb-1 text-xs leading-snug text-muted-foreground" role="status">
+              {voiceState.caption?.text || voiceState.phase}
+            </p>
+          )}
+        </Collapse>
         {/* THE ARMED-MODE SLOT — one Collapse, two strips, because they are one idea: a mode this
             composer is holding open, said in words where the eye already looks. Grouping them keeps
             the arrival to a single 240ms slide when one hands over to the other (stop typing, start
@@ -1491,7 +1503,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               )}
             </Button>
           </div>
-          {!direct.active && forcingSend ? (
+          {voiceEnabled && (
+            <VoiceInput
+              paneId={paneId}
+              session={scope?.session}
+              showControl={customVoiceVisible}
+              disabled={locked || dialogPresent || sending}
+              replySpeechSupported={replySpeechSupported}
+              onTranscript={acceptTranscript}
+              onVoiceStateChange={setVoiceState}
+              onError={(message) => setStatus(message, "error")}
+            />
+          )}
+          {!customVoiceVisible && (!direct.active && forcingSend ? (
             // The pre-flight refused and the user is being offered the override. Labelled for what it
             // actually does — TYPE the text into whatever is on screen — not "send", because the
             // submit key is still conditional on the verify step behind it.
@@ -1581,7 +1605,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 <Send className="size-4" />
               )}
             </Button>
-          )}
+          ))}
         </div>
       </div>
 

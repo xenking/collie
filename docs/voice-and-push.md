@@ -157,6 +157,28 @@ you already trust stays the only thing that touches it.
 The reasoning for all of the above — why this was declined twice, what changed, and why the seam
 looks like this — is [ADR 0029](../.adr/0029-speech-to-text-is-a-provider-seam-collie-owns.md).
 
+### Realtime Soniox conversation (fork feature)
+
+Set `SONIOX_API_KEY` in Collie's service environment and restart. The composer then uses a direct
+16 kHz PCM WebSocket stream to Soniox instead of uploading a completed recording. Only Soniox's
+final transcript enters Collie. The existing **hands-free** switch still decides whether that text
+is sent immediately or inserted into the composer for review.
+
+For a path-backed OMP pane, Collie can keep the browser relay after submission and play the final
+OMP answer through Soniox streaming TTS. This requires the local `omp-voice-control` daemon; bare
+shell and other non-OMP panes remain STT-only and release the relay after the transcript.
+
+```env
+SONIOX_API_KEY=...
+SONIOX_TTS_VOICE=Adrian
+OMP_VOICE_CONTROL_URL=http://127.0.0.1:49371/speech
+OMP_VOICE_CONTROL_TOKEN_FILE=~/.config/omp-voice-control/token
+```
+
+The Soniox key never reaches the browser. The browser receives no temporary credential: Collie's
+same-origin WebSocket proxies microphone PCM and TTS audio, and the loopback speech callback also
+requires the owner-only token file.
+
 
 ## Web Push (optional)
 

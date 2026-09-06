@@ -1,4 +1,5 @@
-import { mkdir } from "node:fs/promises";
+import type { Server } from "bun";
+import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, normalize, sep } from "node:path";
 import type { JsonObject, JsonValue } from "./json.ts";
@@ -77,6 +78,7 @@ import type {
   SttCapability,
   UploadResponse,
 } from "./types.ts";
+import { VoiceBroker, voiceTokenMatches, type VoiceSocketData } from "./voice.ts";
 
 // Hard cap the runtime enforces on ANY request body (Bun.serve maxRequestBodySize). Bigger than the
 // upload cap + overhead so the handler's own 413 fires first for honest clients; this cuts off a
@@ -399,6 +401,8 @@ export function bridgeConfigBody(opts: {
    * configured none ships the same payload as before, the same rule `mode` follows.
    */
   stt?: SttCapability;
+  /** Realtime Soniox voice conversation path. Omitted when not configured. */
+  voice?: boolean;
 }): BridgeConfig {
   const mode = modeForWire(opts.mode);
   const mine = opts.operatorCommands ?? [];
@@ -425,6 +429,7 @@ export function bridgeConfigBody(opts: {
   // Appended after the mux block, and omit-when-absent for the reason `mode` is: no key means no
   // microphone, which is precisely true of a collie with no provider configured.
   if (opts.stt !== undefined) wire.stt = opts.stt;
+  if (opts.voice) wire.voice = true;
   return wire;
 }
 
@@ -451,7 +456,26 @@ export interface UpdateActionDeps {
    * Tell the pack a run has begun, so the lead starts granting turns and fires the first of §20's
    * three immediate sweeps. A no-op on a solo install and on a peer.
    */
+
   beginPackRun?: (a: { runId: string; to: string }) => void;
+}
+/** Validates and applies the localhost daemon's final reply handoff. */
+export function voiceRelayResponse(
+  voice: Pick<VoiceBroker, "speak" | "release">,
+  body: unknown,
+): Response {
+  if (!body || typeof body !== "object") return text("bad voice relay request", 400);
+  const kind = "kind" in body ? body.kind : undefined;
+  const session = "session" in body ? body.session : undefined;
+  if (typeof session !== "string") return text("bad voice relay request", 400);
+  if (kind === "release") {
+    if (!voice.release(session)) return text("voice browser relay is not connected", 409);
+    return secure(new Response(null, { status: 204 }));
+  }
+  const speech = "text" in body ? body.text : undefined;
+  if (kind !== "speak" || typeof speech !== "string") return text("bad voice relay request", 400);
+  if (!voice.speak(session, speech)) return text("voice browser relay is not connected", 409);
+  return secure(new Response(null, { status: 204 }));
 }
 
 export function startServer(opts: {
@@ -944,7 +968,9 @@ export function startServer(opts: {
     return { ...status, run: { ...status.run, peers: legs } };
   }
 
-  const server = Bun.serve({
+  const voice = new VoiceBroker(cfg, audit);
+  let server!: Server<VoiceSocketData>;
+  server = Bun.serve<VoiceSocketData>({
     hostname: cfg.host,
     port: cfg.port,
     // Runtime cap on any request body — a chunked/lying client is cut off here even if its
@@ -953,6 +979,13 @@ export function startServer(opts: {
     // When TLS is present the handshake itself is the first factor: an unpinned or absent client
     // certificate never reaches `fetch` at all, so nothing below has to defend against it.
     tls: listenerTls,
+    websocket: {
+      maxPayloadLength: 256 * 1024,
+      idleTimeout: 75,
+      open: (ws) => void voice.open(ws),
+      message: (ws, message) => void voice.message(ws, message),
+      close: (ws) => voice.close(ws),
+    },
 
     async fetch(req) {
       const url = new URL(req.url);
@@ -1023,6 +1056,19 @@ export function startServer(opts: {
           req.headers.get("accept-encoding"),
         );
 
+      if (pathname === "/api/voice/omp" && req.method === "POST") {
+        if (!(await isVoiceDaemon(req, cfg, server.requestIP(req)?.address ?? null))) {
+          return text("voice relay not authorised", 403);
+        }
+        let body: unknown;
+        try {
+          body = await req.json();
+        } catch {
+          return text("bad voice relay request", 400);
+        }
+        return voiceRelayResponse(voice, body);
+      }
+
       // The host dimension of the `(host, session, paneId)` address (§4), read exactly where the
       // session name is and by the same rule: a client-supplied value that is ONLY ever a registry
       // key. Parsed only when this collie has a trust store — the same predicate the pack surface
@@ -1047,6 +1093,7 @@ export function startServer(opts: {
           const resolved = packLead?.resolve(host, sessionName);
           if (resolved === undefined) {
             return jsonError(
+
               apiError("host.unknown", { host: host.kind === "member" ? host.id : host.raw }),
               404,
               req.headers.get("accept-encoding"),
@@ -1080,6 +1127,32 @@ export function startServer(opts: {
         return localRuntime(sessionName, req.headers.get("accept-encoding"));
       };
 
+      if (pathname === "/api/voice/media") {
+        const denied = guard(req, cfg, "write", pairing);
+        if (denied) return denied;
+        if (!cfg.sonioxApiKey) return text("voice is not configured", 503);
+        const rt = await target();
+        if (rt instanceof Response) return rt;
+        const paneId = url.searchParams.get("pane");
+        const pane = paneId ? rt.engine.current().agents.find((candidate) => candidate.paneId === paneId) : undefined;
+        if (!paneId || !pane) return text("voice requires a live pane", 409);
+        const ompSessionFile = pane.agent === "omp" && pane.agentSession?.kind === "path"
+          ? pane.agentSession.value
+          : null;
+        // NUL cannot occur in a real session path; the JSON tuple makes the synthetic namespace unambiguous.
+        const sessionFile = ompSessionFile ?? `\0collie:voice:${JSON.stringify([rt.name, paneId])}`;
+        const upgraded = server.upgrade(req, {
+          data: {
+            paneId,
+            session: rt.name,
+            sessionFile,
+            replySpeechSupported: ompSessionFile !== null,
+            device: requestDevice(req, cfg, pairing).device,
+          } satisfies VoiceSocketData,
+          headers: SECURITY_HEADERS,
+        });
+        return upgraded ? undefined : text("WebSocket upgrade failed", 400);
+      }
       // ── Live state (polled by the client) ────────────────────────────────
       if (pathname === "/api/snapshot") {
         const gate = checkAccess(req, cfg);
@@ -1172,6 +1245,7 @@ export function startServer(opts: {
             operatorFonts: myFonts,
             mux: activeMux?.herdr,
             stt: sttWire,
+            voice: cfg.sonioxApiKey ? true : undefined,
           }),
           req.headers.get("accept-encoding"),
         );
@@ -3066,6 +3140,15 @@ export function guard(
     return text("device not paired", 403);
   }
   return null;
+}
+/**
+ * The only non-browser writer is the local OMP Voice daemon. It must originate on loopback and
+ * prove possession of its owner-only token.
+ */
+export async function isVoiceDaemon(req: Request, cfg: Config, peerAddress: string | null): Promise<boolean> {
+  if (!peerAddress || !isLoopbackPeer(peerAddress) || !LOOPBACK_HOST.test(req.headers.get("host") ?? "")) return false;
+  const expected = await readFile(cfg.voiceControlTokenFile, "utf8").catch(() => "");
+  return voiceTokenMatches(req.headers.get("x-omp-voice-token"), expected.trim());
 }
 
 /**
