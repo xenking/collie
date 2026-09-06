@@ -320,7 +320,7 @@ jobs:
     runs-on: ubuntu-latest
     # A prerelease does not move the site, because the site only ever quotes a released line. Same
     # hyphen rule the release job above uses to set `--prerelease`, so the two cannot drift.
-    if: ${{ !contains(github.ref_name, '-') }}
+    if: ${{ github.repository_owner == 'AltanS' && !contains(github.ref_name, '-') }}
     steps:
       - name: Ask colliepwa.dev to re-quote the docs
         env:
