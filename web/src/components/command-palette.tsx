@@ -49,7 +49,7 @@ export function CommandPalette({
         (c) =>
           c.command.toLowerCase().includes(q) || c.description.toLowerCase().includes(q),
       )
-    : all.filter((c) => c.common);
+    : isOmp ? all : all.filter((c) => c.common);
 
   function pick(c: AgentCommand) {
     if (c.takesArg) {
@@ -87,7 +87,7 @@ export function CommandPalette({
         />
       </div>
 
-      {!q && (
+      {!q && !isOmp && (
         <p className="mb-2 text-[11px] uppercase tracking-wide text-muted-foreground">
           {t("commands.common.hint", { count: all.length })}
         </p>
