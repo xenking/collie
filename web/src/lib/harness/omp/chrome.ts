@@ -23,7 +23,9 @@ import {
   composerBottomText,
   composerContText,
   composerGhost,
+  composerPromptText,
   isBlank,
+  isBorderlessPrompt,
   isComposerTop,
   isOpenComposerBottom,
   lineText,
@@ -107,17 +109,14 @@ const MAX_DRAFT_ROWS = 100;
 // captures too, i.e. the exact check was never observed failing OR discriminating. What pins the shape
 // is the literal, the contiguous `│  …  │` run above it, the `╭─…─╮` directly above that run, the tail
 // anchor, and the two caps — every one of them a claim about glyphs both renderers agree on.
-
-/** The composer box located at the buffer's tail. Every index is into the ORIGINAL `lines` array. */
 export interface ComposerBox {
-  /** The TOP border row. It IS omp's statusline: the powerline fields are painted into the border. */
   top: number;
-  /** First draft row = `top + 1`. Equals `bottom` when the draft fits on one row (the common case). */
   firstDraftRow: number;
-  /** The `╰─ … ─╯` row — which carries the LAST fragment of the draft, not chrome below it. */
   bottom: number;
-  /** EXCLUSIVE end of the autocomplete run painted BELOW the box (`bottom + 1` when there is none). */
   suggestEnd: number;
+  /** Patched OMP uses a borderless prompt and a footer below it. */
+  layout?: "boxed" | "borderless";
+  status?: number;
 }
 
 /**
@@ -140,6 +139,30 @@ export function locateComposer(lines: StyledLine[]): ComposerBox | null {
   let end = texts.length - 1;
   while (end >= 0 && isBlank(texts[end]!)) end--;
   if (end < 0) return null;
+  // The installed borderless patch renders `› draft` followed by optional autocomplete rows.
+  // Anchor at the tail, reject boxes below it, and allow a missing status while a menu is open.
+  for (let prompt = end; prompt >= 0 && end - prompt <= MAX_SUGGESTION_ROWS; prompt--) {
+    if (!isBorderlessPrompt(texts[prompt]!)) continue;
+    if (prompt > 0 && opensBox(texts[prompt - 1]!)) continue;
+    let status: number | undefined;
+    if (prompt < end && /^ \S/.test(texts[end]!) && texts[end]!.includes("·")) {
+      status = end;
+    }
+    let valid = true;
+    for (let row = prompt + 1; row <= end; row++) {
+      if (opensBox(texts[row]!) ||
+          (status === undefined && isBlank(texts[row]!)) ||
+          (status !== undefined && row < status && !isBlank(texts[row]!) && !texts[row]!.startsWith("  "))) {
+        valid = false;
+        break;
+      }
+    }
+    const hasSuggestions =
+      prompt < end && texts.slice(prompt + 1, end + 1).some((text) => /^ /u.test(text));
+    if (valid && (status !== undefined || hasSuggestions)) {
+      return { top: prompt, firstDraftRow: prompt, bottom: prompt, suggestEnd: end + 1, layout: "borderless", status };
+    }
+  }
 
   // (a) The bottom border, and the autocomplete run (if any) omp painted below it. Nothing here reads
   //     a palette row's CONTENT, because those rows are model- and user-authored text (they carry
@@ -323,6 +346,7 @@ function trimBorderSegments(line: StyledLine): StyledLine {
 export function extractStatusLines(lines: StyledLine[]): StyledLine[] {
   const box = locateComposer(lines);
   if (box === null) return [];
+  if (box.layout === "borderless") return box.status === undefined ? [] : [lines[box.status]!];
   const row = trimBorderSegments(lines[box.top]!);
   return row.segments.length === 0 ? [] : [row];
 }
@@ -353,6 +377,18 @@ export function extractInputDraft(lines: StyledLine[]): string | null {
   if (box === null) return null;
   const texts = lines.map((l) => rstrip(lineText(l)));
 
+  if (box.layout === "borderless") {
+    const draftEnd = box.status ?? box.bottom;
+    const parts = [composerPromptText(texts[box.bottom]!) ?? ""];
+    if (box.status !== undefined) {
+      for (let row = box.bottom + 1; row < draftEnd; row++) parts.push(texts[row]!.trim());
+      const ghost = composerGhost(lines[draftEnd - 1]!, draftEnd - 1 > box.bottom);
+      const last = parts[parts.length - 1]!;
+      parts[parts.length - 1] = ghost.length > 0 && last.endsWith(ghost) ? last.slice(0, -ghost.length) : last;
+    }
+    const draft = parts.filter((part) => part.length > 0).join(" ");
+    return draft.length === 0 ? null : draft;
+  }
   const parts: string[] = [];
   for (let i = box.firstDraftRow; i < box.bottom; i++) {
     parts.push(composerContText(texts[i]!)!.trim());
