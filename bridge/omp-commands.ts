@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { delimiter, dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { OmpCommand, OmpCommandsResponse } from "./types.ts";
 
 const OMP_PACKAGE = "@oh-my-pi/pi-coding-agent";
@@ -69,7 +69,23 @@ const defaultDeps: Required<OmpCommandDiscoveryDeps> = {
   which: (command) => Bun.which(command),
   bunInstall: () => process.env.BUN_INSTALL?.trim() || join(homedir(), ".bun"),
   readFile,
-  importModule: (url) => import(url),
+  async importModule(url) {
+    const child = Bun.spawn([
+      join(defaultDeps.bunInstall(), "bin", "bun"), "-e",
+      "const m = await import(process.argv[1]); console.log(JSON.stringify({ BUILTIN_SLASH_COMMAND_DEFS: m.BUILTIN_SLASH_COMMAND_DEFS }));",
+      url,
+    ], { cwd: dirname(fileURLToPath(url)), stdout: "pipe", stderr: "pipe" });
+    const timer = setTimeout(() => child.kill(), DISCOVERY_TIMEOUT_MS);
+    try {
+      const [out, err, code] = await Promise.all([
+        new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+      ]);
+      if (code !== 0) throw new Error(`OMP builtin registry failed: ${err.trim()}`);
+      return JSON.parse(out);
+    } finally {
+      clearTimeout(timer);
+    }
+  },
   spawn(command, cwd) {
     const child = Bun.spawn(command, {
       cwd,
