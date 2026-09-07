@@ -7,6 +7,7 @@ import type { DisplayPrefs } from "@/hooks/use-display-prefs";
 import { FONT_MAX, FONT_MIN } from "@/hooks/use-display-prefs";
 import { useLocale } from "@/hooks/use-locale";
 import { t } from "@/lib/i18n";
+import { setHandsFreeEnabled, useHandsFree, useVoiceCapability } from "@/lib/stt";
 
 // The mirror's display prefs, as LABELLED rows behind the composer's ⚙ toggle.
 //
@@ -62,6 +63,8 @@ export function DisplayPrefsContent({
   setTapToFocus,
 }: DisplayPrefsContentProps) {
   useLocale();
+  const voiceEnabled = useVoiceCapability();
+  const handsFree = useHandsFree();
   return (
     <div className="divide-y divide-border border-t border-rule bg-muted/30 px-3 py-1">
       <Row
@@ -103,6 +106,21 @@ export function DisplayPrefsContent({
           />
         }
       />
+      {voiceEnabled && (
+        <Row
+          label="Voice result"
+          hint={handsFree ? "Send automatically" : "Insert into draft"}
+          htmlFor="pref-voice-result"
+          control={
+            <Switch
+              id="pref-voice-result"
+              checked={handsFree}
+              onCheckedChange={setHandsFreeEnabled}
+              aria-label="Send voice automatically"
+            />
+          }
+        />
+      )}
       <Row
         label={t("settings.display.textSize.label")}
         control={

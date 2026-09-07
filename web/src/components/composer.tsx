@@ -46,7 +46,7 @@ import { scopeKey, type Scope } from "@/lib/scope";
 import { DirectTypingStrip } from "@/components/direct-typing-strip";
 import { RecordingStrip } from "@/components/recording-strip";
 import { useSttRecorder } from "@/hooks/use-stt-recorder";
-import { setHandsFreeEnabled, useHandsFree, useSttCapability, useVoiceCapability } from "@/lib/stt";
+import { useHandsFree, useSttCapability, useVoiceCapability } from "@/lib/stt";
 import { NoEchoNotice } from "@/components/no-echo-notice";
 import { VoiceInput, type VoiceState } from "@/components/voice-input";
 
@@ -1198,20 +1198,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               setRawTerminal={setRawTerminal}
               setTapToFocus={setTapToFocus}
             />
-        {voiceEnabled && (
-          <label className="flex min-h-11 items-center justify-between gap-2 text-xs">
-            <span>Voice result</span>
-            <select
-              aria-label="Voice result"
-              value={handsFree ? "send" : "insert"}
-              onChange={(event) => setHandsFreeEnabled(event.target.value === "send")}
-              className="min-h-11 min-w-0 bg-transparent text-foreground"
-            >
-              <option value="insert">Insert into draft</option>
-              <option value="send">Send automatically</option>
-            </select>
-          </label>
-        )}
           </ComposerDock>
         )}
         {/* The one action row: Keys · Quick · Agent · ⚙ (Agent only when the pane's agent has
