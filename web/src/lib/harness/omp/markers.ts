@@ -72,6 +72,19 @@ function parseComposerBottom(text: string): ParsedComposerBottom | null {
   return open === null ? null : { draft: open[1] ?? "", openEnded: true };
 }
 
+/** The draft text of either the boxed bottom row or the borderless `› ` prompt. */
+export function composerPromptText(text: string): string | null {
+  const bottom = parseComposerBottom(text);
+  if (bottom !== null) return bottom.draft;
+  const match = /^›(?: ([\s\S]*))?$/.exec(rstrip(text));
+  return match === null ? null : match[1] ?? "";
+}
+
+/** True for the patched borderless OMP composer prompt. */
+export function isBorderlessPrompt(text: string): boolean {
+  return /^›(?: [\s\S]*)?$/.test(rstrip(text));
+}
+
 /** The draft tail written into either composer row (UNTRIMMED), or null for every other box bottom. */
 export function composerBottomText(text: string): string | null {
   return parseComposerBottom(text)?.draft ?? null;
@@ -139,9 +152,7 @@ export function draftGhost(line: StyledLine, start: number, end: number): string
   for (const seg of line.segments) {
     const from = Math.max(at, start);
     const to = Math.min(at + seg.text.length, end);
-    if (to > from) {
-      parts.push({ text: seg.text.slice(from - at, to - at), fg: seg.fg });
-    }
+    if (to > from) parts.push({ text: seg.text.slice(from - at, to - at), fg: seg.fg });
     at += seg.text.length;
     if (at >= end) break;
   }
@@ -165,11 +176,13 @@ export function draftGhost(line: StyledLine, start: number, end: number): string
   );
 }
 
-/** The boxed composer's specialization: locate its draft span, then apply the shared ghost rule. */
-export function composerGhost(line: StyledLine): string {
-  const inner = parseComposerBottom(lineText(line))?.draft;
-  if (inner === undefined || inner.length === 0) return "";
-  const start = BOTTOM_OPEN.length;
+/** The trailing ghost in either boxed, borderless, or wrapped composer rows. */
+export function composerGhost(line: StyledLine, continuation = false): string {
+  const full = lineText(line);
+  const inner = continuation ? rstrip(full.slice(2)) : composerPromptText(full);
+  if (inner === null || inner.length === 0) return "";
+  const prefix = continuation ? "  " : isBorderlessPrompt(full) ? "› " : BOTTOM_OPEN;
+  const start = prefix.length;
   return draftGhost(line, start, start + inner.length);
 }
 

@@ -299,6 +299,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // message. Lazy initialiser so the restore happens on the mount, before first paint.
   const [input, setInput] = useState(() => loadDraft(scope, paneId) ?? "");
   const [voiceState, setVoiceState] = useState<VoiceState | null>(null);
+  // A final caption remains visible while VoiceInput awaits the transcript callback. Once that
+  // callback has inserted it into the real draft, hide only the caption copy so it cannot duplicate.
+  const acceptedVoiceCaptionRef = useRef<string | null>(null);
+  const voiceGenerationRef = useRef<number | null>(null);
+  const voiceCaretRef = useRef<{ start: number; end: number } | null>(null);
+  function handleVoiceStateChange(next: VoiceState | null) {
+    if (next === null) {
+      acceptedVoiceCaptionRef.current = null;
+      voiceGenerationRef.current = null;
+      voiceCaretRef.current = null;
+    } else if (next.phase === "listening" && voiceGenerationRef.current !== next.generation) {
+      acceptedVoiceCaptionRef.current = null;
+      voiceGenerationRef.current = next.generation;
+      const field = inputRef.current;
+      voiceCaretRef.current = field
+        ? { start: field.selectionStart, end: field.selectionEnd }
+        : { start: inputValueRef.current.length, end: inputValueRef.current.length };
+    }
+    setVoiceState(next);
+  }
   // Mirror of `input` for the write-through path: updateInput needs the previous value to apply a
   // functional update AND to persist the result, without either reading stale state or doing the
   // save inside a (double-invoked) state updater.
@@ -500,6 +520,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // so, in words, and a spinning mark would claim the phone was busy while it waits on a human.
   useBusyWhile(sending);
   useBusyWhile(uploading);
+  const voiceCaption =
+    voiceState?.caption?.role === "user" &&
+    voiceState.caption.text !== acceptedVoiceCaptionRef.current
+      ? voiceState.caption.text
+      : null;
+  const displayedInput = voiceCaption === null ? input : input ? `${input}\n${voiceCaption}` : voiceCaption;
+  useEffect(() => {
+    const field = inputRef.current;
+    if (field && voiceCaption !== null) field.scrollTop = field.scrollHeight;
+  }, [voiceCaption]);
   useBusyWhile(recorder.phase === "transcribing");
 
   // Whether the round button at the end of the row is the microphone rather than Send. True only on
@@ -529,6 +559,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
    *    refuse anyway; inserting keeps the words.
    */
   async function acceptTranscript(transcript: string): Promise<boolean> {
+    acceptedVoiceCaptionRef.current = transcript;
     const draftEmpty = inputValueRef.current.trim() === "";
     const mayHandsFree =
       handsFree && draftEmpty && noEchoRef.current === null && !locked && !dialogPresent;
@@ -544,8 +575,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     direct.deactivateSilently();
     const el = inputRef.current;
     const prev = inputValueRef.current;
-    const start = el?.selectionStart ?? prev.length;
-    const end = el?.selectionEnd ?? prev.length;
+    const start = voiceCaretRef.current?.start ?? el?.selectionStart ?? prev.length;
+    const end = voiceCaretRef.current?.end ?? el?.selectionEnd ?? prev.length;
+    voiceCaretRef.current = null;
     const before = prev.slice(0, start);
     const after = prev.slice(end);
     const inserted = before !== "" && !/\s$/.test(before) ? ` ${transcript}` : transcript;
@@ -1433,13 +1465,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             />
           )}
         </Collapse>
-        <Collapse open={voiceState !== null}>
-          {voiceState !== null && (
-            <p className="px-1 pb-1 text-xs leading-snug text-muted-foreground" role="status">
-              {voiceState.caption?.text || voiceState.phase}
-            </p>
-          )}
-        </Collapse>
         {/* THE ARMED-MODE SLOT — one Collapse, two strips, because they are one idea: a mode this
             composer is holding open, said in words where the eye already looks. Grouping them keeps
             the arrival to a single 240ms slide when one hands over to the other (stop typing, start
@@ -1490,8 +1515,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <div className="relative min-w-0 flex-1">
           <ChatInput
             ref={inputRef}
-            value={direct.active ? direct.value : input}
+            value={direct.active ? direct.value : displayedInput}
             onChange={direct.active ? direct.onChange : (e) => updateInput(e.target.value)}
+            readOnly={voiceCaption !== null}
             onCompositionStart={direct.active ? direct.onCompositionStart : undefined}
             onCompositionEnd={direct.active ? direct.onCompositionEnd : undefined}
             onKeyDown={
@@ -1639,7 +1665,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               disabled={locked || dialogPresent || sending}
               replySpeechSupported={replySpeechSupported}
               onTranscript={acceptTranscript}
-              onVoiceStateChange={setVoiceState}
+              onVoiceStateChange={handleVoiceStateChange}
               onError={(message) => setStatus(message, "error")}
             />
           )}
