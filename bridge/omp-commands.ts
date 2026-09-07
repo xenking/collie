@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { OmpCommand, OmpCommandsResponse } from "./types.ts";
 
@@ -71,7 +71,13 @@ const defaultDeps: Required<OmpCommandDiscoveryDeps> = {
   readFile,
   importModule: (url) => import(url),
   spawn(command, cwd) {
-    const child = Bun.spawn(command, { cwd, stdin: "pipe", stdout: "pipe", stderr: "ignore" });
+    const child = Bun.spawn(command, {
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "ignore",
+      env: { ...process.env, PATH: `${join(defaultDeps.bunInstall(), "bin")}${delimiter}${process.env.PATH ?? ""}` },
+    });
     return {
       stdout: child.stdout,
       exited: child.exited,
@@ -105,7 +111,7 @@ export async function discoverOmpCommands(
     timeoutMs: injected.timeoutMs ?? defaultDeps.timeoutMs,
     closeTimeoutMs: injected.closeTimeoutMs ?? defaultDeps.closeTimeoutMs,
   };
-  const executable = deps.which("omp");
+  const executable = deps.which("omp") ?? deps.which(join(deps.bunInstall(), "bin", "omp"));
   if (!executable) throw new Error("OMP executable not found");
 
   // Bun's global launcher is a bundled file, not a package symlink. Its package lives below the
