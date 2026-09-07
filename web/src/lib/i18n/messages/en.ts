@@ -148,6 +148,7 @@ export const en = {
   "settings.update.error": "Couldn't check.",
   "settings.update.upToDate": "Up to date",
   "settings.updateBanner.restart": "Bridge restart needed",
+  "settings.updateBanner.restartNeeded": "Collie was replaced on disk. Restart it.",
   "settings.updateBanner.releaseAvailable": "Collie {version} available",
   "settings.updateBanner.majorAvailable": "Collie {version} — a new major",
   "settings.updateBanner.copyAria": "Copy command: {command}",
@@ -223,7 +224,10 @@ export const en = {
   "composer.mic.manualHint": "lands in the message box",
   "composer.mic.stop": "Stop",
   "composer.mic.discardAria": "Discard recording",
-  "composer.attach.aria": "Attach image",
+  "composer.attach.aria": "Attach file",
+  "composer.attach.title": "Attach",
+  "composer.attach.photos": "Photos",
+  "composer.attach.files": "Files",
   "composer.send.typeAnyway": "Type anyway?",
   "composer.send.reallySend": "Really send?",
   "composer.send.stopTypingAria": "Stop typing into terminal",
@@ -241,7 +245,9 @@ export const en = {
   "composer.discard.confirmKeys.other": "Tap again to discard {count} queued keys",
   "composer.destructive.confirm": "Destructive: {reason} — tap Send again to confirm",
   "composer.destructive.confirmOnHost": "Destructive: {reason} on {host} — tap Send again to confirm",
-  "composer.upload.success": "Image added — path in message",
+  "composer.upload.success": "File added, path in message",
+  "composer.upload.tooLarge": "That file is bigger than {max} MB, the limit on this collie.",
+  "composer.upload.badType": "Collie can't attach {name}.",
   "composer.noEcho.title": "Password prompt — nothing echoes",
   "composer.noEcho.noLiveTyped":
     "What you typed is already in the pane, unsubmitted — but this view isn't live, so nothing can be sent from here. Answer it at the terminal.",
@@ -395,6 +401,11 @@ export const en = {
   "status.count.working.other": "{count} working",
   "status.shellBadge": "shell",
   "status.dismissAria": "Dismiss",
+  "status.detailAria": "Show the whole message",
+  "status.detail.title": "What went wrong",
+  "status.detail.copy": "Copy",
+  "status.detail.copied": "Copied",
+  "status.detail.dismiss": "Dismiss",
 
   // --- space (spaces overview/strip/view, tabs, panes, new-space) ---
   "space.overview.title": "Spaces",
@@ -719,10 +730,10 @@ export const en = {
   "apiError.launch.not_allowlisted": "That command isn't one of your launchers",
   "apiError.launch.pane_unknown": "That pane is gone, nothing was launched",
   "apiError.workspace.create_failed": "The space couldn't be created: {reason}",
-  "apiError.upload.too_large": "That image is too large — 10 MB is the limit.",
+  "apiError.upload.too_large": "That file is too large, {maxMb} MB is the limit.",
   "apiError.upload.no_file": "No file was sent.",
   "apiError.upload.bad_type": "Collie can't send that kind of file: {type}",
-  "apiError.upload.write_failed": "The image couldn't be saved on the host: {reason}",
+  "apiError.upload.write_failed": "The file couldn't be saved on the host: {reason}",
   "apiError.stt.unconfigured": "Speech-to-text isn't set up on this collie.",
   "apiError.stt.too_large": "That recording is too long — record a shorter one.",
   "apiError.stt.bad_format": "This browser recorded a format Collie can't send on.",
@@ -775,6 +786,7 @@ export const en = {
   "apiError.update.major_confirm_required": "{version} crosses a major, and a major needs its own confirm.",
   "apiError.update.target_mismatch": "This screen offered {asked}, but this collie would install {would}. Reload and read it again.",
   "apiError.update.none_available": "There is no newer release to take.",
+  "apiError.update.packaged": "Updates come from your package manager. Collie won't replace this install's files.",
   "apiError.update.start_failed": "The update couldn't be started: {reason}",
   // --- settings.updateCard (the update card, M15/05) ---
   "settings.updateCard.title": "Update Collie",
@@ -796,6 +808,7 @@ export const en = {
   "settings.updateCard.summary.amber.one": "{count} amber",
   "settings.updateCard.summary.amber.other": "{count} amber",
   "settings.updateCard.preflightUnavailable": "The preflight couldn't be run on this machine.",
+  "settings.updateCard.packageManaged": "Your package manager updates this install. Collie won't take it from here.",
   "settings.updateCard.remedy": "Fix: {command}",
   "settings.updateCard.confirmTitle": "Update to {version}?",
   "settings.updateCard.confirmBody": "Your terminal session stays alive. The phone view drops for up to 30 seconds.",
@@ -805,6 +818,7 @@ export const en = {
   "settings.updateCard.majorConfirmAction": "Yes, cross to {version}",
   "settings.updateCard.cancel": "Cancel",
   "settings.updateCard.starting": "Starting…",
+  "settings.updateCard.startingSlow": "Still starting. The host has not reported the run yet.",
   "settings.updateCard.state.preflight": "Checking this machine…",
   "settings.updateCard.state.staging": "Staging {version}…",
   "settings.updateCard.state.restarting": "Restarting. This is not an outage.",
@@ -844,6 +858,7 @@ export const en = {
   "settings.updateCard.peer.state.verifying": "verifying",
   "settings.updateCard.peer.state.done": "updated",
   "settings.updateCard.peer.state.rolledBack": "rolled back",
+  "settings.updateCard.peer.state.packageManaged": "waits for the package manager",
   "settings.updateCard.peer.state.stuck": "stuck",
   "settings.updateCard.peer.state.interrupted": "stopped",
   "settings.updateCard.peer.state.idle": "waiting",
@@ -873,10 +888,22 @@ export const en = {
   "updateRibbon.updated": "Updated to {version}. Tap to reload.",
   "updateRibbon.peers.one": "Updating {count} peer: {names}",
   "updateRibbon.peers.other": "Updating {count} peers: {names}",
+  "updateRibbon.packageManaged.one": "{names} waits for its package manager",
+  "updateRibbon.packageManaged.other": "{names} wait for their package manager",
   "updateRibbon.peerRolledBack": "{name} rolled back: {reason}.",
   "updateRibbon.seeUpdates": "See Updates.",
   "updateRibbon.available": "Collie {version} available. Tap to update.",
+  // A packaged host cannot take the tap — its updates come from its package manager (ADR 0035) — so
+  // the band STATES the fact and names the manager. It does not instruct: the phone cannot run
+  // pacman, and a line that told the operator to would be telling them to go somewhere else.
+  "updateRibbon.availablePackaged": "Collie {version} available via {manager}.",
+  // The same host under a prefix Collie does not recognise: there is no manager to name, so the band
+  // states the version and points at the page that carries the boundary sentence.
+  "updateRibbon.availablePackagedUnnamed": "Collie {version} available.",
   "updateRibbon.dismiss": "Dismiss this version",
+  // The close on the two QUIET pack states. Not "dismiss this version": what is put down there is a
+  // notice about another machine, and this host's own offer is untouched by it.
+  "updateRibbon.hideNotice": "Hide this notice",
 } as const;
 
 /** Every key that exists, as a union of string literals. The completeness contract. */

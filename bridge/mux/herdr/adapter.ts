@@ -188,6 +188,30 @@ function worktreeRefusal<T>(err: T): MuxRefusalOutcome {
   return muxUnreachable(detail);
 }
 
+/** Herdr's reaper metadata for a parked pane, omitted by older servers. */
+type HerdrDisplayFields = { display_agent?: unknown };
+
+/** The OMP pane badge is a display state, not a second harness identity. */
+function muxAgent(raw: WirePane["agent"]): string {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  return /^omp\s+\(sleeping\)$/iu.test(value) ? "omp" : value || "shell";
+}
+
+/** Parked OMP titles carry age metadata; keep only the conversation title. */
+function displayAgentTitle(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const value = raw.trim();
+  if (!value) return undefined;
+  return (value.match(/^\d+(?:s|m|h|d|w|y)\s*·\s*(.+)$/u)?.[1] ?? value).trim() || undefined;
+}
+
+/** Remove only the exact Pi launcher prefix; preserve other title glyphs. */
+function withoutPiPrefix(title: string): string {
+  // OMP's live title is `π ⠴ <title>` while parked panes often retain `π > <title>`. The
+  // spinner is a prefix component too; remove it only when it follows the Pi marker.
+  return title.replace(/^(?:π|pi)(?:\s+(?:>|[\u2800-\u28ff]+))\s+/iu, "").trim();
+}
+
 /** One Herdr worktree record in the port's words. */
 function toMuxWorktree(raw: WireWorktree): MuxWorktree {
   return {
@@ -471,10 +495,10 @@ function toMuxPane(
 ): MuxPane {
   const space = spaceById.get(raw.workspace_id);
   const spaceLabel = space?.label ?? raw.workspace_id;
-  // Herdr reports the agent name already lower-cased (`claude`, `codex`, `pi`, `omp`) and reports
-  // nothing at all for a bare shell. Passed through rather than re-cased, so the name the harness
-  // and journal registries key on is byte-identical to what Herdr said.
-  const agent = raw.agent !== null && raw.agent !== undefined && raw.agent.length > 0 ? raw.agent : "shell";
+  // Herdr's sleeping badge is a display state, not a separate harness. Normalize it before the
+  // journal and grammar registries see it, while preserving the raw value below for title metadata.
+  const agent = muxAgent(raw.agent);
+  const display = raw as WirePane & HerdrDisplayFields;
   // Built mutable and returned readonly: every optional field below is ASSIGNED rather than
   // conditionally spread, so absent stays absent and each condition reads as the one rule it is.
   const pane: MutableMuxPane = {
@@ -491,6 +515,7 @@ function toMuxPane(
     agent,
     status: raw.agent_status,
   };
+  if (typeof raw.agent === "string" && /^omp\s+\(sleeping\)$/i.test(raw.agent)) pane.sleeping = true;
   // Optional fields are ASSIGNED, never conditionally spread: absent stays absent, and each
   // condition below stays readable as the one rule it encodes.
   //
@@ -499,10 +524,14 @@ function toMuxPane(
   // The tab's label, dropped when it's Herdr's positional default in a single-tab space.
   const tabLabel = meaningfulTabLabel(tabById.get(raw.tab_id)?.label, space?.tab_count ?? 0);
   if (tabLabel) pane.tabLabel = tabLabel;
-  // What the pane says it is doing, dropped when it only repeats the agent name or the space label.
+  // Parked OMP panes lose `agent_session`; Herdr's reaper keeps their conversation title in
+  // display_agent instead. Prefer that metadata, then normalize the live OSC title fallback.
+  const displayTitle = displayAgentTitle(display.display_agent);
   const terminalTitle = meaningfulTerminalTitle(
-    raw.terminal_title,
-    raw.terminal_title_stripped,
+    displayTitle === undefined ? withoutPiPrefix(raw.terminal_title ?? "") : withoutPiPrefix(displayTitle),
+    displayTitle === undefined
+      ? withoutPiPrefix(raw.terminal_title_stripped ?? "")
+      : withoutPiPrefix(displayTitle),
     agent,
     spaceLabel,
   );

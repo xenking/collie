@@ -152,6 +152,10 @@ export const ACK_MANIFEST = {
     channel: "silent",
     why: "\"Remind me next digest\" is answered by the card's own line changing to say so, in the same tap. A second acknowledgement of a dismissal is noise about noise.",
   },
+  dismissUpdate: {
+    channel: "silent",
+    why: "The acknowledgement is the band leaving the screen, on the same tap. A toast confirming that a band was closed would be a notice about declining a notice, and the state it records is visible in its absence.",
+  },
   pairDevice: {
     channel: "inline",
     why: "A mistyped or expired code is a refusal the operator fixes IN the form, one field away, so the sentence belongs beside the field rather than floating over the page (components/paired-devices.tsx).",
@@ -160,7 +164,7 @@ export const ACK_MANIFEST = {
     channel: "inline",
     why: "A failed revoke leaves the row it was aimed at still on screen, and that row is the only place the message is unambiguous about WHICH device is still paired.",
   },
-  uploadImage: {
+  uploadFile: {
     channel: "status",
     why: "Success appends a host path to the draft, which is easy to miss in a box the operator was already typing in, so the status line names what just went into it (components/composer.tsx).",
   },

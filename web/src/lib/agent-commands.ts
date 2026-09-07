@@ -308,10 +308,13 @@ const CATALOG = new Map<string, readonly AgentCommand[]>([
 export function commandsFor(
   agent: string | undefined | null,
   mine: readonly OperatorCommand[] = [],
+  liveOmp?: readonly AgentCommand[],
 ): readonly AgentCommand[] {
   const shipped = catalogFor(agent);
   const aimed = rowsFor(mine, agent, (row) => row.command);
-  // Rule 2: nothing of yours points here, so this pane was never part of what you were choosing.
+  if (aimed.length === 0 && liveOmp !== undefined && canonicalAgent(agent?.toLowerCase().trim() ?? "") === "omp") {
+    return liveOmp;
+  }
   if (aimed.length === 0) return shipped;
   const byName = new Map(shipped.map((c) => [c.command, c] as const));
   return aimed.map((row) => ({
@@ -319,10 +322,7 @@ export function commandsFor(
     description: row.description,
     takesArg: row.takesArg,
     argHint: row.argHint,
-    // A row you typed into your own config is by definition one you want on the first screen.
     common: true,
-    // Inheriting is a FLOOR, never a default: `confirm = false` on a row that names a shipped
-    // dangerous command still confirms, so the only direction this field moves is up.
     dangerous: (byName.get(row.command)?.dangerous ?? false) || row.confirm === true,
   }));
 }

@@ -178,6 +178,7 @@ export class TurnController {
     private readonly cfg: TurnConfig,
     private readonly audit: TurnAudit,
     ws: TurnSocket,
+    private readonly retainTranscript?: (text: string) => Promise<void>,
   ) {
     this.ws = ws;
     this.#socketData = ws.data;
@@ -481,7 +482,16 @@ export class TurnController {
       });
       this.#phase = text ? "working" : "idle";
       this.#state(text ? { role: "user", text, provisional: false } : undefined);
-      this.#send({ kind: "final", generation: turn.generation, text });
+      void (async () => {
+        try {
+          if (text) await this.retainTranscript?.(text);
+        } catch (error) {
+          this.#send({ kind: "error", message: `Could not save voice history: ${error instanceof Error ? error.message : String(error)}` });
+        }
+        if (this.#isCurrent(turn.generation)) {
+          this.#send({ kind: "final", generation: turn.generation, text });
+        }
+      })();
     }
     void this.#beginPendingStt();
   }
@@ -655,7 +665,8 @@ export class VoiceBroker {
         return;
       }
     }
-    this.#relays.set(session, new TurnController(this.cfg, this.audit, ws));
+    this.#relays.set(session, new TurnController(this.cfg, this.audit, ws,
+      (text) => this.#setRemote(session, "transcript", text)));
     this.#recordConnect(ws);
     send(ws, { kind: "ready" });
   }
@@ -761,16 +772,17 @@ export class VoiceBroker {
     this.#relays.delete(session);
   }
 
-  async #setRemote(session: string, kind: "remote-start" | "remote-release"): Promise<void> {
+  async #setRemote(session: string, kind: "remote-start" | "remote-release" | "transcript", text?: string): Promise<void> {
     const token = (await readFile(this.cfg.voiceControlTokenFile, "utf8")).trim();
     if (!token) throw new Error("voice control token is empty");
     const response = await fetch(this.cfg.voiceControlUrl, {
       method: "POST",
       headers: { "content-type": "application/json", "x-omp-voice-token": token },
+      signal: AbortSignal.timeout(5_000),
       body: JSON.stringify(
         kind === "remote-start"
           ? { kind, session, relayUrl: `http://127.0.0.1:${this.cfg.port}/api/voice/omp` }
-          : { kind, session },
+          : { kind, session, ...(kind === "transcript" ? { text } : {}) },
       ),
     });
     if (!response.ok) throw new Error(`voice control returned ${response.status}: ${(await response.text()).trim()}`);

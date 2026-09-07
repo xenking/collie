@@ -6,7 +6,10 @@ import { BottomSheet } from "@/components/ui/sheet";
 import { AgentIcon } from "@/components/agent-icon";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
 import { commandsFor, type AgentCommand } from "@/lib/agent-commands";
+import { canonicalAgent } from "@/lib/operator-scope";
+import * as api from "@/lib/api";
 import type { OperatorCommand } from "@/lib/types";
+import type { Scope } from "@/lib/scope";
 import { t } from "@/lib/i18n";
 import { useLocale } from "@/hooks/use-locale";
 
@@ -14,11 +17,10 @@ interface CommandPaletteProps {
   open: boolean;
   onClose: () => void;
   agent: string | undefined | null;
-  /** The operator's own rows (`commands.toml`); they replace the catalog on panes they address. */
   mine?: readonly OperatorCommand[];
-  /** Insert "/cmd " into the composer for the user to complete (arg-taking commands). */
+  paneId?: string;
+  scope?: Scope;
   onInsert: (text: string) => void;
-  /** Send "/cmd" immediately and submit (no-arg commands). */
   onSubmit: (text: string) => void;
 }
 
@@ -27,13 +29,50 @@ export function CommandPalette({
   onClose,
   agent,
   mine,
+  paneId,
+  scope,
   onInsert,
   onSubmit,
 }: CommandPaletteProps) {
   useLocale();
-  const all = commandsFor(agent, mine);
+  const [liveOmp, setLiveOmp] = useState<readonly AgentCommand[]>();
+  const [liveVersion, setLiveVersion] = useState<string>();
+  const [liveError, setLiveError] = useState(false);
+  const [loadingLive, setLoadingLive] = useState(false);
+  const isOmp = agent ? canonicalAgent(agent.toLowerCase().trim()) === "omp" : false;
+  const all = commandsFor(agent, mine, liveOmp);
   const [query, setQuery] = useState("");
   const { pending, confirm, reset } = usePendingConfirm();
+
+  useEffect(() => {
+    if (!open || !isOmp || !paneId) {
+      setLiveOmp(undefined);
+      setLiveVersion(undefined);
+      setLiveError(false);
+      setLoadingLive(false);
+      return;
+    }
+    let active = true;
+    setLiveOmp(undefined);
+    setLiveVersion(undefined);
+    setLiveError(false);
+    setLoadingLive(true);
+    void api.fetchPaneCommands(paneId, scope).then(
+      ({ commands, version }) => {
+        if (!active) return;
+        setLiveOmp(commands);
+        setLiveVersion(version);
+      },
+      () => {
+        if (active) setLiveError(true);
+      },
+    ).finally(() => {
+      if (active) setLoadingLive(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [isOmp, open, paneId, scope]);
 
   // Reset transient state whenever the sheet (re)opens.
   useEffect(() => {
@@ -70,6 +109,15 @@ export function CommandPalette({
           <AgentIcon agent={agent} className="size-6" />
           <span className="text-sm font-medium">{agent}</span>
         </div>
+      )}
+      {isOmp && paneId && (loadingLive || liveVersion || liveError) && (
+        <p role="status" className="mb-2 text-xs text-muted-foreground">
+          {loadingLive
+            ? "Loading live OMP commands…"
+            : liveVersion
+              ? `Live OMP ${liveVersion}`
+              : "Live OMP lookup unavailable; showing the offline fallback."}
+        </p>
       )}
       <div className="relative mb-3">
         <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />

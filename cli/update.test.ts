@@ -17,7 +17,7 @@ import {
   type SeededFiles,
 } from "./fakes.ts";
 import type { Net } from "./sys.ts";
-import { parseUpdateRun, STALE_AFTER_MS, UPDATE_RUN_SCHEMA } from "../bridge/update-run.ts";
+import { packTurnStart, parseUpdateRun, STALE_AFTER_MS, UPDATE_RUN_SCHEMA } from "../bridge/update-run.ts";
 import {
   boundTail,
   healthTimeoutMs,
@@ -64,9 +64,10 @@ import {
 // managed checkout is never re-linked.
 
 const GIT = `git -C ${ROOT}`;
+const TAG_REMOTE = "https::https://github.com/AltanS/collie.git";
 const DIST = `${ROOT}/web/dist`;
 
-// `git ls-remote --tags origin` as the remote actually answers: an ANNOTATED tag appears twice, and
+// `git ls-remote --tags` as the remote actually answers: an ANNOTATED tag appears twice, and
 // the peeled (`^{}`) line is the one naming a commit. `nightly` is the ref the anchor must drop;
 // `v1.1.0-rc.1` is parsed but reachable only by an install that is itself on a major-1 prerelease.
 const LS_REMOTE = [
@@ -386,7 +387,7 @@ describe("updateCheckout", () => {
       installed,
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
         ...SHALLOW,
         [`${GIT} log -1`, { stdout: "abc1234 the newest release\n" }],
@@ -471,7 +472,7 @@ describe("updateCheckout", () => {
     // A STORING refspec, not the bare ref: the bare form writes FETCH_HEAD and stores no local tag,
     // after which `vite.config.ts` finds no `refs/tags/v0.32.0` at HEAD and stamps the build `-dev`.
     expect(gitRuns(h.exec)).toEqual([
-      `${GIT} fetch --depth 1 origin +refs/tags/v0.32.0:refs/tags/v0.32.0`,
+      `${GIT} fetch --depth 1 ${TAG_REMOTE} +refs/tags/v0.32.0:refs/tags/v0.32.0`,
       `${GIT} checkout -q --detach --force FETCH_HEAD`,
     ]);
     expect(h.io.stdout.join("\n")).toContain("detach onto v0.32.0");
@@ -485,7 +486,7 @@ describe("updateCheckout", () => {
       installed: "0.32.0",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "b2peeled\n" }],
       ],
     });
@@ -498,7 +499,7 @@ describe("updateCheckout", () => {
   test("--major on a managed checkout detaches onto the next major's tag", () => {
     const h = managed([], "0.31.1");
     expect(updateCheckout(h.deps, { crossMajor: true }).code).toBe(EXIT.OK);
-    expect(gitRuns(h.exec)[0]).toBe(`${GIT} fetch --depth 1 origin +refs/tags/v1.0.0:refs/tags/v1.0.0`);
+    expect(gitRuns(h.exec)[0]).toBe(`${GIT} fetch --depth 1 ${TAG_REMOTE} +refs/tags/v1.0.0:refs/tags/v1.0.0`);
     expect(h.io.stdout.join("\n")).toContain("crossing to Collie 1.0.0");
   });
 
@@ -514,7 +515,7 @@ describe("updateCheckout", () => {
       installed: "1.0.0-beta.9",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: TRAIN_DONE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: TRAIN_DONE }],
         [`${GIT} rev-parse HEAD`, { stdout: "b9b9b9b9\n" }],
         ...SHALLOW,
         [`${GIT} log -1`, { stdout: "d0d0d0d the release\n" }],
@@ -522,7 +523,7 @@ describe("updateCheckout", () => {
     });
     expect(updateCheckout(h.deps).code).toBe(EXIT.OK);
     // v1.0.0, NOT v1.0.0-beta.10: the release supersedes every beta that led to it.
-    expect(gitRuns(h.exec)[0]).toBe(`${GIT} fetch --depth 1 origin +refs/tags/v1.0.0:refs/tags/v1.0.0`);
+    expect(gitRuns(h.exec)[0]).toBe(`${GIT} fetch --depth 1 ${TAG_REMOTE} +refs/tags/v1.0.0:refs/tags/v1.0.0`);
     expect(h.io.stdout.join("\n")).toContain("detach onto v1.0.0");
   });
 
@@ -531,7 +532,7 @@ describe("updateCheckout", () => {
       installed: "1.0.0-beta.9",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: BETA_TRAIN }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: BETA_TRAIN }],
         [`${GIT} rev-parse HEAD`, { stdout: "b9b9b9b9\n" }],
         ...SHALLOW,
         [`${GIT} log -1`, { stdout: "c0c0c0c the next beta\n" }],
@@ -540,7 +541,7 @@ describe("updateCheckout", () => {
     expect(updateCheckout(h.deps).code).toBe(EXIT.OK);
     // A prerelease tag name reaches `refs/tags/` untouched — it is a ref like any other.
     expect(gitRuns(h.exec)).toEqual([
-      `${GIT} fetch --depth 1 origin +refs/tags/v1.0.0-beta.10:refs/tags/v1.0.0-beta.10`,
+      `${GIT} fetch --depth 1 ${TAG_REMOTE} +refs/tags/v1.0.0-beta.10:refs/tags/v1.0.0-beta.10`,
       `${GIT} checkout -q --detach --force FETCH_HEAD`,
     ]);
     expect(h.io.stdout.join("\n")).toContain("detach onto v1.0.0-beta.10");
@@ -551,7 +552,7 @@ describe("updateCheckout", () => {
       installed: "1.0.0-beta.10",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: BETA_TRAIN }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: BETA_TRAIN }],
         [`${GIT} rev-parse HEAD`, { stdout: "c0c0c0c0\n" }],
       ],
     });
@@ -569,7 +570,7 @@ describe("updateCheckout", () => {
       installed: "1.0.0",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "cccccccc\n" }],
       ],
     });
@@ -584,7 +585,7 @@ describe("updateCheckout", () => {
       installed: "1.0.0-beta.5",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: ONLY_0X }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: ONLY_0X }],
         [`${GIT} rev-parse HEAD`, { stdout: "zzz\n" }],
       ],
     });
@@ -597,7 +598,7 @@ describe("updateCheckout", () => {
     const h = harness({
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "zzz\n" }],
         ...SHALLOW,
         [`${GIT} log -1`, { stdout: "abc1234 tip\n" }],
@@ -605,7 +606,7 @@ describe("updateCheckout", () => {
     });
     expect(updateCheckout(h.deps).code).toBe(EXIT.OK);
     expect(gitRuns(h.exec)).toEqual([
-      `${GIT} fetch --depth 1 origin +refs/tags/v1.0.0:refs/tags/v1.0.0`,
+      `${GIT} fetch --depth 1 ${TAG_REMOTE} +refs/tags/v1.0.0:refs/tags/v1.0.0`,
       `${GIT} checkout -q --detach --force FETCH_HEAD`,
     ]);
     expect(h.io.stdout.join("\n")).toContain("pinning to newest release tag v1.0.0");
@@ -615,7 +616,7 @@ describe("updateCheckout", () => {
     const h = harness({
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: "" }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: "" }],
         [`${GIT} rev-parse HEAD`, { stdout: "zzz\n" }],
       ],
     });
@@ -629,13 +630,13 @@ describe("updateCheckout", () => {
     // detached — a destruction the operator never asked for and cannot undo.
     const h = harness({ installed: "0.31.1", answers: [
       ...MANAGED,
-      [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+      [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
       [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
       ...FULL,
     ] });
     expect(updateCheckout(h.deps).code).toBe(EXIT.OK);
     // …and the storing refspec rides along on the full-clone variant too.
-    expect(gitRuns(h.exec)[0]).toBe(`${GIT} fetch origin +refs/tags/v0.32.0:refs/tags/v0.32.0`);
+    expect(gitRuns(h.exec)[0]).toBe(`${GIT} fetch ${TAG_REMOTE} +refs/tags/v0.32.0:refs/tags/v0.32.0`);
   });
 
   test("a non-git checkout names the reinstall command and fails", () => {
@@ -648,7 +649,7 @@ describe("updateCheckout", () => {
   test("an unreachable remote fails before anything moves", () => {
     const h = harness({
       installed: "0.31.1",
-      answers: [...MANAGED, [`${GIT} ls-remote --tags origin`, { code: 128 }]],
+      answers: [...MANAGED, [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { code: 128 }]],
     });
     expect(updateCheckout(h.deps).code).toBe(EXIT.FAIL);
     expect(gitRuns(h.exec)).toEqual([]);
@@ -658,7 +659,7 @@ describe("updateCheckout", () => {
   test("a failed fetch stops before the checkout", () => {
     const h = managed([[`${ROOT}$ ${GIT} fetch`, { code: 1 }]]);
     expect(updateCheckout(h.deps).code).toBe(EXIT.FAIL);
-    expect(gitRuns(h.exec)).toEqual([`${GIT} fetch --depth 1 origin +refs/tags/v0.32.0:refs/tags/v0.32.0`]);
+    expect(gitRuns(h.exec)).toEqual([`${GIT} fetch --depth 1 ${TAG_REMOTE} +refs/tags/v0.32.0:refs/tags/v0.32.0`]);
   });
 });
 
@@ -721,16 +722,100 @@ describe("update", () => {
       installed: "0.31.1",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
         ...SHALLOW,
       ],
     });
     expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
-    expect(h.exec.calls).toContain(`${ROOT}$ bun ${ROOT}/cli/main.ts _apply-update`);
+    expect(h.exec.calls).toContain(`${ROOT}$ PATH=/fake:$PATH /fake/bun ${ROOT}/cli/main.ts _apply-update`);
     // Nothing of the second half ran in THIS process.
     expect(h.restarts).toBe(0);
     expect(h.exec.calls.some((c) => c.includes("check-version.sh"))).toBe(false);
+  });
+
+  test("the handoff re-execs the resolved Bun, even when PATH does not name it", async () => {
+    const h = harness({
+      installed: "0.31.1",
+      absent: ["bun"],
+      answers: [
+        ...MANAGED,
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
+        [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
+        ...SHALLOW,
+      ],
+    });
+    h.files.entries.set("/opt/bun/bin/bun", { text: "" });
+    h.deps.ctx.env.BUN_INSTALL = "/opt/bun";
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(h.exec.calls).toContain(
+      `${ROOT}$ PATH=/opt/bun/bin:$PATH /opt/bun/bin/bun ${ROOT}/cli/main.ts _apply-update`,
+    );
+  });
+
+  test("records the run it just finished, so a restarted lead can find its pack turns", async () => {
+    // The bug this pins: the in-place path wrote nothing, so `settleUpdateGate` in bridge/index.ts
+    // re-read a file that was not there, `updateTurns.begin` never ran, and no peer was ever handed
+    // its turn. The lead updated itself and the pack sat still until the operator retried by hand.
+    const h = harness({
+      installed: "0.31.1",
+      answers: [
+        ...MANAGED,
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
+        [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
+        ...SHALLOW,
+      ],
+    });
+    expect(await cmdUpdate(h.deps, ["--run-id", "r-99"])).toBe(EXIT.OK);
+    const written = h.files.read(`${STATE}/update.json`);
+    const run = JSON.parse(written ?? "{}");
+    // `done` and a run id are the two things the gate reads; `to` is what the peers level to, and it
+    // is the version the tree advanced TO, never the one we booted on — the whole reason the read
+    // happens after the advance.
+    expect(run.state).toBe("done");
+    expect(run.runId).toBe("r-99");
+    expect(run.to).toBe(STAGED_TARGET);
+    expect(run.from).toBe("0.31.1");
+
+    // THE SEAM, held from both sides. The bug was never the missing file, it was that the bridge
+    // found nothing to start turns from. So the record this CLI just wrote goes through the BRIDGE's
+    // own parser and the BRIDGE's own predicate, and the pair it hands the turn queue is asserted
+    // here. Either side moving alone fails this test, which is what the old arrangement could not do.
+    expect(packTurnStart(parseUpdateRun(written))).toEqual({ runId: "r-99", to: STAGED_TARGET });
+  });
+
+  test("a run started from a terminal is recorded with no id, never a blank one", async () => {
+    const h = harness({
+      installed: "0.31.1",
+      answers: [
+        ...MANAGED,
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
+        [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
+        ...SHALLOW,
+      ],
+    });
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    const written = h.files.read(`${STATE}/update.json`);
+    const run = JSON.parse(written ?? "{}");
+    expect(run.state).toBe("done");
+    expect(run.runId ?? null).toBeNull();
+    // And the gate correctly starts NOTHING from it: a run with no id was nobody's pack confirm.
+    expect(packTurnStart(parseUpdateRun(written))).toBeNull();
+  });
+
+  test("a build that fails records nothing — the lead did not move, so no peer may", async () => {
+    const h = harness({
+      installed: "0.31.1",
+      answers: [
+        ...MANAGED,
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
+        [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
+        ...SHALLOW,
+        [`${ROOT}$ PATH=/fake:$PATH /fake/bun ${ROOT}/cli/main.ts _apply-update`, { code: 1 }],
+      ],
+    });
+    expect(await cmdUpdate(h.deps, ["--run-id", "r-99"])).toBe(EXIT.FAIL);
+    expect(h.files.read(`${STATE}/update.json`)).toBeNull();
   });
 
   test("a checkout that would not advance never reaches the rebuild", async () => {
@@ -745,7 +830,7 @@ describe("update", () => {
       installed: "0.31.1",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
         ...SHALLOW,
       ],
@@ -766,7 +851,7 @@ describe("update", () => {
       installed: "0.32.0",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "b2peeled\n" }],
       ],
     });
@@ -823,7 +908,7 @@ describe("update", () => {
       installed: "0.31.1",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
         ...SHALLOW,
       ],
@@ -841,7 +926,7 @@ describe("update", () => {
       installed: "0.32.0",
       answers: [
         ...LINKED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "b2peeled\n" }],
       ],
     });
@@ -860,13 +945,13 @@ describe("update", () => {
       installed: "0.31.1",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
         ...SHALLOW,
       ],
     });
     expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
-    expect(h.exec.calls).toContain(`${ROOT}$ bun ${ROOT}/cli/main.ts _apply-update`);
+    expect(h.exec.calls).toContain(`${ROOT}$ PATH=/fake:$PATH /fake/bun ${ROOT}/cli/main.ts _apply-update`);
     // Twice: once at the decision, once at the end.
     expect(h.io.stdout.filter((l) => l.includes("update-major --plugin herdr.collie"))).toHaveLength(2);
     expect(h.io.stdout.at(-1)).toContain("Collie 1.0.0 is out — a NEW MAJOR. Take it with:");
@@ -877,7 +962,7 @@ describe("update", () => {
       installed: "0.31.1",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: ONLY_0X }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: ONLY_0X }],
         [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
         ...SHALLOW,
       ],
@@ -891,7 +976,7 @@ describe("update", () => {
       installed: "0.31.1",
       answers: [
         ...MANAGED,
-        [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+        [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
         [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
         ...SHALLOW,
       ],
@@ -938,7 +1023,11 @@ describe("the origin assertion", () => {
 
   test("COLLIE_UPDATE_REPO moves the assertion — one override, banner and updater together", async () => {
     const h = harness({
-      answers: [...forked, ...MANAGED, [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }]],
+      answers: [
+        ...forked,
+        ...MANAGED,
+        [`${GIT} ls-remote --tags https::https://github.com/youngsecurity/collie.git`, { stdout: LS_REMOTE }],
+      ],
       installed: "1.0.0",
       env: { COLLIE_UPDATE_REPO: "youngsecurity/collie" },
     });
@@ -1023,6 +1112,8 @@ interface BinaryOptions {
   hooksCheck?: Partial<import("./sys.ts").ExecResult>;
   /** What `/api/health` answers, in order — the detached runner's gate polls it (M15/04). */
   health?: readonly HealthReply[];
+  /** Extra scripted answers, appended after the fixture's own — e.g. a failing systemd bus probe. */
+  answers?: Scripted["answers"];
 }
 
 /** One `/api/health` answer for the fake net: down, deposed, or up as some version. */
@@ -1063,7 +1154,7 @@ function binaryHarness(over: BinaryOptions = {}): Harness {
     version("1.0.0"),
     [`${INST}/current/bin/collie hooks status --check`, over.hooksCheck ?? { code: EXIT.OK }],
   ];
-  const exec = fakeExec({ answers });
+  const exec = fakeExec({ answers: [...answers, ...(over.answers ?? [])] });
   const seed: SeededFiles = {
     [`${BROOT}/herdr-plugin.toml`]: 'id = "herdr.collie"\nversion = "1.0.0"\n',
     [`${BROOT}/bin/collie`]: "OLD BINARY",
@@ -1163,6 +1254,20 @@ describe("collie update on a binary install", () => {
     expect(h.exec.calls.join("\n")).not.toContain("bun ");
     // The state file says `staging`, so a bridge that comes up now reports a run in flight.
     expect(JSON.parse(h.files.read(`${STATE}/update.json`) ?? "{}").state).toBe("staging");
+    expect(h.exec.spawned[0]?.command[0]).toBe("systemd-run");
+  });
+
+  test("a systemd-run binary with no reachable user bus falls back to setsid, not a doomed handoff", async () => {
+    // The exact shape a container ships: the systemd package is on disk (`which systemd-run`
+    // finds it) but no user manager or session bus is running (`systemctl --user
+    // show-environment` fails) — the failure `handOff` used to miss, wedging every update behind
+    // a `systemd-run` that starts, can't reach the bus, and exits without ever handing off.
+    const h = binaryHarness({
+      others: ["0.9.0"],
+      answers: [["systemctl --user show-environment", { code: 1 }]],
+    });
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(h.exec.spawned[0]?.command[0]).toBe("setsid");
   });
 
   test("the runner flips `current` with one rename, restarts through it, and only then prunes", async () => {
@@ -1376,7 +1481,7 @@ function legacyClone(over: { answers?: Scripted["answers"]; absent?: string[]; i
     answers: [
       ...(over.answers ?? []),
       ...(LINKED ?? []),
-      [`${GIT} ls-remote --tags origin`, { stdout: LS_REMOTE }],
+      [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
       [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
       ...(FULL ?? []),
     ],
@@ -1463,12 +1568,12 @@ describe("the staged checkout path", () => {
     const h = legacyClone();
     expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
     // The tag is FETCHED and STORED, then a worktree of it is added beside the running install.
-    expect(gitRuns(h.exec)).toContain(`${GIT} fetch origin +refs/tags/v0.32.0:refs/tags/v0.32.0`);
+    expect(gitRuns(h.exec)).toContain(`${GIT} fetch ${TAG_REMOTE} +refs/tags/v0.32.0:refs/tags/v0.32.0`);
     expect(gitRuns(h.exec)).toContain(
       `${GIT} worktree add --detach --force ${WT("v0.32.0")} refs/tags/v0.32.0`,
     );
     // The build runs INSIDE the worktree, from the source that was just checked out there.
-    expect(h.exec.calls).toContain(`${WT("v0.32.0")}$ bun ${WT("v0.32.0")}/cli/main.ts build`);
+    expect(h.exec.calls).toContain(`${WT("v0.32.0")}$ PATH=/fake:$PATH /fake/bun ${WT("v0.32.0")}/cli/main.ts build`);
     // The marker is the build's last act…
     expect(JSON.parse(h.files.read(`${WT("v0.32.0")}/.collie-build`) ?? "{}")).toEqual({
       version: "0.32.0",
@@ -1520,7 +1625,7 @@ describe("the staged checkout path", () => {
   });
 
   test("a build fail leaves `current` where it was, names the stage, and takes the worktree away", async () => {
-    const h = legacyClone({ answers: [[`${WT("v0.32.0")}$ bun`, { code: 1 }]] });
+    const h = legacyClone({ answers: [[`${WT("v0.32.0")}$ PATH=/fake:$PATH /fake/bun`, { code: 1 }]] });
     expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
     expect(h.io.stderr.join("\n")).toContain("stopped at the BUILD stage");
     expect(h.io.stderr.join("\n")).toContain("`current` never moved");
@@ -1532,8 +1637,35 @@ describe("the staged checkout path", () => {
     expect(h.exec.calls).toContain(`${GIT} worktree prune`);
   });
 
+  test("a Bun only off PATH still builds the stage, by its absolute path and on the child's PATH", async () => {
+    // #169's other half. The preflight already resolves Bun through the candidate list, so a Herdr
+    // action with no login shell reports GREEN — and the verb has to run the SAME Bun, or the
+    // operator is told the update can proceed by a check the update then contradicts.
+    const h = legacyClone({ absent: ["bun"] });
+    h.files.entries.set(`${HOME}/.bun/bin/bun`, { text: "" });
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    // The directory rides along at the FRONT of the child's PATH, and that half is not decoration.
+    // A phone-started update runs in a transient systemd user unit with no operator PATH, and
+    // `bun cli/main.ts build` shells out to `bunx tsc` — found by NAME or not at all. A lab run on a
+    // host whose Bun lives only in `~/.bun/bin` advanced the checkout and then died there:
+    // `bunx: command not found`, exit 127, with no binary and no `web/dist` to show for it.
+    expect(h.exec.calls).toContain(
+      `${WT("v0.32.0")}$ PATH=${HOME}/.bun/bin:$PATH ${HOME}/.bun/bin/bun ${WT("v0.32.0")}/cli/main.ts build`,
+    );
+  });
+
+  test("the refusal is kept for the one case that earns it: nothing resolves anywhere", async () => {
+    // Same fixture as above minus the file — so what the guard reads is `resolveTool`'s null, never
+    // a bare `which` that a candidate would have answered.
+    const h = legacyClone({ absent: ["bun"] });
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.io.stderr.join("\n")).toContain("bun not found");
+    expect(h.io.stderr.join("\n")).toContain("Nothing was changed.");
+    expect(gitRuns(h.exec).join("\n")).not.toContain("worktree add");
+  });
+
   test("a fetch that fails stops before any worktree is added", async () => {
-    const h = legacyClone({ answers: [[`${ROOT}$ git -C ${ROOT} fetch origin +refs/tags`, { code: 1 }]] });
+    const h = legacyClone({ answers: [[`${ROOT}$ git -C ${ROOT} fetch ${TAG_REMOTE} +refs/tags`, { code: 1 }]] });
     expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
     expect(h.io.stderr.join("\n")).toContain("stopped at the FETCH stage");
     expect(gitRuns(h.exec).join("\n")).not.toContain("worktree add");
@@ -1548,7 +1680,7 @@ describe("the staged checkout path", () => {
   });
 
   test("a staged install that is already current stages nothing at all", async () => {
-    const h = stagedHarness({ answers: [[`git -C ${WT("v1.0.0")} ls-remote --tags origin`, { stdout: LS_REMOTE }]] });
+    const h = stagedHarness({ answers: [[`git -C ${WT("v1.0.0")} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }]] });
     expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
     expect(h.io.stdout.join("\n")).toContain("already current");
     expect(h.exec.calls.join("\n")).not.toContain("worktree add");
@@ -2001,5 +2133,66 @@ describe("the update run id", () => {
     expect(wantsRunId(["update", "--run-id", "r-1"])).toBe("r-1");
     expect(wantsRunId(["update", "--run-id=r-1"])).toBe("r-1");
     expect(wantsRunId(["update", "--to-tag", "v1.1.0"])).toBeNull();
+  });
+});
+
+// ── The install `update` must decline ────────────────────────────────────────
+// A package manager laid this Collie down in a folder it owns. Declining is the correct outcome,
+// not a diagnosis failure — and it has to READ that way, because the shape used to fall out as
+// `unknown` and tell operators their packaged install was unrecognisable.
+
+describe("cmdUpdate — a folder a package manager owns", () => {
+  /** A root with a marker, no `.git`, and outside `$HOME` — `/opt/collie`, the fake's own root. */
+  function packaged() {
+    return harness({ answers: [[`${GIT} rev-parse --git-dir`, { code: 128 }]], installed: "1.5.2" });
+  }
+
+  test("it refuses, and never reaches git, bun or the network", async () => {
+    const h = packaged();
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.exec.calls.some((c) => c.includes("ls-remote"))).toBe(false);
+    expect(h.exec.calls.some((c) => c.includes("bun"))).toBe(false);
+    expect(h.restarts).toBe(0);
+  });
+
+  test("it names the root and the boundary, and does not diagnose a fault", async () => {
+    const h = packaged();
+    await cmdUpdate(h.deps);
+    const said = h.io.stderr.join("\n");
+    expect(said).toContain(ROOT);
+    expect(said).toContain("updates come from your package manager");
+    // The old wording for this shape. Printing it here is the bug the kind exists to fix.
+    expect(said).not.toContain("cannot tell how this Collie was installed");
+    expect(said).not.toContain("herdr plugin install");
+  });
+
+  test("a root whose prefix names a manager gets the command; ours does not, so it gets none", async () => {
+    // `/opt/collie` is packaged and belongs to no manager this build knows, so Collie says the
+    // boundary and stops rather than guessing a command the operator cannot run.
+    const h = packaged();
+    await cmdUpdate(h.deps);
+    expect(h.io.stderr.join("\n")).not.toContain("Take the new version with:");
+  });
+
+  test("`--rollback` gets this boundary too, not the checkout lecture", async () => {
+    // `--rollback` is dispatched above the kind fork, so before this it fell through to three
+    // sentences about `versions/` layouts and `git checkout v<version>` — none of which exist here.
+    const h = packaged();
+    expect(await cmdUpdate(h.deps, ["--rollback"])).toBe(EXIT.FAIL);
+    const said = h.io.stderr.join("\n");
+    expect(said).toContain("updates come from your package manager");
+    expect(said).not.toContain("git checkout");
+    expect(said).not.toContain("ADR 0006");
+  });
+
+  test("a writable, user-owned root INSIDE $HOME still reports the unknown it really is", async () => {
+    // The near-miss the predicate must keep refusing to claim: all three of clause 4's disjuncts are
+    // false here, so a tarball someone unpacked into their own home is still `loose-binary`.
+    const inHome = `${HOME}/collie`;
+    const h = harness({ answers: [[`git -C ${inHome} rev-parse --git-dir`, { code: 128 }]] });
+    h.files.entries.set(`${inHome}/herdr-plugin.toml`, { text: 'version = "1.5.2"\n' });
+    const deps = { ...h.deps, ctx: { ...h.deps.ctx, root: inHome } };
+    expect(await cmdUpdate(deps)).toBe(EXIT.FAIL);
+    expect(h.io.stderr.join("\n")).toContain("cannot tell how this Collie was installed");
   });
 });

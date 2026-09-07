@@ -26,8 +26,42 @@ PATH. Details and rollback: [`docs/upgrading.md`](./docs/upgrading.md) → *Upgr
 
 ## [Unreleased]
 
+## [1.5.6] - 2026-09-07
+
+- Collie carries its own package recipes: `packaging/aur` for Arch (`collie-bin`, not yet on the AUR) and `packages.<system>.collie` from this repository's flake for Nix. Both wrap the release tarball, neither builds anything, and neither updates itself, because the package manager owns that folder. ([bb46def](https://github.com/AltanS/collie/commit/bb46def), [43a23a2](https://github.com/AltanS/collie/commit/43a23a2))
+- The flake's default package is Collie, so `nix run github:AltanS/collie` runs it. The pinned Bun the release is built with is still there, as `packages.<system>.bun`. ([43a23a2](https://github.com/AltanS/collie/commit/43a23a2))
+- The update band remembers a dismissal on the host instead of in one browser, the quiet pack notice can be put down on its own, and a host whose updates come from its package manager reads "Collie 1.6.0 available via pacman." instead of an offer to tap. ([23b5934](https://github.com/AltanS/collie/commit/23b5934), [2be3547](https://github.com/AltanS/collie/commit/2be3547), [f630c1c](https://github.com/AltanS/collie/commit/f630c1c))
+- A Mac or an arm64 Linux host on 1.5.4 or 1.5.5 gets a binary that starts again. A host whose binary will not start reinstalls with `curl -fsSL https://colliepwa.dev/install.sh | COLLIE_TAG=v1.5.6 sh`; a host still on 1.5.3 updates as usual, and linux-x64 was never affected. Those two releases were compiled on the build environment's patched Bun, so the Mac binary loaded ICU out of `/nix/store` and the arm64 Linux binary named a `/nix/store` program interpreter. The release now compiles on the upstream Bun archive the flake pins and refuses any binary whose loader inputs point outside the system's own library roots, thanks @rapporbit (#184). ([33df273](https://github.com/AltanS/collie/commit/33df273), [9d07868](https://github.com/AltanS/collie/commit/9d07868))
+- The pack journal names each peer's leg change, each incompatible verdict with the reason and the backoff it earns, and the moment a run settles. A run that sits waiting on a peer is now read out of `journalctl --user -u collie` instead of inferred from the arithmetic. ([3ea0108](https://github.com/AltanS/collie/commit/3ea0108))
+
+## [1.5.5] - 2026-09-07
+
+- The pack treats a packaged member as a quiet member instead of failing it, the phone says which host waits for its package manager, and a package swap under a running bridge asks for a restart. ([1df2451](https://github.com/AltanS/collie/commit/1df2451))
+- The attach button asks Photos or Files, so the camera roll is on offer again: one `accept` cannot carry `image/*` and thirty text extensions without a phone hiding the gallery. ([9fa55a7](https://github.com/AltanS/collie/commit/9fa55a7))
+- The attach button answers a tap at once, with a haptic tick and a filled tone, and its picker opens above the button rather than over it. A bottom sheet covered that button 42ms after the tap, so nothing drawn there to acknowledge the tap could be seen at all. ([9fa55a7](https://github.com/AltanS/collie/commit/9fa55a7), [495b9c7](https://github.com/AltanS/collie/commit/495b9c7))
+- The Updates card holds its place while it checks and stays put for the whole run: the preflight and the peer lines arrive through a `Collapse`, the action button is disabled from the tap onward instead of vanishing, and it says what it is waiting for. ([689dcb2](https://github.com/AltanS/collie/commit/689dcb2))
+- Codex prints its queue hint and its context metric on one footer row while a turn is active, and the parser now knows that shape, so a reply there stops reporting that it never reached the input box, thanks @stekman08 (#176). ([0ad4f2f](https://github.com/AltanS/collie/commit/0ad4f2f))
+- The guarded submit is bound to the prompt the verifying read saw, so a dialog that takes focus between the typing and the Enter is refused instead of answered, thanks @stekman08 (#177). ([e7c1c78](https://github.com/AltanS/collie/commit/e7c1c78))
+- `Collapse` waits for a painted frame before it opens, so content that arrives late slides in instead of jumping. Every enter whose child mounted and opened together was a jump before this, which is every late arrival the primitive exists for. ([bffe062](https://github.com/AltanS/collie/commit/bffe062))
+- New `AnchoredMenu` primitive: a small menu that opens above its trigger instead of over it, for a control near the bottom edge that a bottom sheet would cover. ([ffd89b0](https://github.com/AltanS/collie/commit/ffd89b0))
+
+## [1.5.4] - 2026-09-07
+
+- Confirming a pack update on the phone levels the peers on an ordinary checkout install, instead of updating only the lead and leaving "Retry pack update" to be tapped by hand. That install kind never recorded the run the lead's turn queue is rebuilt from after its own restart. ([d9eb459](https://github.com/AltanS/collie/commit/d9eb459))
+- `collie update` hands off to `systemd-run` only when the systemd user bus is reachable, not just when the binary exists, so a container with systemd installed but not running no longer wedges every update in staging, thanks @chernesk (#174). ([cdbd1a9](https://github.com/AltanS/collie/commit/cdbd1a9))
+- Collie recognises an install its package manager owns, declines to update it, and names that manager's command instead, on the terminal and on the phone, thanks @mikebenner (#171). ([8fe3180](https://github.com/AltanS/collie/commit/8fe3180))
+- The release tarball carries `scripts/collie-ctl.sh`, the shim every action in its own `herdr-plugin.toml` names, thanks @mikebenner (#171). ([6eb2d17](https://github.com/AltanS/collie/commit/6eb2d17))
+- The upload cap is a setting, `COLLIE_MAX_UPLOAD_MB`, and `COLLIE_UPLOAD_EXTRA_TYPES` adds text types the shipped list misses. ([e1493f4](https://github.com/AltanS/collie/commit/e1493f4))
+- The pack lead's oversize refusal is named `upload_too_large`, not `image_too_large`, now that it is not only about images. ([e1493f4](https://github.com/AltanS/collie/commit/e1493f4))
+- The composer attaches text files as well as images — markdown, code, config and logs — behind a paperclip in place of the picture icon. ([9833ba3](https://github.com/AltanS/collie/commit/9833ba3))
+- A truncated error in the header opens on a tap, showing the whole message with a copy button. ([747afaa](https://github.com/AltanS/collie/commit/747afaa))
+- The update preflight and the update itself both look for Bun where the shim looks, `$BUN_INSTALL` included, so a Bun off your PATH is green with the path it will run rather than a red that blocks the update, and a file that cannot be executed is no longer taken for a Bun (#169). ([547b198](https://github.com/AltanS/collie/commit/547b198), [77b3f1e](https://github.com/AltanS/collie/commit/77b3f1e))
+- `flake.nix` pins the tools a release is built with — Bun, Node, git, tmux and zellij — and the release workflow builds inside that flake, so a published binary names the toolchain that produced it. ([7636222](https://github.com/AltanS/collie/commit/7636222))
+- A pre-commit guard refuses a `flake.lock` that moves outside a release commit, so the pinned toolchain and the version move together or not at all. ([b00afe1](https://github.com/AltanS/collie/commit/b00afe1))
+
 ## [1.5.3] - 2026-09-06
 
+- Release checks and tag fetches stay on HTTPS when a git `insteadOf` rule rewrites GitHub URLs to SSH, so a service without an SSH key can update again, thanks @magoz (#170). ([b3bd127](https://github.com/AltanS/collie/commit/b3bd127))
 - Realtime Russian Soniox push-to-talk is available in every pane; OMP panes additionally stream the final reply back as speech through the local authenticated voice daemon.
 
 ## [1.5.2] - 2026-09-05

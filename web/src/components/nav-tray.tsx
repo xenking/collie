@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import type { ReactNode } from "react";
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, ChevronDown, Lock } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, Lock } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -35,7 +35,10 @@ import { CONTROL_PRESETS, type CtrlDef } from "@/lib/operator-keys";
 // dimming here (unlike the quick replies): this is a keypad you drum on, and dimming eight keys per
 // arrow press would strobe.
 
+export type NavTrayView = "keys" | "digits" | "presets" | "fkeys";
 interface NavTrayProps {
+  /** The Composer-owned selected section; queue and modifier state remain local across changes. */
+  view?: NavTrayView;
   /** Resolves true when the bridge accepted the keys — drives the ✓ echo on the pressed button. */
   onSend: (keys: string[]) => Promise<boolean>;
   /**
@@ -63,19 +66,11 @@ const NO_REFUSED_KEYS: readonly string[] = [];
 
 const DIGITS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
-// F1–F12 — Herdr's send_keys grammar accepts them bare (HERDR_API.md), and harnesses bind them to
-// real actions (tmux windows, CLI hotkeys, agent-extension views like pi's CE Workflow: F7 opens
-// its orchestrator). Without buttons for them, a phone-only user has no route to any such keybind.
+// F1–F12 — Herdr's send_keys grammar accepts them bare and harnesses bind them to real actions.
 const FN_KEYS = ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"];
 
-// Two views behind a segmented toggle: the keys pad (arrows/Esc, Tab/Space/Enter, modifiers, Ctrl
-// presets) and a phone-dialer digit grid. Digits were a cramped nine-across sliver row; on their own
-// tab they get large, thumb-sized targets. The tab is component state only (resets to "keys" each
-// open — the dock unmounts the tray when closed), while the armed modifier, the key queue, and the
-// Ctrl-expand persist across the toggle so a composed sequence survives switching to the digit pad.
-type Tab = "keys" | "digits";
-
 export function NavTray({
+  view = "keys",
   onSend,
   presets = CONTROL_PRESETS,
   onQueueChange,
@@ -83,9 +78,6 @@ export function NavTray({
   unsupportedKeys = NO_REFUSED_KEYS,
 }: NavTrayProps) {
   useLocale();
-  const [tab, setTab] = useState<Tab>("keys");
-  const [ctrlOpen, setCtrlOpen] = useState(false);
-  const [fkeysOpen, setFkeysOpen] = useState(false);
   const { queue, mods, activeMods, composing, arm, press, pushBase, removeAt, clear, take } =
     useKeyQueue();
   const { pending, confirm, reset } = usePendingConfirm(); // danger ctrl two-tap (immediate path only)
@@ -221,40 +213,8 @@ export function NavTray({
         disabled={disabled}
       />
 
-      {/* Segmented toggle: the keys pad vs. the phone-dialer digit grid. Same pressed language as the
-          composer's view toggles (secondary = active, ghost = inactive). */}
-      <div className="grid grid-cols-2 gap-1 rounded-lg bg-background/60 p-1">
-        <Button
-          type="button"
-          variant={tab === "keys" ? "secondary" : "ghost"}
-          size="sm"
-          onClick={() => setTab("keys")}
-          aria-pressed={tab === "keys"}
-          className="h-8 text-sm font-medium"
-        >
-          {t("keys.tab.keys")}
-        </Button>
-        <Button
-          type="button"
-          variant={tab === "digits" ? "secondary" : "ghost"}
-          size="sm"
-          onClick={() => setTab("digits")}
-          aria-pressed={tab === "digits"}
-          className="h-8 font-mono text-sm"
-        >
-          123
-        </Button>
-      </div>
-
-      {tab === "keys" ? (
+      {view === "keys" && (
         <>
-          {/* Same physical-keyboard geometry as the composer's inline quick keys, for muscle memory:
-              Esc top-left, Tab directly below it, arrows as an inverted-T on the right. The Esc/Up
-              gap holds a quick Ctrl+C — the one interrupt chord worth a single tap, without opening
-              Presets (which still lists it alongside the other Ctrl chords for discoverability).
-              It carries the preset's own spelling, "Ctrl C" — the same chord must not read two ways
-              in one drawer, and tmux notation ("C-c") is the spelling this codebase keeps out of
-              sight precisely because it is not what Herdr accepts either. */}
           <div className="grid grid-cols-4 gap-1.5">
             {navBtn("Esc", ["Escape"])}
             {navBtn("Ctrl C", ["ctrl+c"], "Ctrl+C")}
@@ -265,8 +225,6 @@ export function NavTray({
             {navBtn(<ArrowDown className="size-4" />, ["Down"], "Down", true)}
             {navBtn(<ArrowRight className="size-4" />, ["Right"], "Right", true)}
           </div>
-
-          {/* Space — full-width, spacebar-style, on its own row */}
           <Button
             type="button"
             variant={echo.phaseOf("Space") === "idle" ? "outline" : "default"}
@@ -277,86 +235,15 @@ export function NavTray({
           >
             {echo.phaseOf("Space") === "done" ? <Check className="size-4" /> : "Space"}
           </Button>
-
-          {/* Modifiers (checkboxes that cycle off → once → locked → off): arm any subset and the
-              next key composes as their combined chord. Locked (Lock glyph) stays armed across
-              presses and Sends. Same pressed styling as everything else (default = armed, outline =
-              idle). Display order Shift · Ctrl · Alt; compose order is canonical regardless of taps. */}
           <div className="grid grid-cols-3 gap-1.5">
             {modBtn("shift", "⇧ Shift")}
             {modBtn("ctrl", "Ctrl")}
             {modBtn("alt", "Alt")}
           </div>
-
-          {/* Presets (collapsed by default; expanding keeps everything inline, never covering the
-              mirror). On the immediate path a danger preset needs a second tap; while composing a
-              tap just stages its chords for review. An operator's `keys.toml` rows arrive here as
-              the same CtrlDef list, so a multi-chord row sends as one batch and an armed modifier
-              stages it — no special-casing. */}
-          <div>
-            <button
-              type="button"
-              onClick={() => setCtrlOpen((o) => !o)}
-              className="flex items-center gap-1 px-1 py-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
-            >
-              {t("keys.presets.label")}
-              <ChevronDown className={cn("size-3 transition-transform", ctrlOpen && "rotate-180")} />
-            </button>
-            {ctrlOpen && (
-              <div className="mt-1 grid grid-cols-3 gap-1.5">
-                {presets.map((item) => {
-                  const isPending = pending === item.label;
-                  const phase = echo.phaseOf(item.label);
-                  // The armed two-tap confirm outranks the echo — it's the thing you must read.
-                  const variant = isPending ? "destructive" : phase === "idle" ? "outline" : "default";
-                  return (
-                    <Button
-                      key={item.label}
-                      type="button"
-                      variant={variant}
-                      size="sm"
-                      disabled={disabled || !keysSendable(item.keys, unsupportedKeys)}
-                      onClick={() => pressCtrl(item)}
-                      className={cn(
-                        "h-10 text-sm font-medium",
-                        item.danger && !isPending && phase === "idle" && "text-destructive",
-                      )}
-                    >
-                      {isPending ? (
-                        t("keys.confirm.label")
-                      ) : phase === "done" ? (
-                        <Check className="size-4" />
-                      ) : (
-                        item.label
-                      )}
-                    </Button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-          {/* Function keys (#119) — same collapsible shape as Presets: collapsed by default so the
-              tray doesn't grow, expanding to a 4×3 grid. They ride the ordinary navBtn path, so the
-              press echo, key-queue staging, and chords with armed modifiers (ctrl+F7, …) all come
-              for free — no special-casing. */}
-          <div>
-            <button
-              type="button"
-              onClick={() => setFkeysOpen((o) => !o)}
-              className="flex items-center gap-1 px-1 py-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
-            >
-              {t("keys.fkeys.label")}
-              <ChevronDown className={cn("size-3 transition-transform", fkeysOpen && "rotate-180")} />
-            </button>
-            {fkeysOpen && (
-              <div className="mt-1 grid grid-cols-4 gap-1.5">{FN_KEYS.map((k) => navBtn(k, [k]))}</div>
-            )}
-          </div>
         </>
-      ) : (
-        /* Pick a numbered option — a phone-dialer 3×3 grid of large, thumb-sized digit keys. Same
-           fire() path as everything else, so an armed modifier / a queue built on the Keys tab still
-           applies here. */
+      )}
+
+      {view === "digits" && (
         <div className="grid grid-cols-3 gap-1.5">
           {DIGITS.map((d) => {
             const phase = echo.phaseOf(d);
@@ -376,6 +263,34 @@ export function NavTray({
           })}
         </div>
       )}
+
+      {view === "presets" && (
+        <div className="grid grid-cols-3 gap-1.5">
+          {presets.map((item) => {
+            const isPending = pending === item.label;
+            const phase = echo.phaseOf(item.label);
+            const variant = isPending ? "destructive" : phase === "idle" ? "outline" : "default";
+            return (
+              <Button
+                key={item.label}
+                type="button"
+                variant={variant}
+                size="sm"
+                disabled={disabled || !keysSendable(item.keys, unsupportedKeys)}
+                onClick={() => pressCtrl(item)}
+                className={cn(
+                  "h-10 text-sm font-medium",
+                  item.danger && !isPending && phase === "idle" && "text-destructive",
+                )}
+              >
+                {isPending ? t("keys.confirm.label") : phase === "done" ? <Check className="size-4" /> : item.label}
+              </Button>
+            );
+          })}
+        </div>
+      )}
+
+      {view === "fkeys" && <div className="grid grid-cols-4 gap-1.5">{FN_KEYS.map((k) => navBtn(k, [k]))}</div>}
     </div>
   );
 }

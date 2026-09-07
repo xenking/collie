@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { classifyInstall, probeInstall } from "../cli/install-kind.ts";
 import { realLinkFs } from "../cli/link.ts";
+import { packageCommand } from "../cli/package-command.ts";
 import { realExec, realFiles } from "../cli/sys.ts";
 import { ActivityLedger } from "./activity.ts";
 import { AuditLog, fileAuditAppender } from "./audit.ts";
@@ -127,7 +128,7 @@ import {
   updateDigestBody,
 } from "./update.ts";
 import { SWEEP_INTERVAL_MS, sweepUploads } from "./uploads.ts";
-import { readUpdateRun, updateLockHeld } from "./update-run.ts";
+import { packTurnStart, readUpdateRun, updateLockHeld } from "./update-run.ts";
 import {
   FreshPreflightGate,
   parsePreflightReport,
@@ -138,7 +139,7 @@ import {
   updateCadenceTick,
   updateStartCommand,
 } from "./update-action.ts";
-import { collieVersionBare } from "./version.ts";
+import { collieVersion, collieVersionBare } from "./version.ts";
 
 // How often the registry rescans the filesystem for sessions that appeared/disappeared after boot.
 const SESSION_REFRESH_MS = 15_000;
@@ -563,13 +564,30 @@ const updateRepo = process.env.COLLIE_UPDATE_REPO?.trim() || "AltanS/collie";
 // startup because the answer cannot change under a running process (an update restarts the service).
 // The banner spells its commands from this: Herdr actions for a Herdr-managed checkout, the `collie`
 // verbs for everything else (M14/01 §5.3).
+// The version this process is RUNNING, captured once, here, beside the kind — for the same reason
+// the kind is captured once: neither can change under a live process. A package manager can still
+// change the FILES, and `collieVersion` re-reads them on every call, so the difference between this
+// string and a fresh read is the restart-needed signal (M17/02). No new state file.
+const bootVersion = collieVersion(rootDir);
+
 const installKind = classifyInstall(
-  probeInstall({ exec: realExec(process.env, homedir()), files: realFiles, link: realLinkFs }, rootDir),
+  probeInstall(
+    { ctx: { home: homedir() }, exec: realExec(process.env, homedir()), files: realFiles, link: realLinkFs },
+    rootDir,
+  ),
 ).kind;
 const updateMonitor = new UpdateMonitor({
   repo: updateRepo,
   current: currentVersion,
   installKind,
+  // Named only where it is true: a packaged install under a prefix we recognise. Every other kind
+  // takes Collie's own updater, and printing a package manager's command there would be a command
+  // that does not apply. Resolved here, at boot, for the reason `installKind` is.
+  packageCommand: installKind === "packaged" ? packageCommand(rootDir) : null,
+  bootVersion,
+  // Read from disk on each (throttled) snapshot: noticing that the files moved under this process is
+  // the whole job, so this one must NOT be cached the way `bootVersion` is.
+  liveVersion: () => collieVersion(rootDir),
   startupStamp: bridgeStampSync(bridgeDir, rootDir),
   fetchTags: githubTagsFetcher(updateRepo),
   bridgeStamp: () => bridgeStampSync(bridgeDir, rootDir),
@@ -767,6 +785,7 @@ updateTimer.unref();
 const packFollower =
   pack.mode === "peer" && canRunUpdate
     ? new PackFollower({
+        installKind,
         self: () => ({ version: packVersion, self: trustStore.current()?.self.memberId ?? "" }),
         // Re-read on every decision, never captured: it IS the memory, and the record on disk is
         // what survives this machine's own restart.
@@ -1168,6 +1187,8 @@ const packLead = (() => {
   const client = packPeerClient(data);
   return new PackLead({
     registry: packRegistry,
+    // §13's refuse-before-forward budget: this lead's own cap, not a constant (COLLIE_MAX_UPLOAD_MB).
+    maxUploadBytes: cfg.maxUploadBytes,
     snapshot: (link, freshPreflight, follow) => client.snapshot(link, undefined, freshPreflight, follow),
     // §20's half of the sweep: what this lead may state about itself, and the queue that hands out
     // one turn at a time. Every member of it is read through, never captured — a lead settles
@@ -1325,11 +1346,16 @@ const packStatus =
  */
 let settledRunId: string | null = null;
 function settleUpdateGate(): void {
-  const run = readUpdateRun(cfg.stateDir);
-  if (run === null || run.state !== "done" || run.runId === undefined || run.to === null) return;
-  if (run.runId === settledRunId) return;
-  settledRunId = run.runId;
-  updateTurns.begin(run.runId, run.to);
+  const start = packTurnStart(readUpdateRun(cfg.stateDir));
+  if (start === null) return;
+  if (start.runId === settledRunId) return;
+  settledRunId = start.runId;
+  // The one line an operator can grep for in the BRIDGE's own journal, which is the journal they
+  // are already tailing. The update that wrote this record ran under a transient `--collect` unit
+  // whose name nobody knows and whose journal outlives it by nothing, so a trace left only there is
+  // a trace left nowhere. Once per run id per process, so a poll tick cannot make it a stream.
+  console.log(`[pack] update ${start.runId}: levelling peers to ${start.to}`);
+  updateTurns.begin(start.runId, start.to);
   packLead?.resweep();
 }
 

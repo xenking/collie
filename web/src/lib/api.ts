@@ -13,13 +13,15 @@ import type {
   ActionResponse,
   BridgeConfig,
   CreateResponse,
+  DismissScope,
   DevicesResponse,
   LaunchersResponse,
   NotifyPrefs,
+  PaneCommandsResponse,
+  PairFailure,
   PaneHistoryResponse,
   PackStatusResponse,
   PaneReadResponse,
-  PairFailure,
   SnapshotResponse,
   UpdateCheckResponse,
   UpdateInfo,
@@ -437,6 +439,18 @@ export function fetchHistory(
   });
 }
 
+/** Discover the commands installed in this OMP pane's current working directory. */
+export function fetchPaneCommands(
+  paneId: string,
+  scope?: Scope,
+  signal?: AbortSignal,
+): Promise<PaneCommandsResponse> {
+  return req<PaneCommandsResponse>(
+    withScope(`/api/pane/${encodeURIComponent(paneId)}/commands`, scope),
+    { signal, headers: { "x-collie-seen": "1" } },
+  );
+}
+
 export function sendReply(
   paneId: string,
   text: string,
@@ -741,6 +755,22 @@ export function snoozeUpdate(): Promise<UpdateInfo> {
 }
 
 /**
+ * The update band was closed, for the version it named — the band's own dismiss (M17/08).
+ *
+ * The version goes to the BRIDGE rather than to this browser's storage, so the decision holds
+ * wherever the band is read next. `scope` says WHICH band: `offer` is a release available on this
+ * machine, and closing it snoozes the digest for that version too; `pack` is the quiet notice about
+ * a machine a package manager owns, and closing it touches no push. Not a mute either way — a newer
+ * version is a different fact and raises the band again.
+ */
+export function dismissUpdate(version: string, scope: DismissScope = "offer"): Promise<UpdateInfo> {
+  return req<UpdateInfo>("/api/update/dismiss", {
+    method: "POST",
+    body: JSON.stringify({ version, scope }),
+  });
+}
+
+/**
  * The run record from the STANDBY door (`GET /standby/update`), for the window in which the front
  * door is not answering because the update is restarting it.
  *
@@ -834,10 +864,12 @@ export function revokeDevice(label: string): Promise<DevicesResponse> {
 }
 
 /**
- * Upload an image; the bridge saves it to a host file and returns the path to reference in a
- * message. Uses multipart/form-data (NOT the JSON `req` helper — the browser sets the boundary).
+ * Upload an attachment — an image or a text file; the bridge saves it to a host file and returns the
+ * path to reference in a message. Uses multipart/form-data (NOT the JSON `req` helper — the browser
+ * sets the boundary). What the host will actually take is `/api/config`'s `upload` block, and
+ * lib/attachments.ts is where the phone reads it.
  */
-export function uploadImage(paneId: string, file: File, scope?: Scope): Promise<UploadResponse> {
+export function uploadFile(paneId: string, file: File, scope?: Scope): Promise<UploadResponse> {
   // Multipart, so it bypasses `req` (the browser sets the boundary) — track it explicitly instead.
   return trackBusy(
     (async () => {

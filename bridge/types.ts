@@ -24,6 +24,7 @@ export interface AgentView {
   workspaceNumber: number;
   tabId: string;
   agent: string;
+  sleeping?: boolean;
   status: AgentStatus;
   cwd: string;
   focused: boolean;
@@ -124,7 +125,7 @@ export interface AgentView {
  * NOTE the `Omit` is opt-OUT: a future server-only field on AgentView goes on the wire unless it is
  * added to the omit list here. If you add one, strip it here in the same change.
  */
-export type PaneWire = Omit<AgentView, "agentSession" | "sessionAgent"> & {
+export type PaneWire = Omit<AgentView, "agentSession" | "sessionAgent" | "sleeping"> & {
   /** True when this pane's history is actually offerable: the agent named a session AND its harness
    *  has a journal adapter. Says nothing about whether the log is readable — a named session whose
    *  file is missing still answers `available:false` with reason `no-log`. */
@@ -177,7 +178,7 @@ export function journalAgentOf(pane: AgentView): string {
 }
 
 export function toPaneWire(pane: AgentView, hasJournal: (agent: string) => boolean): PaneWire {
-  const { agentSession, sessionAgent: _sessionAgent, ...rest } = pane;
+  const { agentSession, sessionAgent: _sessionAgent, sleeping: _sleeping, ...rest } = pane;
   return agentSession && hasJournal(pane.agent) ? { ...rest, hasSession: true } : rest;
 }
 
@@ -438,9 +439,50 @@ export interface UpdateStatus {
    * banner's command spelling is a function of it: Herdr actions reach only a Herdr-managed
    * (detached) checkout; every other kind is told the `collie` verbs (M14/01 §5.3).
    */
-  installKind: "linked-clone" | "detached-checkout" | "binary" | "unknown";
+  installKind: "linked-clone" | "detached-checkout" | "binary" | "packaged" | "unknown";
+  /**
+   * The package manager's own upgrade command for this machine, when the resolved root names a
+   * manager Collie recognises (`cli/package-command.ts`). Absent on every other kind, and absent on
+   * a packaged install under a prefix nobody recognises — there the boundary sentence stands alone.
+   *
+   * **Resolved on the HOST, once, at boot.** The prefix is a fact about this machine, and a second
+   * derivation on the phone would be a second thing to drift.
+   */
+  packageCommand?: string;
+  /**
+   * The release whose OFFER the operator closed, or null when none was closed.
+   *
+   * It is the BRIDGE's fact, not a browser's: a dismissal is a decision about this machine's
+   * update, so it holds on every screen that polls this snapshot (M17/08). Keyed by version — a
+   * newer release is a different fact and raises the band again.
+   */
+  dismissedVersion: string | null;
+  /**
+   * The version whose quiet PACK notice the operator closed, or null.
+   *
+   * Two decisions, two fields. "A release is available here" and "that machine is standing behind,
+   * and a package manager owns it" are about different machines, so putting one down must not put
+   * the other down with it, even when both name the same version.
+   */
+  dismissedPackVersion: string | null;
   /** The running process is behind the on-disk bridge source — needs `systemctl --user restart collie`. */
   bridgeStale: boolean;
+  /**
+   * The VERSION on disk is no longer the version this process is running.
+   *
+   * Only a package manager can produce it: every other kind swaps files through Collie's own
+   * updater, which restarts the service as its last act. `pacman -Syu` replaces the root under a
+   * live process, and `collieVersion()` re-reads from disk on every call — so without this the
+   * bridge would answer with the NEW version while running the OLD code, on `/api/health`, on
+   * `hello` and therefore on the pack wire, where a lead reads it as "that peer already levelled".
+   *
+   * While it is raised, what this process puts ON THE PACK WIRE stays the version captured at boot:
+   * stale but true, never new but false.
+   */
+  restartNeeded: boolean;
+  /** The command that clears {@link restartNeeded}, spelled for the install kind. Absent when
+   *  nothing needs restarting. */
+  restartCommand?: string;
   /** When the upstream check last completed (epoch ms), or null if it hasn't run yet. */
   checkedAt: number | null;
   /**
@@ -468,6 +510,22 @@ export interface PaneReadResponse {
   truncated: boolean;
   /** Herdr's monotonic pane revision — passed through for the client's prompt-select race guard. */
   revision: number;
+}
+
+/** One slash command currently available in a live OMP pane. */
+export interface OmpCommand {
+  command: string;
+  description: string;
+  takesArg: boolean;
+  argHint: string;
+  common: boolean;
+  dangerous: boolean;
+}
+
+/** GET /api/pane/:id/commands — OMP's current interactive and cwd-specific command registry. */
+export interface OmpCommandsResponse {
+  version: string;
+  commands: OmpCommand[];
 }
 
 /**
@@ -818,6 +876,30 @@ export interface BridgeConfig {
   stt?: SttCapability;
   /** Realtime Soniox voice conversation path. Absent when not configured. */
   voice?: boolean;
+  /**
+   * What this collie accepts as an attachment. **Absent is a bridge older than this field**, which
+   * a client reads as the contract that shipped before it: 10 MB, images only. Present, it is the
+   * whole answer — the phone builds its file picker's `accept` list from it and refuses an oversize
+   * file before spending an uplink on a refusal it can already predict.
+   *
+   * Per HOST, not per pack: `?h=peer` reads the LEAD's config body, so a member with a different
+   * `COLLIE_MAX_UPLOAD_MB` still answers for itself when the bytes arrive. See docs/configure.md.
+   */
+  upload?: UploadCapability;
+}
+
+/**
+ * What `/api/config` says about attachments — the two facts a client needs to ask a sensible
+ * question before it uploads. Both are the host's own settings (`COLLIE_MAX_UPLOAD_MB`,
+ * `COLLIE_UPLOAD_EXTRA_TYPES` + the shipped list in bridge/uploads.ts).
+ */
+export interface UploadCapability {
+  /** Largest attachment accepted, decoded, in bytes. */
+  maxBytes: number;
+  /** Image extensions accepted, bare and lowercase — sniffed from the bytes, never from the name. */
+  imageTypes: string[];
+  /** Text extensions accepted, bare and lowercase — taken from the name, with a binary veto. */
+  textTypes: string[];
 }
 
 /**
