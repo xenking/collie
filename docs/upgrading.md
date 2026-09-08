@@ -40,7 +40,7 @@ root. Any one of the last three is enough. It then refuses to update in place an
 where it can tell which manager owns the folder:
 
 ```
-error: /usr/lib/collie is a packaged install — updates come from your package manager.
+error: /opt/collie is a packaged install — updates come from your package manager.
        `collie update` will not replace its files.
        Take the new version with: sudo pacman -Syu collie-bin
 ```
@@ -58,10 +58,16 @@ newer release exists — with the package command in place of the update button.
 To take a new version, run your package manager and then restart the service:
 
 ```bash
-paru -Syu collie-bin          # Arch, or your AUR helper of choice
-nix profile upgrade collie    # Nix
+paru -Syu collie-bin                              # Arch, or your AUR helper of choice
+nix profile upgrade collie                        # Nix
+mise upgrade --bump github:AltanS/collie          # mise
 collie restart
 ```
+
+A mise install is the odd one out: Collie does not read it as packaged, because the tree sits in
+your home directory with no `.git` and no `versions/` layout, so `collie update` declines with
+`cannot tell how this Collie was installed` and names no manager. mise still owns it. See
+[Install](install.md#mise).
 
 The restart is the part Collie cannot do for you, and it is not optional. Your package manager swaps
 the files under the running bridge, so that process keeps executing the old code while it already
@@ -72,6 +78,11 @@ on disk. Restart it." Both clear the moment `collie restart` has run.
 In a [pack](pack.md#members-that-were-not-installed-by-installsh), a packaged member never takes an
 update from the phone. The pack lists it as "waits for the package manager" and counts the run as
 complete without it, so the two commands above are what levels it.
+
+A packaged **lead** declines only its own move. The phone still levels every member to the version
+the lead is running, and one confirm covers them. After the two commands above have moved the lead,
+nothing levels by itself: tap the Updates page once more and the members follow to the lead's new
+version.
 
 ## Update, from the phone or the terminal
 

@@ -27,6 +27,7 @@ interface DisplayPrefsContentProps {
   stepFontSize: (delta: number) => void;
   setRawTerminal: (raw: boolean) => void;
   setTapToFocus: (tapToFocus: boolean) => void;
+  setExpandClippedReply: (expandClippedReply: boolean) => void;
 }
 
 // One settings row: name (+ optional explanation) on the left, control on the right. Module-level so
@@ -61,6 +62,7 @@ export function DisplayPrefsContent({
   stepFontSize,
   setRawTerminal,
   setTapToFocus,
+  setExpandClippedReply,
 }: DisplayPrefsContentProps) {
   useLocale();
   const voiceEnabled = useVoiceCapability();
@@ -90,6 +92,19 @@ export function DisplayPrefsContent({
             checked={prefs.tapToFocus}
             onCheckedChange={setTapToFocus}
             aria-label={t("settings.display.tapToType.label")}
+          />
+        }
+      />
+      <Row
+        label={t("settings.display.fullReply.label")}
+        hint={t("settings.display.fullReply.hint")}
+        htmlFor="pref-expand-clipped-reply"
+        control={
+          <Switch
+            id="pref-expand-clipped-reply"
+            checked={prefs.expandClippedReply}
+            onCheckedChange={setExpandClippedReply}
+            aria-label={t("settings.display.fullReply.label")}
           />
         }
       />

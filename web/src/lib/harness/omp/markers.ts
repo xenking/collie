@@ -117,9 +117,9 @@ export function isOpenComposerBottom(text: string): boolean {
 // does on an IDLE pane — but on a working pane omp 18 writes the same text in an explicit theme
 // foreground, that anchor vanished, and the stall came back verbatim. So a ghost is now "the trailing
 // run of segments sharing ONE foreground that DIFFERS from the text before it", which reads both
-// shapes: the draft's colour is whatever precedes the run, present or absent. It is claimed only on
-// the bottom border, which is the row the caret is on — omp windows a long draft, so the tail is
-// always the caret's row.
+// shapes: the draft's colour is whatever precedes the run, present or absent. The caller supplies the
+// exact draft span from an already-located composer row: the boxed scanner uses its bottom border;
+// the rule scanner uses its final prompt row. This helper is deliberately not a border predicate.
 //
 // Three refusals, all the fail-closed direction, because a wrongly-claimed ghost SHORTENS the draft
 // the reply guard verifies: a row painted in ONE foreground end to end claims nothing (that is the
@@ -128,14 +128,25 @@ export function isOpenComposerBottom(text: string): boolean {
 // more likely to be the operator's own text), and a run with nothing but blanks before it claims
 // nothing.
 //
-export function composerGhost(line: StyledLine, continuation = false): string {
-  const full = lineText(line);
-  const inner = continuation ? rstrip(full.slice(2)) : composerPromptText(full);
-  if (inner === null || inner.length === 0) return "";
-  const prefix = continuation ? "  " : isBorderlessPrompt(full) ? "› " : BOTTOM_OPEN;
-  const start = prefix.length;
-  const end = start + inner.length;
+// What the rule still gets WRONG, bounded and deliberately left: omp decorates some text the operator
+// really typed — the magic keywords (`ultrathink`, `workflowz`) come back as a per-character colour
+// GRADIENT, and `[Image #1]` / `[Paste #1]` placeholders come back in the accent colour. A draft
+// ENDING in one of those has its last colour run claimed, which for a gradient is a single character.
+// Two things bound the damage. It cannot change a send verdict: `draftCarriesSend` accepts any
+// contiguous run of the draft's visible characters inside what was typed (MIN_MATCH_CHARS floor
+// aside), so a draft that was already contained stays contained after a character comes off the end,
+// and a draft that was NOT contained is the ghost case this exists for. What it does cost is the
+// stranded-draft preview: "Take over" can hand back a draft one character short. Tightening the other
+// way — refusing a tail that changes colour more than once — was measured against this and rejected:
+// it puts every `@mention`- or placeholder-ending draft back into the permanent stall, which is the
+// failure the operator actually feels. The previous rule was WORSE here, not better: with an unstyled
+// draft it claimed the whole gradient (`ultrathink`), where this one claims `k`.
+/** The trailing inline-suggestion run inside an already-located draft span. */
+export function draftGhost(line: StyledLine, start: number, end: number): string {
+  if (end <= start) return "";
 
+  // The row's segments clipped to the draft span, so surrounding chrome cannot be mistaken for a
+  // suggestion.
   const parts: { text: string; fg: string | undefined }[] = [];
   let at = 0;
   for (const seg of line.segments) {
@@ -145,6 +156,9 @@ export function composerGhost(line: StyledLine, continuation = false): string {
     at += seg.text.length;
     if (at >= end) break;
   }
+
+  // OMP pads the row out to the terminal's width in the default style, so that padding is neither
+  // draft nor suggestion — drop it before looking for the trailing run.
   while (parts.length > 0 && parts[parts.length - 1]!.text.trim() === "") parts.pop();
   if (parts.length === 0) return "";
 
@@ -152,10 +166,24 @@ export function composerGhost(line: StyledLine, continuation = false): string {
   if (ghostFg === undefined) return "";
   let cut = parts.length;
   while (cut > 0 && parts[cut - 1]!.fg === ghostFg) cut--;
-  if (cut === 0 || !parts.slice(0, cut).some((p) => p.text.trim() !== "")) return "";
-  return rstrip(parts.slice(cut).map((p) => p.text).join(""));
+  if (cut === 0) return "";
+  if (!parts.slice(0, cut).some((part) => part.text.trim() !== "")) return "";
+  return rstrip(
+    parts
+      .slice(cut)
+      .map((part) => part.text)
+      .join(""),
+  );
 }
 
+/** The boxed composer's specialization: locate its draft span, then apply the shared ghost rule. */
+export function composerGhost(line: StyledLine, continuation = false): string {
+  const full = lineText(line);
+  const inner = continuation ? rstrip(full.slice(2)) : composerPromptText(full);
+  if (inner === null || inner.length === 0) return "";
+  const start = continuation ? 2 : isBorderlessPrompt(full) ? 2 : BOTTOM_OPEN.length;
+  return draftGhost(line, start, start + inner.length);
+}
 
 // A wrapped draft's CONTINUATION row: the box's vertical sides with a two-space gutter inside each.
 // The gutter is what separates it from every other `│ … │` row omp draws (the welcome panel's columns,
