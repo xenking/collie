@@ -177,7 +177,7 @@ describe("Soniox proxy contracts", () => {
       controller.end();
       expect(stt?.sent).toContain(JSON.stringify({ type: "finalize" }));
       stt?.message({ tokens: [{ text: "Привет", is_final: true }, { text: "<fin>", is_final: true }] });
-      expect(browser.messages).toContain(JSON.stringify({ kind: "final", generation: 1, text: "Привет" }));
+      await waitUntil(() => browser.messages.includes(JSON.stringify({ kind: "final", generation: 1, text: "Привет" })));
 
       controller.handoff(1);
       expect(controller.speak("Ответ")).toBe(true);
@@ -335,11 +335,10 @@ describe("VoiceBroker remote lease", () => {
       const stt = FakeSonioxSocket.connections[0];
       await broker.message(firstBrowser as never, JSON.stringify({ kind: "end" }));
       stt?.message({ tokens: [{ text: "Привет", is_final: true }, { text: "<fin>", is_final: true }] });
+      await waitUntil(() => firstBrowser.messages.includes(JSON.stringify({ kind: "final", generation: 1, text: "Привет" })));
       await broker.message(firstBrowser as never, JSON.stringify({ kind: "handoff", generation: 1 }));
       broker.close(firstBrowser as never);
-      await waitUntil(() => remoteEvents.length === 1);
-
-      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start"]);
+      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start", "transcript"]);
       expect(broker.speak("/session", "Ответ")).toBe(true);
 
       const reconnectedBrowser = relay();
@@ -353,12 +352,12 @@ describe("VoiceBroker remote lease", () => {
 
       expect(reconnectedBrowser.messages).toContain(JSON.stringify({ kind: "resumed", accepted: true }));
       expect(reconnectedBrowser.binary).toHaveLength(1);
-      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start"]);
+      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start", "transcript"]);
 
       broker.release("/session");
       broker.close(reconnectedBrowser as never);
-      await waitUntil(() => remoteEvents.length === 2);
-      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start", "remote-release"]);
+      await waitUntil(() => remoteEvents.length === 3);
+      expect(remoteEvents.map(event => event.kind)).toEqual(["remote-start", "transcript", "remote-release"]);
     } finally {
       Reflect.set(globalThis, "fetch", nativeFetch);
       Reflect.set(globalThis, "WebSocket", nativeWebSocket);

@@ -35,7 +35,7 @@ import { ctrlPresetsFor } from "@/lib/operator-keys";
 import { isDestructiveInput } from "@/lib/destructive";
 import { HostChip } from "@/components/host-chip";
 import { StatusDot } from "@/components/status-badge";
-import { useAmbientHost, useHostLabel } from "@/components/pack-provider";
+import { useAmbientHost, useHostLabel } from "@/components/crew-provider";
 import { clearDraft, fitsDraftStore, loadDraft, saveDraft } from "@/lib/drafts";
 import { useHoldReload } from "@/lib/reload-guard";
 import { isSelfEcho, normalizeDraft } from "@/hooks/use-terminal-draft";
@@ -85,7 +85,7 @@ interface ComposerProps {
   readOnly: boolean;
   /**
    * The pane's MACHINE is not reachable from the lead, so a write would be refused before it left
-   * the lead (PACK_PROTOCOL.md §10.3) — the refusal text, naming the host, or undefined when writes
+   * the lead (CREW_PROTOCOL.md §10.3) — the refusal text, naming the host, or undefined when writes
    * may proceed. Always undefined on a solo install, so nothing here changes for one machine.
    *
    * Locks the composer exactly as `readOnly` does. It is NOT folded into `readOnly` by the caller
@@ -249,8 +249,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Two capabilities, one lock: a reply is `typeText` then `sendKeys` (bridge/mux/capabilities.ts),
   // and half a reply is not a feature. `typeText`'s reason is preferred when both are missing —
   // it is the half that fails first.
-  const canType = useMuxCapability("typeText");
-  const canSendKeys = useMuxCapability("sendKeys");
+  // Asked of the machine this row is on (M22/03) — the ambient scope IS the target here, exactly as
+  // `writeHost` below says of the write itself.
+  const canType = useMuxCapability("typeText", scope);
+  const canSendKeys = useMuxCapability("sendKeys", scope);
   const missingSend = !canType.capable ? canType : !canSendKeys.capable ? canSendKeys : null;
   const locked = gone || readOnly || hostBlock !== undefined || missingSend !== null;
   // The machine every write on this row lands on. The pane view addresses one host (the pane's own,
@@ -1014,7 +1016,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     const reason = isDestructiveInput(input);
     if (reason && !sendConfirm.confirm("send")) {
-      // On a pack the confirm names the machine as well as the pattern: "rm -r" is a different
+      // On a crew the confirm names the machine as well as the pattern: "rm -r" is a different
       // sentence depending on whose disk it runs on, and this line is the last thing read before the
       // second tap. Solo copy is unchanged, byte for byte.
       setStatus(
@@ -1622,7 +1624,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               long line can never run underneath the icon.
 
               The machine this write lands on is NOT in here. It was, for one round, docked at the
-              field's right edge — and it cost 60px of typing width on a pack, out of the widest part
+              field's right edge — and it cost 60px of typing width on a crew, out of the widest part
               of the composer. It answers the same question from the controls row above (the status
               strip there), which is equally at the write surface and costs the draft nothing. */}
           <div className="relative min-w-0 flex-1">
@@ -1649,7 +1651,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 ? translate("composer.placeholder.gone")
                 : readOnly
                   ? translate("composer.placeholder.readOnly")
-                  : // Names the machine, because on a pack "why can't I type?" has two possible
+                  : // Names the machine, because on a crew "why can't I type?" has two possible
                     // answers and only one of them is about this device.
                     hostBlock
                     ? hostBlock
@@ -1673,8 +1675,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               //
               // ONE `pr-*` here, unconditionally, and it is the attach button's alone. MEASURED in
               // the playground at a true 390px content width: the field is 310px, so the typing area
-              // is 254px — on a pack and on a solo install alike. At 320px it is 184px, again both.
-              // For one round a pack paid 60px of that to a chip docked at the field's right edge
+              // is 254px — on a crew and on a solo install alike. At 320px it is 184px, again both.
+              // For one round a crew paid 60px of that to a chip docked at the field's right edge
               // (194px and 124px); the host answers the same question from the status strip above
               // now, and the width came back. A second, conditional `pr-*` in this same cn() would
               // not stack — tailwind-merge keeps only the last padding-right (DESIGN.md §7) — which
