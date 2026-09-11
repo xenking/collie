@@ -24,9 +24,15 @@ export type VoiceSocketData = {
 };
 
 type VoiceSocket = ServerWebSocket<VoiceSocketData>;
-type TurnConfig = Pick<Config, "sonioxApiKey" | "sonioxTtsVoice">;
+type TurnConfig = Pick<Config, "sonioxApiKey" | "sonioxTtsVoice" | "voiceControlUrl" | "voiceControlTokenFile">;
 type TurnAudit = Pick<AuditLog, "record">;
 type TurnSocket = Pick<VoiceSocket, "data" | "send">;
+type SonioxContext = {
+  general?: Array<{ key: string; value: string }>;
+  text?: string;
+  terms?: string[];
+  translation_terms?: Array<{ source: string; target: string }>;
+};
 
 type SttUpdate = {
   final: string;
@@ -36,7 +42,7 @@ type SttUpdate = {
 };
 
 /** The only STT configuration the proxy accepts: mono Russian PCM from the Collie browser. */
-export function sttConfig(apiKey: string): Record<string, unknown> {
+export function sttConfig(apiKey: string, context: SonioxContext): Record<string, unknown> {
   return {
     api_key: apiKey,
     model: "stt-rt-v5",
@@ -44,7 +50,31 @@ export function sttConfig(apiKey: string): Record<string, unknown> {
     sample_rate: STT_SAMPLE_RATE,
     num_channels: 1,
     language_hints: ["ru"],
+    context,
   };
+}
+
+
+async function fetchVocabulary(config: TurnConfig): Promise<SonioxContext> {
+  const token = (await readFile(config.voiceControlTokenFile, "utf8")).trim();
+  if (!token) throw new Error("voice control token is empty");
+  const url = new URL("/vocabulary", config.voiceControlUrl);
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { "x-omp-voice-token": token },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`voice vocabulary returned ${response.status}`);
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error("voice vocabulary returned invalid JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("voice vocabulary returned an invalid context");
+  }
+  return value as SonioxContext;
 }
 
 /** TTS runs server-side too; speed is deliberately fixed to the requested +1.5%. */
@@ -393,22 +423,27 @@ export class TurnController {
   async #ensureStt(): Promise<WebSocket> {
     if (this.#stt) return this.#stt;
     if (this.#openingStt) return this.#openingStt;
-    const opening = connect(STT_URL);
+    const opening = this.#openStt();
     this.#openingStt = opening;
     try {
-      const stt = await opening;
-      if (this.#closed) {
-        stt.close();
-        throw new Error("voice relay is closed");
-      }
-      this.#stt = stt;
-      stt.addEventListener("message", (event) => this.#onSttMessage(stt, event));
-      stt.addEventListener("close", () => this.#onSttClose(stt));
-      stt.send(JSON.stringify(sttConfig(this.cfg.sonioxApiKey)));
-      return stt;
+      return await opening;
     } finally {
       if (this.#openingStt === opening) this.#openingStt = null;
     }
+  }
+
+  async #openStt(): Promise<WebSocket> {
+    const context = await fetchVocabulary(this.cfg);
+    const stt = await connect(STT_URL);
+    if (this.#closed) {
+      stt.close();
+      throw new Error("voice relay is closed");
+    }
+    this.#stt = stt;
+    stt.addEventListener("message", (event) => this.#onSttMessage(stt, event));
+    stt.addEventListener("close", () => this.#onSttClose(stt));
+    stt.send(JSON.stringify(sttConfig(this.cfg.sonioxApiKey, context)));
+    return stt;
   }
 
   #finalizeStt(turn: SttTurn): void {

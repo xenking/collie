@@ -1,7 +1,7 @@
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, jest, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, jest, test } from "bun:test";
 
 import type { Config } from "./config.ts";
 import {
@@ -79,8 +79,21 @@ async function waitUntil(condition: () => boolean): Promise<void> {
   }
 }
 
+const vocabulary = { terms: ["Herdr"] };
+const turnConfig = {
+  sonioxApiKey: "key",
+  sonioxTtsVoice: "voice",
+  voiceControlUrl: "http://voice.test/speech",
+  voiceControlTokenFile: join(tmpdir(), `collie-voice-${crypto.randomUUID()}.token`),
+};
 
 describe("Soniox proxy contracts", () => {
+  const nativeFetch = globalThis.fetch;
+  beforeAll(() => writeFile(turnConfig.voiceControlTokenFile, "token", { mode: 0o600 }));
+  beforeEach(() => Reflect.set(globalThis, "fetch", async () => Response.json(vocabulary)));
+  afterEach(() => Reflect.set(globalThis, "fetch", nativeFetch));
+  afterAll(() => rm(turnConfig.voiceControlTokenFile, { force: true }));
+
   test("preserves final words but treats Soniox's <fin> marker as turn completion", () => {
     expect(sttUpdate({
       tokens: [
@@ -92,7 +105,7 @@ describe("Soniox proxy contracts", () => {
   });
 
   test("pins Russian mono STT and 1.5% faster Russian PCM TTS", () => {
-    expect(sttConfig("key")).toMatchObject({
+    expect(sttConfig("key", vocabulary)).toMatchObject({
       api_key: "key",
       model: "stt-rt-v5",
       audio_format: "pcm_s16le",
@@ -125,7 +138,7 @@ describe("Soniox proxy contracts", () => {
     Reflect.set(globalThis, "WebSocket", FakeSonioxSocket);
     try {
       controller = new TurnController(
-        { sonioxApiKey: "key", sonioxTtsVoice: "voice" },
+        turnConfig,
         { record() {} },
         relay(),
       );
@@ -153,7 +166,7 @@ describe("Soniox proxy contracts", () => {
     try {
       const browser = relay();
       controller = new TurnController(
-        { sonioxApiKey: "key", sonioxTtsVoice: "voice" },
+        turnConfig,
         { record() {} },
         browser,
       );
@@ -202,7 +215,7 @@ describe("Soniox proxy contracts", () => {
     try {
       const browser = relay();
       controller = new TurnController(
-        { sonioxApiKey: "key", sonioxTtsVoice: "voice" },
+        turnConfig,
         { record() {} },
         browser,
       );
@@ -231,7 +244,7 @@ describe("Soniox proxy contracts", () => {
     try {
       const browser = relay();
       controller = new TurnController(
-        { sonioxApiKey: "key", sonioxTtsVoice: "voice" },
+        turnConfig,
         { record() {} },
         browser,
       );
@@ -266,7 +279,7 @@ describe("Soniox proxy contracts", () => {
     try {
       const browser = relay();
       controller = new TurnController(
-        { sonioxApiKey: "key", sonioxTtsVoice: "voice" },
+        turnConfig,
         { record() {} },
         browser,
       );
@@ -304,6 +317,7 @@ describe("VoiceBroker remote lease", () => {
     await writeFile(tokenFile, "token", { mode: 0o600 });
     Reflect.set(globalThis, "WebSocket", FakeSonioxSocket);
     Reflect.set(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+      if (init?.method === "GET") return Response.json(vocabulary);
       remoteEvents.push(JSON.parse(String(init?.body)));
       return new Response(null, { status: 204 });
     });
@@ -361,6 +375,7 @@ describe("VoiceBroker remote lease", () => {
     await writeFile(tokenFile, "token", { mode: 0o600 });
     Reflect.set(globalThis, "WebSocket", FakeSonioxSocket);
     Reflect.set(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+      if (init?.method === "GET") return Response.json(vocabulary);
       remoteEvents.push(JSON.parse(String(init?.body)));
       return new Response(null, { status: 204 });
     });
@@ -401,6 +416,7 @@ describe("VoiceBroker remote lease", () => {
     const remoteEvents: Array<{ kind: string }> = [];
     await writeFile(tokenFile, "token", { mode: 0o600 });
     Reflect.set(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+      if (init?.method === "GET") return Response.json(vocabulary);
       remoteEvents.push(JSON.parse(String(init?.body)));
       return new Response(null, { status: 204 });
     });

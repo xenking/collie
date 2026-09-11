@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import type { MutableRefObject } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import type { KeyboardEvent, MutableRefObject, PointerEvent } from "react";
 import { Loader2, Mic, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import type { VoiceRecordingMode } from "@/lib/api";
 
 export type VoicePhase = "idle" | "listening" | "finalizing" | "working" | "speaking";
 
@@ -11,17 +12,22 @@ export type VoiceState = {
   phase: VoicePhase;
   caption?: { role: "user" | "assistant"; text: string; provisional: boolean };
 };
-
 type VoiceInputProps = {
   paneId: string;
   session?: string;
   showControl: boolean;
   disabled: boolean;
   replySpeechSupported: boolean;
+  recordingMode?: VoiceRecordingMode | null;
   onTranscript: (text: string) => Promise<boolean>;
   onVoiceStateChange: (state: VoiceState | null) => void;
   onError: (message: string) => void;
 };
+export interface VoiceInputHandle {
+  start: () => void;
+  stop: () => void;
+  cancel: () => void;
+}
 
 type Capture = {
   stream: MediaStream;
@@ -206,16 +212,17 @@ function websocketUrl(paneId: string, session?: string): string {
  * Russian voice input over the bridge proxy. The browser has microphone access; only the server has
  * SONIOX_API_KEY, and final text follows Collie's existing composer delivery preference.
  */
-export function VoiceInput({
+export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function VoiceInput({
   paneId,
   session,
   showControl,
   disabled,
   replySpeechSupported,
+  recordingMode,
   onTranscript,
   onVoiceStateChange,
   onError,
-}: VoiceInputProps) {
+}: VoiceInputProps, ref) {
   const socketRef = useRef<WebSocket | null>(null);
   const connectingRef = useRef<Promise<WebSocket> | null>(null);
   const captureRef = useRef<Capture | null>(null);
@@ -231,11 +238,19 @@ export function VoiceInput({
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const voiceRef = useRef<VoiceState | null>(null);
+  const cancelledGenerationsRef = useRef<Set<number>>(new Set());
+  const cancelPendingRef = useRef(false);
   const showOverlayRef = useRef(true);
   const nextAudioRef = useRef<{ generation: number; streamId: string; sampleRate: number } | null>(null);
   const callbacksRef = useRef({ onTranscript, onVoiceStateChange, onError });
   callbacksRef.current = { onTranscript, onVoiceStateChange, onError };
   const [state, setState] = useState<State>("idle");
+  const holdTimerRef = useRef<number | null>(null);
+  const gestureSourceRef = useRef<"pointer" | "keyboard" | null>(null);
+  const gesturePointerRef = useRef<number | null>(null);
+  const gestureModeRef = useRef<VoiceRecordingMode | null>(null);
+  const gestureHeldRef = useRef(false);
+  const suppressClickRef = useRef(false);
   const [recovery, setRecovery] = useState<Recovery>(null);
 
   useEffect(
@@ -246,7 +261,10 @@ export function VoiceInput({
         disposedRef.current = true;
         wantsRecordingRef.current = false;
         sttReadyRef.current = false;
+        if (holdTimerRef.current !== null) window.clearTimeout(holdTimerRef.current);
         bufferedAudioRef.current = [];
+        cancelledGenerationsRef.current.clear();
+        cancelPendingRef.current = false;
         settleHandoff(false);
         releaseRemote();
         if (heartbeatRef.current) clearInterval(heartbeatRef.current);
@@ -404,6 +422,16 @@ export function VoiceInput({
           resume(socket);
           return;
         case "recording": {
+          if (cancelPendingRef.current) {
+            cancelledGenerationsRef.current.add(message.generation);
+            cancelPendingRef.current = false;
+          }
+          if (cancelledGenerationsRef.current.has(message.generation)) {
+            sttReadyRef.current = false;
+            bufferedAudioRef.current = [];
+            if (!wantsRecordingRef.current) socket.send(JSON.stringify({ kind: "end" }));
+            return;
+          }
           if (message.generation !== voiceRef.current?.generation) return;
           sttReadyRef.current = true;
           const buffered = bufferedAudioRef.current;
@@ -413,6 +441,15 @@ export function VoiceInput({
           return;
         }
         case "voice-state": {
+          if (cancelPendingRef.current) {
+            cancelledGenerationsRef.current.add(message.generation);
+            cancelPendingRef.current = false;
+          }
+          if (cancelledGenerationsRef.current.has(message.generation)) {
+            nextAudioRef.current = null;
+            if (message.phase === "idle") cancelledGenerationsRef.current.delete(message.generation);
+            return;
+          }
           if (message.generation < (voiceRef.current?.generation ?? 0)) return;
           nextAudioRef.current = null;
           if (message.phase === "idle") {
@@ -429,12 +466,26 @@ export function VoiceInput({
           return;
         }
         case "clear":
+          if (cancelPendingRef.current) {
+            cancelledGenerationsRef.current.add(message.generation);
+            cancelPendingRef.current = false;
+          }
+          if (cancelledGenerationsRef.current.has(message.generation)) return;
           if (message.generation < (voiceRef.current?.generation ?? 0)) return;
           nextAudioRef.current = null;
           playerRef.current.stop();
           publishVoice(null);
           return;
         case "final":
+          if (cancelPendingRef.current) {
+            cancelledGenerationsRef.current.add(message.generation);
+            cancelPendingRef.current = false;
+          }
+          if (cancelledGenerationsRef.current.delete(message.generation)) {
+            releaseRemote();
+            if (!disposedRef.current) setState("idle");
+            return;
+          }
           if (message.generation === voiceRef.current?.generation) {
             void submitFinal(socket, message.text, message.generation);
           }
@@ -592,8 +643,9 @@ export function VoiceInput({
     try {
       await playerRef.current.prepare(); // must happen in this gesture for mobile audio playback.
       const socket = await connect();
-      if (disposedRef.current || captureFailedRef.current) {
+      if (disposedRef.current || captureFailedRef.current || !wantsRecordingRef.current) {
         releaseRemote();
+        if (!disposedRef.current) setState("idle");
         return;
       }
       socket.send(JSON.stringify({ kind: "start" }));
@@ -610,6 +662,105 @@ export function VoiceInput({
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ kind: "end" }));
     setState(socket ? "stopping" : "idle");
   }
+  function cancel(): void {
+    if (!wantsRecordingRef.current && state === "idle") return;
+    const generation = voiceRef.current?.generation;
+    if (generation === undefined) cancelPendingRef.current = true;
+    else cancelledGenerationsRef.current.add(generation);
+    wantsRecordingRef.current = false;
+    sttReadyRef.current = false;
+    bufferedAudioRef.current = [];
+    settleHandoff(false);
+    stopCapture(captureRef);
+    playerRef.current.stop();
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ kind: "end" }));
+    publishVoice(null);
+    if (!disposedRef.current) setState(socket ? "stopping" : "idle");
+  }
+
+  function clearGesture(): void {
+    if (holdTimerRef.current !== null) window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = null;
+    gestureSourceRef.current = null;
+    gesturePointerRef.current = null;
+    gestureModeRef.current = null;
+    gestureHeldRef.current = false;
+  }
+
+  function beginGesture(source: "pointer" | "keyboard", pointerId?: number): void {
+    if (disabled || recovery !== null || gestureSourceRef.current !== null) return;
+    gestureSourceRef.current = source;
+    gesturePointerRef.current = pointerId ?? null;
+    gestureModeRef.current = recordingMode ?? null;
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = null;
+      if (gestureSourceRef.current !== source) return;
+      gestureHeldRef.current = true;
+      if (gestureModeRef.current === "hold") void start();
+      else if (gestureModeRef.current === null) callbacksRef.current.onError("Voice recording mode unavailable");
+    }, 350);
+  }
+
+  function finishGesture(commit: boolean): boolean {
+    const held = gestureHeldRef.current;
+    const mode = gestureModeRef.current;
+    clearGesture();
+    if (!held) {
+      if (mode === "hold") suppressClickRef.current = true;
+      return false;
+    }
+    suppressClickRef.current = true;
+    if (mode === "hold") {
+      if (commit) stop();
+      else cancel();
+    }
+    return true;
+  }
+
+  function handlePointerDown(event: PointerEvent<HTMLButtonElement>): void {
+    if (event.button !== 0) return;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is unavailable in a few embedded webviews; the timer still guards the click.
+    }
+    beginGesture("pointer", event.pointerId);
+  }
+
+  function handlePointerUp(event: PointerEvent<HTMLButtonElement>): void {
+    if (gestureSourceRef.current !== "pointer" || gesturePointerRef.current !== event.pointerId) return;
+    finishGesture(true);
+  }
+
+  function handlePointerCancel(event: PointerEvent<HTMLButtonElement>): void {
+    if (gestureSourceRef.current !== "pointer" || gesturePointerRef.current !== event.pointerId) return;
+    finishGesture(false);
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
+    if (recovery !== null || event.repeat || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    beginGesture("keyboard");
+  }
+
+  function handleKeyUp(event: KeyboardEvent<HTMLButtonElement>): void {
+    if (gestureSourceRef.current !== "keyboard" || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    if (!finishGesture(true) && recordingMode !== "hold") handleClick();
+  }
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      start: () => {
+        void start();
+      },
+      stop,
+      cancel,
+    }),
+    [disabled, recovery, state],
+  );
 
   function toggle(): void {
     if (recovery === "failed") {
@@ -621,6 +772,19 @@ export function VoiceInput({
       return;
     }
     stop();
+  }
+  function handleClick(): void {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    if (recordingMode !== "toggle") {
+      callbacksRef.current.onError(
+        recordingMode === "hold" ? "Hold to record; release to append" : "Voice recording mode unavailable",
+      );
+      return;
+    }
+    toggle();
   }
 
   if (!showControl && recovery !== "failed") return null;
@@ -638,12 +802,34 @@ export function VoiceInput({
           ? "Reconnect voice"
           : recovering
             ? "Reconnecting voice"
-            : state === "idle"
-              ? "Start voice input"
-              : "Stop voice input"
+            : recordingMode === null || recordingMode === undefined
+              ? "Voice recording mode unavailable"
+              : state === "idle"
+                ? "Start voice input"
+                : "Stop voice input"
+      }
+      aria-description={
+        recordingMode === "hold"
+          ? "Hold to record; release to append"
+          : recordingMode === "toggle"
+            ? "Tap to start or stop voice input"
+            : "Voice recording mode unavailable"
+      }
+      title={
+        recordingMode === "hold"
+          ? "Hold to record; release to append"
+          : recordingMode === "toggle"
+            ? "Tap to start or stop voice input"
+            : "Voice recording mode unavailable"
       }
       aria-pressed={state !== "idle"}
-      onClick={toggle}
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onLostPointerCapture={handlePointerCancel}
+      onKeyDown={handleKeyDown}
+      onKeyUp={handleKeyUp}
+      onClick={retrying ? retry : handleClick}
     >
       {retrying ? (
         <RotateCcw className="size-4" />
@@ -656,7 +842,7 @@ export function VoiceInput({
       )}
     </Button>
   );
-}
+});
 
 function stopCapture(ref: MutableRefObject<Capture | null>): void {
   const capture = ref.current;

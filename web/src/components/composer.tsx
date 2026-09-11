@@ -1,11 +1,11 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import type { ChangeEvent, ClipboardEvent, CSSProperties, ReactNode } from "react";
+import type { ChangeEvent, ClipboardEvent, CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { useRevalidator } from "react-router";
 import { Check, FileText, Image, Keyboard, Loader2, Mic, Paperclip, Send, Settings2, Slash, Square, Terminal, X, Zap } from "lucide-react";
 
 import { applyDraftFontSize, fontStack, inputFocusZoomsPage } from "@/hooks/use-display-prefs";
 import type { DisplayPrefs } from "@/hooks/use-display-prefs";
-import type { AgentStatus } from "@/lib/types";
+import { statusLabel, type AgentStatus } from "@/lib/types";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
 import { useDirectTyping } from "@/hooks/use-direct-typing";
 import { useLocale } from "@/hooks/use-locale";
@@ -34,7 +34,7 @@ import { acceptAttribute, limitMb, offersFiles, PHOTO_ACCEPT, rejectAttachment, 
 import { ctrlPresetsFor } from "@/lib/operator-keys";
 import { isDestructiveInput } from "@/lib/destructive";
 import { HostChip } from "@/components/host-chip";
-import { StatusWordSlot } from "@/components/status-badge";
+import { StatusDot, StatusWordSlot } from "@/components/status-badge";
 import { useAmbientHost, useHostLabel } from "@/components/crew-provider";
 import { clearDraft, fitsDraftStore, loadDraft, saveDraft } from "@/lib/drafts";
 import { useHoldReload } from "@/lib/reload-guard";
@@ -48,7 +48,7 @@ import { RecordingStrip } from "@/components/recording-strip";
 import { useSttRecorder } from "@/hooks/use-stt-recorder";
 import { useHandsFree, useSttCapability, useVoiceCapability } from "@/lib/stt";
 import { NoEchoNotice } from "@/components/no-echo-notice";
-import { VoiceInput, type VoiceState } from "@/components/voice-input";
+import { VoiceInput, type VoiceInputHandle, type VoiceState } from "@/components/voice-input";
 
 export interface ComposerHandle {
   /** Focus the input and put the caret at the end — used by the mirror-tap-to-focus in AgentChat. */
@@ -150,35 +150,12 @@ type ComposerDrawer = "quick" | "cmd" | "keys" | "display" | null;
 const CONTROL_ON = "bg-control-on text-control-on-foreground hover:bg-control-on";
 const CONTROL_OFF = "text-muted-foreground";
 
-// The box every LABELLED control on that row wears. Authored once because the row's whole defect was
-// per-button drift in a fixed width: four buttons sized by their own text, in a container that is
-// 366px on a 390px phone and cannot grow.
-//
-// `shrink` is the load-bearing word. `ui/button.tsx`'s base string carries `shrink-0`, so `flex-1`
-// (which does set flex-shrink:1, in a shorthand) lost to the longhand and every button sat at its
-// CONTENT width. Measured on the pane screen at 390px: the row's scrollWidth ran 18px past its
-// clientWidth in English and 70px past in Japanese, and the overflow-x-hidden ancestor on the pane
-// column cut the ⚙ in half rather than letting it scroll — the control was not reachable at all.
-// Restoring flex-shrink, plus `min-w-0` to lift the flex item's min-content floor, plus `truncate`
-// on the label span (below) makes the row structurally incapable of exceeding its container: the
-// worst case is now an ellipsis on the longest word, not a missing button.
-//
-// `h-11` is 44px — the tap target the row never actually had (it was `h-8`/32px). It costs the
-// composer 12px of height, and that is the trade: a control you can hit beats a control that only
-// looks tidy.
-//
-// The icon sits ABOVE the word (`flex-col`) rather than beside it, and that is a MEASUREMENT, not a
-// taste. Side by side, a 74.5px button spends 16px on the icon and its gap before the first letter,
-// which leaves ~38px of text — and four of the six shipped locales ellipsised at 390px, CJK worst
-// (`エージェント` is six full-width glyphs). Stacked, the word gets the button's whole width and a
-// 10px size, so all six draw in full at 390px and only ja's longest ellipsises at 320px. A fix that
-// only reads in English is not a fix.
+// Tools stay in one compact, labelled row. Every button keeps the 44px height floor while its
+// horizontal label can truncate instead of widening the composer on a narrow or translated screen.
 const CONTROL_BUTTON =
-  "h-11 min-w-0 flex-1 shrink flex-col gap-0.5 px-1 has-[>svg]:px-1 text-[10px] font-medium leading-none [&>svg]:shrink-0";
-// The label inside that box. `truncate` needs a box of its own to clip against — a bare text node
-// in a flex button has none — and `max-w-full` is what keeps that box from simply being the text's
-// own width.
+  "h-11 min-w-0 flex-1 shrink flex-row gap-1 px-1 has-[>svg]:px-1 text-[10px] font-medium leading-none [&>svg]:shrink-0";
 const CONTROL_LABEL = "max-w-full truncate";
+const VOICE_HOLD_MS = 350;
 
 // Pause after clearing a stranded terminal draft so the TUI settles before pane.send_text. Exported
 // so the test can pin the WAIT ITSELF (the reply never overtakes the sweep) against the constant
@@ -280,12 +257,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // carried in `?h=` since the row was opened), so the ambient scope IS the target here. Undefined on
   // a solo install, which renders no chip and leaves every confirm string unchanged.
   const writeHost = useAmbientHost(scope?.host);
-  // The word for the status strip. A bare shell has no agent and therefore no agent status, but it
-  // still owes the strip a word or a solo install's strip would be empty; a GONE pane has nothing
-  // left to describe, and the strip stands empty rather than reporting a stale state as current.
-  const statusWord: AgentStatus | "shell" | undefined = isShell ? "shell" : status;
-  // Its display name, or undefined when there is no crew — the copy-level half of the hide rule.
+
   const writeHostLabel = useHostLabel(scope?.host);
+  const statusWord: AgentStatus | "shell" | undefined = isShell ? "shell" : status;
+  const statusText =
+    statusWord === "shell"
+      ? translate("status.shellBadge")
+      : statusWord === undefined
+        ? undefined
+        : statusLabel(statusWord);
+  const statusDotStatus: AgentStatus | undefined =
+    statusWord === undefined ? undefined : statusWord === "shell" ? "unknown" : statusWord;
+  const statusTone = status === "blocked" ? "warn" : status === "done" ? "success" : "info";
   // …and a ref alongside it, for the ONE caller that reads it after an await. `send()` checks
   // `locked` once, up front, but its pre-clear sweep goes out on the far side of the pre-flight's
   // pane read; a re-render that locks the composer in that window must be able to stop the most
@@ -299,6 +282,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // message. Lazy initialiser so the restore happens on the mount, before first paint.
   const [input, setInput] = useState(() => loadDraft(scope, paneId) ?? "");
   const [voiceState, setVoiceState] = useState<VoiceState | null>(null);
+  const voiceInputRef = useRef<VoiceInputHandle>(null);
+  const appendVoiceSessionRef = useRef(false);
+  const appendHoldTimerRef = useRef<number | null>(null);
+  const appendHoldSourceRef = useRef<"pointer" | "keyboard" | null>(null);
+  const appendHoldPointerRef = useRef<number | null>(null);
+  const appendHoldModeRef = useRef<api.VoiceRecordingMode | null>(null);
+  const appendHoldSelectedRef = useRef(false);
+  const appendHoldStartedRef = useRef(false);
+  const suppressSendClickRef = useRef(false);
+  const [appendVoiceActive, setAppendVoiceActive] = useState(false);
+  const [appendMicSelected, setAppendMicSelected] = useState(false);
+  const [voiceRecordingMode, setVoiceRecordingMode] = useState<api.VoiceRecordingMode | null>(null);
+  const voiceModeErrorRef = useRef("Voice recording mode unavailable");
   // A final caption remains visible while VoiceInput awaits the transcript callback. Once that
   // callback has inserted it into the real draft, hide only the caption copy so it cannot duplicate.
   const acceptedVoiceCaptionRef = useRef<string | null>(null);
@@ -312,10 +308,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     } else if (next.phase === "listening" && voiceGenerationRef.current !== next.generation) {
       acceptedVoiceCaptionRef.current = null;
       voiceGenerationRef.current = next.generation;
-      const field = inputRef.current;
-      voiceCaretRef.current = field
-        ? { start: field.selectionStart, end: field.selectionEnd }
-        : { start: inputValueRef.current.length, end: inputValueRef.current.length };
+      if (appendVoiceSessionRef.current) {
+        const end = inputValueRef.current.length;
+        voiceCaretRef.current = { start: end, end };
+      } else {
+        const field = inputRef.current;
+        voiceCaretRef.current = field
+          ? { start: field.selectionStart, end: field.selectionEnd }
+          : { start: inputValueRef.current.length, end: inputValueRef.current.length };
+      }
     }
     setVoiceState(next);
   }
@@ -506,6 +507,44 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onTranscript: acceptTranscript,
     onError: (message) => setStatus(message, "error"),
   });
+  useEffect(() => {
+    setVoiceRecordingMode(null);
+    if (!voiceEnabled) return;
+    let disposed = false;
+    let controller: AbortController | null = null;
+    const refresh = () => {
+      if (document.visibilityState === "hidden") return;
+      controller?.abort();
+      const nextController = new AbortController();
+      controller = nextController;
+      void api.fetchVoicePreferences(nextController.signal).then((prefs) => {
+        if (prefs.recordingMode !== "hold" && prefs.recordingMode !== "toggle") {
+          throw new Error("Voice recording mode unavailable");
+        }
+        if (disposed || controller !== nextController) return;
+        voiceModeErrorRef.current = "Voice recording mode unavailable";
+        setVoiceRecordingMode(prefs.recordingMode);
+      }).catch((error: unknown) => {
+        if (disposed || controller !== nextController || (error instanceof DOMException && error.name === "AbortError")) return;
+        voiceModeErrorRef.current = error instanceof Error ? error.message : "Voice recording mode unavailable";
+        setVoiceRecordingMode(null);
+      });
+    };
+    const onFocus = () => refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    window.addEventListener("focus", onFocus);
+    refresh();
+    return () => {
+      disposed = true;
+      controller?.abort();
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      if (appendHoldTimerRef.current !== null) {
+        window.clearTimeout(appendHoldTimerRef.current);
+        appendHoldTimerRef.current = null;
+      }
+    };
+  }, [voiceEnabled]);
   // ── THE ORBIT TURNS WHILE THE OPERATOR'S WORK IS IN FLIGHT (lib/busy.ts) ───────────────────────
   //
   // Three intervals, declared where the state already lives, so the Collie mark in the header spins
@@ -538,7 +577,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // "stop typing into the terminal" control and that must not be displaceable.
   const micIsPrimary = !voiceEnabled && stt !== null && !direct.active && input.trim() === "";
   const customVoiceVisible =
-    voiceEnabled && !direct.active && (input.trim() === "" || voiceState !== null);
+    voiceEnabled && !direct.active && (input.trim() === "" || (voiceState !== null && !appendVoiceActive && !appendMicSelected));
 
   /**
    * What happens to a finished transcript.
@@ -566,6 +605,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (mayHandsFree) return send(transcript, false);
     insertTranscript(transcript);
     return false;
+  }
+  async function handleVoiceTranscript(transcript: string): Promise<boolean> {
+    try {
+      return await acceptTranscript(transcript);
+    } finally {
+      if (appendVoiceSessionRef.current) {
+        appendVoiceSessionRef.current = false;
+        setAppendVoiceActive(false);
+      }
+    }
+  }
+
+  function handleVoiceError(message: string): void {
+    appendVoiceSessionRef.current = false;
+    setAppendVoiceActive(false);
+    setStatus(message, "error");
   }
 
   /** Splice a transcript into the draft AT THE CARET (the field is where the operator left it, and
@@ -637,6 +692,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       if (sentTimer.current) clearTimeout(sentTimer.current);
       if (lastSentTimerRef.current) clearTimeout(lastSentTimerRef.current);
       if (keyRevalidateTimer.current) clearTimeout(keyRevalidateTimer.current);
+      if (appendHoldTimerRef.current !== null) window.clearTimeout(appendHoldTimerRef.current);
     },
     [],
   );
@@ -971,6 +1027,140 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }
   const confirmingSend = sendConfirm.pending === "send";
   const forcingSend = forceConfirm.pending === "force";
+  const appendVoiceEligible =
+    voiceEnabled &&
+    input.trim() !== "" &&
+    !direct.active &&
+    !locked &&
+    !sending &&
+    !dialogPresent &&
+    !confirmingSend &&
+    !forcingSend;
+  const appendVoiceEligibleRef = useRef(false);
+  appendVoiceEligibleRef.current = appendVoiceEligible;
+
+  function clearAppendHoldTimer(): void {
+    if (appendHoldTimerRef.current === null) return;
+    window.clearTimeout(appendHoldTimerRef.current);
+    appendHoldTimerRef.current = null;
+  }
+
+  function startAppendVoice(): void {
+    appendVoiceSessionRef.current = true;
+    setAppendVoiceActive(true);
+    const end = inputValueRef.current.length;
+    voiceCaretRef.current = { start: end, end };
+    voiceInputRef.current?.start();
+  }
+
+  function beginAppendHold(source: "pointer" | "keyboard", pointerId?: number): void {
+    if (!appendVoiceEligible || appendHoldSourceRef.current !== null) return;
+    appendHoldSourceRef.current = source;
+    appendHoldPointerRef.current = pointerId ?? null;
+    appendHoldModeRef.current = voiceRecordingMode;
+    appendHoldSelectedRef.current = appendMicSelected;
+    suppressSendClickRef.current = false;
+    appendHoldTimerRef.current = window.setTimeout(() => {
+      appendHoldTimerRef.current = null;
+      if (appendHoldSourceRef.current !== source || !appendVoiceEligibleRef.current) {
+        appendHoldSourceRef.current = null;
+        appendHoldPointerRef.current = null;
+        appendHoldModeRef.current = null;
+        return;
+      }
+      appendHoldStartedRef.current = true;
+      if (appendHoldModeRef.current === "hold") {
+        startAppendVoice();
+      } else if (appendHoldModeRef.current === "toggle") {
+        setAppendMicSelected(!appendHoldSelectedRef.current);
+        if (appendHoldSelectedRef.current && appendVoiceSessionRef.current) voiceInputRef.current?.stop();
+      } else {
+        setStatus(voiceModeErrorRef.current, "error");
+      }
+    }, VOICE_HOLD_MS);
+  }
+
+  function finishAppendHold(commit: boolean): boolean {
+    const started = appendHoldStartedRef.current;
+    const mode = appendHoldModeRef.current;
+    clearAppendHoldTimer();
+    appendHoldSourceRef.current = null;
+    appendHoldPointerRef.current = null;
+    appendHoldModeRef.current = null;
+    appendHoldStartedRef.current = false;
+    if (!started) {
+      if (!commit) suppressSendClickRef.current = true;
+      return false;
+    }
+    suppressSendClickRef.current = true;
+    if (mode === "hold") {
+      if (commit) voiceInputRef.current?.stop();
+      else {
+        appendVoiceSessionRef.current = false;
+        setAppendVoiceActive(false);
+        voiceInputRef.current?.cancel();
+      }
+    }
+    return true;
+  }
+
+  function handleAppendPointerDown(event: PointerEvent<HTMLButtonElement>): void {
+    if (event.button !== 0 || !appendVoiceEligible) return;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is unavailable in a few embedded webviews; the timer still guards the click.
+    }
+    beginAppendHold("pointer", event.pointerId);
+  }
+
+  function handleAppendPointerUp(event: PointerEvent<HTMLButtonElement>): void {
+    if (appendHoldSourceRef.current !== "pointer" || appendHoldPointerRef.current !== event.pointerId) return;
+    finishAppendHold(true);
+  }
+
+  function handleAppendPointerCancel(event: PointerEvent<HTMLButtonElement>): void {
+    if (appendHoldSourceRef.current !== "pointer" || appendHoldPointerRef.current !== event.pointerId) return;
+    finishAppendHold(false);
+  }
+
+  function handleAppendKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
+    if (!appendVoiceEligible || event.repeat || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    beginAppendHold("keyboard");
+  }
+
+  function handleAppendKeyUp(event: KeyboardEvent<HTMLButtonElement>): void {
+    if (appendHoldSourceRef.current !== "keyboard" || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    if (!finishAppendHold(true)) handlePrimaryClick();
+  }
+
+  function handleAppendBlur(): void {
+    if (appendHoldSourceRef.current === "keyboard") finishAppendHold(false);
+  }
+
+  function handleAppendMicClick(): void {
+    if (voiceRecordingMode !== "toggle") {
+      handleVoiceError(voiceModeErrorRef.current);
+      return;
+    }
+    if (appendVoiceSessionRef.current) voiceInputRef.current?.stop();
+    else startAppendVoice();
+  }
+
+  function handlePrimaryClick(): void {
+    if (suppressSendClickRef.current) {
+      suppressSendClickRef.current = false;
+      return;
+    }
+    if (appendMicSelected) {
+      handleAppendMicClick();
+      return;
+    }
+    if (appendVoiceSessionRef.current) return;
+    onSendClick();
+  }
 
   // Coalesce revalidations from a burst of key presses, LEADING edge first: the first press in a
   // burst refetches immediately, and only presses that arrive inside the window collapse into one
@@ -1313,11 +1503,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           data-slot="composer-controls"
           role="group"
           aria-labelledby="composer-controls-label"
-          className="-mx-0.5 mb-1.5 mt-2 flex items-center gap-1.5"
+          className="-mx-0.5 mb-1.5 mt-1 flex min-w-0 items-center gap-1"
         >
           <SectionLabel id="composer-controls-label" className="sr-only">
             {translate("composer.controls.label")}
           </SectionLabel>
+          <div className="flex min-w-0 flex-1 items-center gap-1">
           {/* Keys and Quick are TOGGLES for the in-flow dock above (not overlays): tap to open, tap
               again to close. aria-expanded ties each to the dock; secondary variant marks it pressed
               while open. Both share the single-valued `drawer`, so opening one closes the other. */}
@@ -1403,6 +1594,28 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           >
             <Settings2 className="size-4" />
           </Button>
+          </div>
+          {(writeHost !== undefined || statusDotStatus !== undefined) && (
+            <div className="flex min-w-0 shrink-0 items-center gap-1">
+              <HostChip host={writeHost} variant="caption" className="max-w-20 min-w-0" />
+              {statusDotStatus !== undefined && statusText !== undefined && (
+                <button
+                  type="button"
+                  className="flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  aria-label={writeHostLabel ? `${writeHostLabel}: ${statusText}` : statusText}
+                  title={statusText}
+                  onClick={() =>
+                    setStatus(
+                      writeHostLabel ? `${writeHostLabel} · ${statusText}` : statusText,
+                      statusTone,
+                    )
+                  }
+                >
+                  <StatusDot status={statusDotStatus} surface="bg-chrome" stale={stale} />
+                </button>
+              )}
+            </div>
+          )}
         </div>
         {/* ── THE FOOTER'S NOTICE STRIPS, SORTED BY KIND (DESIGN.md §1, §2) ─────────────────────
             Every strip below arrives and leaves through `Collapse`, which is the only sanctioned way
@@ -1587,11 +1800,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             disabled={locked}
             rows={1}
           />
-            {/* The picker, anchored to the field so it opens ABOVE the button rather than over it
-                (ui/anchored-menu.tsx carries the measurement). Two rows, no confirm — each one
-                opens a native picker, which is its own decision point. The menu closes BEFORE the
-                click so it is not left standing behind the system UI, and the click still counts as
-                the user gesture the browser requires because both happen in this one handler. */}
             <AnchoredMenu
               open={picking}
               onClose={() => setPicking(false)}
@@ -1659,14 +1867,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </div>
           {voiceEnabled && (
             <VoiceInput
+              ref={voiceInputRef}
               paneId={paneId}
               session={scope?.session}
               showControl={customVoiceVisible}
               disabled={locked || dialogPresent || sending}
+              recordingMode={voiceRecordingMode}
               replySpeechSupported={replySpeechSupported}
-              onTranscript={acceptTranscript}
+              onTranscript={handleVoiceTranscript}
               onVoiceStateChange={handleVoiceStateChange}
-              onError={(message) => setStatus(message, "error")}
+              onError={handleVoiceError}
             />
           )}
           {!customVoiceVisible && (!direct.active && forcingSend ? (
@@ -1739,18 +1949,54 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ) : (
             <Button
               size="icon"
+              variant={appendVoiceActive ? "destructive" : "default"}
               className="size-11 shrink-0 rounded-full"
-              onClick={direct.active ? () => direct.deactivate() : onSendClick}
+              onClick={direct.active ? () => direct.deactivate() : handlePrimaryClick}
+              onPointerDown={handleAppendPointerDown}
+              onPointerUp={handleAppendPointerUp}
+              onPointerCancel={handleAppendPointerCancel}
+              onLostPointerCapture={handleAppendPointerCancel}
+              onKeyDown={handleAppendKeyDown}
+              onKeyUp={handleAppendKeyUp}
+              onBlur={handleAppendBlur}
               disabled={locked || sending}
               aria-label={
                 direct.active
                   ? translate("composer.send.stopTypingAria")
-                  : translate("composer.send.sendAria")
+                  : appendVoiceActive
+                    ? translate("composer.mic.stopAria")
+                    : appendMicSelected
+                      ? translate("composer.mic.recordAria")
+                      : translate("composer.send.sendAria")
               }
-              aria-pressed={direct.active}
+              title={
+                !direct.active && voiceEnabled && input.trim() !== ""
+                  ? voiceRecordingMode === "hold"
+                    ? "Hold to record; release to append"
+                    : voiceRecordingMode === "toggle"
+                      ? appendMicSelected
+                        ? "Tap to start or stop voice input; hold to switch to Send"
+                        : "Tap to send; hold to switch to microphone"
+                      : voiceModeErrorRef.current
+                  : undefined
+              }
+              aria-description={
+                !direct.active && voiceEnabled && input.trim() !== ""
+                  ? voiceRecordingMode === "hold"
+                    ? "Hold to record; release to append"
+                    : voiceRecordingMode === "toggle"
+                      ? appendMicSelected
+                        ? "Tap to start or stop voice input; hold to switch to Send"
+                        : "Tap to send; hold to switch to microphone"
+                      : voiceModeErrorRef.current
+                  : undefined
+              }
+              aria-pressed={direct.active || appendVoiceActive || appendMicSelected}
             >
               {direct.active ? (
                 <Keyboard className="size-4" />
+              ) : appendVoiceActive || appendMicSelected ? (
+                <Mic className="size-4" />
               ) : sending ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : justSent ? (

@@ -608,6 +608,47 @@ export function voiceRelayResponse(
   return secure(new Response(null, { status: 204 }));
 }
 
+async function voicePreferencesResponse(
+  cfg: Pick<Config, "voiceControlUrl" | "voiceControlTokenFile">,
+  acceptEncoding: string | null,
+): Promise<Response> {
+  let token: string;
+  try {
+    token = (await readFile(cfg.voiceControlTokenFile, "utf8")).trim();
+  } catch {
+    return text("voice preferences unavailable", 503);
+  }
+  if (!token) return text("voice preferences unavailable", 503);
+
+  let response: Response;
+  try {
+    response = await fetch(new URL("/preferences", cfg.voiceControlUrl), {
+      method: "GET",
+      headers: { "x-omp-voice-token": token },
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    return text("voice preferences unavailable", 502);
+  }
+  if (!response.ok) return text("voice preferences unavailable", 502);
+
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    return text("voice preferences unavailable", 502);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return text("voice preferences unavailable", 502);
+  }
+  if (!("recordingMode" in value)) return text("voice preferences unavailable", 502);
+  const recordingMode = value.recordingMode;
+  if (recordingMode !== "hold" && recordingMode !== "toggle") {
+    return text("voice preferences unavailable", 502);
+  }
+  return json({ recordingMode }, acceptEncoding);
+}
+
 export function startServer(opts: {
   cfg: Config;
   registry: SessionRegistry;
@@ -1330,6 +1371,12 @@ export function startServer(opts: {
         }
         return localRuntime(sessionName, req.headers.get("accept-encoding"));
       };
+
+      if (pathname === "/api/voice/preferences" && req.method === "GET") {
+        const denied = guard(req, cfg, "read", pairing);
+        if (denied) return denied;
+        return voicePreferencesResponse(cfg, req.headers.get("accept-encoding"));
+      }
 
       if (pathname === "/api/voice/media") {
         const denied = guard(req, cfg, "write", pairing);
