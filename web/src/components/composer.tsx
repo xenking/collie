@@ -1,11 +1,11 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import type { ChangeEvent, ClipboardEvent, CSSProperties, ReactNode } from "react";
+import type { ChangeEvent, ClipboardEvent, CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { useRevalidator } from "react-router";
 import { Check, FileText, Image, Keyboard, Loader2, Mic, Paperclip, Send, Settings2, Slash, Square, Terminal, X, Zap } from "lucide-react";
 
 import { applyDraftFontSize, fontStack, inputFocusZoomsPage } from "@/hooks/use-display-prefs";
 import type { DisplayPrefs } from "@/hooks/use-display-prefs";
-import type { AgentStatus } from "@/lib/types";
+import { statusLabel, type AgentStatus } from "@/lib/types";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
 import { useDirectTyping } from "@/hooks/use-direct-typing";
 import { useLocale } from "@/hooks/use-locale";
@@ -34,7 +34,7 @@ import { acceptAttribute, limitMb, offersFiles, PHOTO_ACCEPT, rejectAttachment, 
 import { ctrlPresetsFor } from "@/lib/operator-keys";
 import { isDestructiveInput } from "@/lib/destructive";
 import { HostChip } from "@/components/host-chip";
-import { StatusWordSlot } from "@/components/status-badge";
+import { StatusDot } from "@/components/status-badge";
 import { useAmbientHost, useHostLabel } from "@/components/pack-provider";
 import { clearDraft, fitsDraftStore, loadDraft, saveDraft } from "@/lib/drafts";
 import { useHoldReload } from "@/lib/reload-guard";
@@ -48,7 +48,7 @@ import { RecordingStrip } from "@/components/recording-strip";
 import { useSttRecorder } from "@/hooks/use-stt-recorder";
 import { useHandsFree, useSttCapability, useVoiceCapability } from "@/lib/stt";
 import { NoEchoNotice } from "@/components/no-echo-notice";
-import { VoiceInput, type VoiceState } from "@/components/voice-input";
+import { VoiceInput, type VoiceInputHandle, type VoiceState } from "@/components/voice-input";
 
 export interface ComposerHandle {
   /** Focus the input and put the caret at the end — used by the mirror-tap-to-focus in AgentChat. */
@@ -150,35 +150,12 @@ type ComposerDrawer = "quick" | "cmd" | "keys" | "display" | null;
 const CONTROL_ON = "bg-control-on text-control-on-foreground hover:bg-control-on";
 const CONTROL_OFF = "text-muted-foreground";
 
-// The box every LABELLED control on that row wears. Authored once because the row's whole defect was
-// per-button drift in a fixed width: four buttons sized by their own text, in a container that is
-// 366px on a 390px phone and cannot grow.
-//
-// `shrink` is the load-bearing word. `ui/button.tsx`'s base string carries `shrink-0`, so `flex-1`
-// (which does set flex-shrink:1, in a shorthand) lost to the longhand and every button sat at its
-// CONTENT width. Measured on the pane screen at 390px: the row's scrollWidth ran 18px past its
-// clientWidth in English and 70px past in Japanese, and the overflow-x-hidden ancestor on the pane
-// column cut the ⚙ in half rather than letting it scroll — the control was not reachable at all.
-// Restoring flex-shrink, plus `min-w-0` to lift the flex item's min-content floor, plus `truncate`
-// on the label span (below) makes the row structurally incapable of exceeding its container: the
-// worst case is now an ellipsis on the longest word, not a missing button.
-//
-// `h-11` is 44px — the tap target the row never actually had (it was `h-8`/32px). It costs the
-// composer 12px of height, and that is the trade: a control you can hit beats a control that only
-// looks tidy.
-//
-// The icon sits ABOVE the word (`flex-col`) rather than beside it, and that is a MEASUREMENT, not a
-// taste. Side by side, a 74.5px button spends 16px on the icon and its gap before the first letter,
-// which leaves ~38px of text — and four of the six shipped locales ellipsised at 390px, CJK worst
-// (`エージェント` is six full-width glyphs). Stacked, the word gets the button's whole width and a
-// 10px size, so all six draw in full at 390px and only ja's longest ellipsises at 320px. A fix that
-// only reads in English is not a fix.
+// Tools stay in one compact, labelled row. Every button keeps the 44px height floor while its
+// horizontal label can truncate instead of widening the composer on a narrow or translated screen.
 const CONTROL_BUTTON =
-  "h-11 min-w-0 flex-1 shrink flex-col gap-0.5 px-1 has-[>svg]:px-1 text-[10px] font-medium leading-none [&>svg]:shrink-0";
-// The label inside that box. `truncate` needs a box of its own to clip against — a bare text node
-// in a flex button has none — and `max-w-full` is what keeps that box from simply being the text's
-// own width.
+  "h-11 min-w-0 flex-1 shrink flex-row gap-1 px-1 has-[>svg]:px-1 text-[10px] font-medium leading-none [&>svg]:shrink-0";
 const CONTROL_LABEL = "max-w-full truncate";
+const VOICE_HOLD_MS = 350;
 
 // Pause after clearing a stranded terminal draft so the TUI settles before pane.send_text. Exported
 // so the test can pin the WAIT ITSELF (the reply never overtakes the sweep) against the constant
@@ -280,12 +257,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // carried in `?h=` since the row was opened), so the ambient scope IS the target here. Undefined on
   // a solo install, which renders no chip and leaves every confirm string unchanged.
   const writeHost = useAmbientHost(scope?.host);
-  // The word for the status strip. A bare shell has no agent and therefore no agent status, but it
-  // still owes the strip a word or a solo install's strip would be empty; a GONE pane has nothing
-  // left to describe, and the strip stands empty rather than reporting a stale state as current.
-  const statusWord: AgentStatus | "shell" | undefined = isShell ? "shell" : status;
-  // Its display name, or undefined when there is no pack — the copy-level half of the hide rule.
   const writeHostLabel = useHostLabel(scope?.host);
+  const statusWord: AgentStatus | "shell" | undefined = isShell ? "shell" : status;
+  const statusText =
+    statusWord === "shell"
+      ? translate("status.shellBadge")
+      : statusWord === undefined
+        ? undefined
+        : statusLabel(statusWord);
+  const statusDotStatus: AgentStatus | undefined =
+    statusWord === undefined ? undefined : statusWord === "shell" ? "unknown" : statusWord;
+  const statusTone = status === "blocked" ? "warn" : status === "done" ? "success" : "info";
   // …and a ref alongside it, for the ONE caller that reads it after an await. `send()` checks
   // `locked` once, up front, but its pre-clear sweep goes out on the far side of the pre-flight's
   // pane read; a re-render that locks the composer in that window must be able to stop the most
@@ -299,6 +281,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // message. Lazy initialiser so the restore happens on the mount, before first paint.
   const [input, setInput] = useState(() => loadDraft(scope, paneId) ?? "");
   const [voiceState, setVoiceState] = useState<VoiceState | null>(null);
+  const voiceInputRef = useRef<VoiceInputHandle>(null);
+  const appendVoiceSessionRef = useRef(false);
+  const appendHoldTimerRef = useRef<number | null>(null);
+  const appendHoldSourceRef = useRef<"pointer" | "keyboard" | null>(null);
+  const appendHoldPointerRef = useRef<number | null>(null);
+  const appendHoldModeRef = useRef<api.VoiceRecordingMode | null>(null);
+  const appendHoldSelectedRef = useRef(false);
+  const appendHoldStartedRef = useRef(false);
+  const suppressSendClickRef = useRef(false);
+  const [appendVoiceActive, setAppendVoiceActive] = useState(false);
+  const [appendMicSelected, setAppendMicSelected] = useState(false);
+  const [voiceRecordingMode, setVoiceRecordingMode] = useState<api.VoiceRecordingMode | null>(null);
+  const voiceModeErrorRef = useRef("Voice recording mode unavailable");
   // A final caption remains visible while VoiceInput awaits the transcript callback. Once that
   // callback has inserted it into the real draft, hide only the caption copy so it cannot duplicate.
   const acceptedVoiceCaptionRef = useRef<string | null>(null);
@@ -312,10 +307,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     } else if (next.phase === "listening" && voiceGenerationRef.current !== next.generation) {
       acceptedVoiceCaptionRef.current = null;
       voiceGenerationRef.current = next.generation;
-      const field = inputRef.current;
-      voiceCaretRef.current = field
-        ? { start: field.selectionStart, end: field.selectionEnd }
-        : { start: inputValueRef.current.length, end: inputValueRef.current.length };
+      if (appendVoiceSessionRef.current) {
+        const end = inputValueRef.current.length;
+        voiceCaretRef.current = { start: end, end };
+      } else {
+        const field = inputRef.current;
+        voiceCaretRef.current = field
+          ? { start: field.selectionStart, end: field.selectionEnd }
+          : { start: inputValueRef.current.length, end: inputValueRef.current.length };
+      }
     }
     setVoiceState(next);
   }
@@ -507,6 +507,44 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onTranscript: acceptTranscript,
     onError: (message) => setStatus(message, "error"),
   });
+  useEffect(() => {
+    setVoiceRecordingMode(null);
+    if (!voiceEnabled) return;
+    let disposed = false;
+    let controller: AbortController | null = null;
+    const refresh = () => {
+      if (document.visibilityState === "hidden") return;
+      controller?.abort();
+      const nextController = new AbortController();
+      controller = nextController;
+      void api.fetchVoicePreferences(nextController.signal).then((prefs) => {
+        if (prefs.recordingMode !== "hold" && prefs.recordingMode !== "toggle") {
+          throw new Error("Voice recording mode unavailable");
+        }
+        if (disposed || controller !== nextController) return;
+        voiceModeErrorRef.current = "Voice recording mode unavailable";
+        setVoiceRecordingMode(prefs.recordingMode);
+      }).catch((error: unknown) => {
+        if (disposed || controller !== nextController || (error instanceof DOMException && error.name === "AbortError")) return;
+        voiceModeErrorRef.current = error instanceof Error ? error.message : "Voice recording mode unavailable";
+        setVoiceRecordingMode(null);
+      });
+    };
+    const onFocus = () => refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    window.addEventListener("focus", onFocus);
+    refresh();
+    return () => {
+      disposed = true;
+      controller?.abort();
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      if (appendHoldTimerRef.current !== null) {
+        window.clearTimeout(appendHoldTimerRef.current);
+        appendHoldTimerRef.current = null;
+      }
+    };
+  }, [voiceEnabled]);
   // ── THE ORBIT TURNS WHILE THE OPERATOR'S WORK IS IN FLIGHT (lib/busy.ts) ───────────────────────
   //
   // Three intervals, declared where the state already lives, so the Collie mark in the header spins
@@ -539,7 +577,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // "stop typing into the terminal" control and that must not be displaceable.
   const micIsPrimary = !voiceEnabled && stt !== null && !direct.active && input.trim() === "";
   const customVoiceVisible =
-    voiceEnabled && !direct.active && (input.trim() === "" || voiceState !== null);
+    voiceEnabled && !direct.active && (input.trim() === "" || (voiceState !== null && !appendVoiceActive && !appendMicSelected));
 
   /**
    * What happens to a finished transcript.
@@ -570,6 +608,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     insertTranscript(transcript);
     return false;
+  }
+  async function handleVoiceTranscript(transcript: string): Promise<boolean> {
+    try {
+      return await acceptTranscript(transcript);
+    } finally {
+      if (appendVoiceSessionRef.current) {
+        appendVoiceSessionRef.current = false;
+        setAppendVoiceActive(false);
+      }
+    }
+  }
+
+  function handleVoiceError(message: string): void {
+    appendVoiceSessionRef.current = false;
+    setAppendVoiceActive(false);
+    setStatus(message, "error");
   }
 
   /** Splice a transcript into the draft AT THE CARET (the field is where the operator left it, and
@@ -641,6 +695,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       if (sentTimer.current) clearTimeout(sentTimer.current);
       if (lastSentTimerRef.current) clearTimeout(lastSentTimerRef.current);
       if (keyRevalidateTimer.current) clearTimeout(keyRevalidateTimer.current);
+      if (appendHoldTimerRef.current !== null) window.clearTimeout(appendHoldTimerRef.current);
     },
     [],
   );
@@ -975,6 +1030,140 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }
   const confirmingSend = sendConfirm.pending === "send";
   const forcingSend = forceConfirm.pending === "force";
+  const appendVoiceEligible =
+    voiceEnabled &&
+    input.trim() !== "" &&
+    !direct.active &&
+    !locked &&
+    !sending &&
+    !dialogPresent &&
+    !confirmingSend &&
+    !forcingSend;
+  const appendVoiceEligibleRef = useRef(false);
+  appendVoiceEligibleRef.current = appendVoiceEligible;
+
+  function clearAppendHoldTimer(): void {
+    if (appendHoldTimerRef.current === null) return;
+    window.clearTimeout(appendHoldTimerRef.current);
+    appendHoldTimerRef.current = null;
+  }
+
+  function startAppendVoice(): void {
+    appendVoiceSessionRef.current = true;
+    setAppendVoiceActive(true);
+    const end = inputValueRef.current.length;
+    voiceCaretRef.current = { start: end, end };
+    voiceInputRef.current?.start();
+  }
+
+  function beginAppendHold(source: "pointer" | "keyboard", pointerId?: number): void {
+    if (!appendVoiceEligible || appendHoldSourceRef.current !== null) return;
+    appendHoldSourceRef.current = source;
+    appendHoldPointerRef.current = pointerId ?? null;
+    appendHoldModeRef.current = voiceRecordingMode;
+    appendHoldSelectedRef.current = appendMicSelected;
+    suppressSendClickRef.current = false;
+    appendHoldTimerRef.current = window.setTimeout(() => {
+      appendHoldTimerRef.current = null;
+      if (appendHoldSourceRef.current !== source || !appendVoiceEligibleRef.current) {
+        appendHoldSourceRef.current = null;
+        appendHoldPointerRef.current = null;
+        appendHoldModeRef.current = null;
+        return;
+      }
+      appendHoldStartedRef.current = true;
+      if (appendHoldModeRef.current === "hold") {
+        startAppendVoice();
+      } else if (appendHoldModeRef.current === "toggle") {
+        setAppendMicSelected(!appendHoldSelectedRef.current);
+        if (appendHoldSelectedRef.current && appendVoiceSessionRef.current) voiceInputRef.current?.stop();
+      } else {
+        setStatus(voiceModeErrorRef.current, "error");
+      }
+    }, VOICE_HOLD_MS);
+  }
+
+  function finishAppendHold(commit: boolean): boolean {
+    const started = appendHoldStartedRef.current;
+    const mode = appendHoldModeRef.current;
+    clearAppendHoldTimer();
+    appendHoldSourceRef.current = null;
+    appendHoldPointerRef.current = null;
+    appendHoldModeRef.current = null;
+    appendHoldStartedRef.current = false;
+    if (!started) {
+      if (!commit) suppressSendClickRef.current = true;
+      return false;
+    }
+    suppressSendClickRef.current = true;
+    if (mode === "hold") {
+      if (commit) voiceInputRef.current?.stop();
+      else {
+        appendVoiceSessionRef.current = false;
+        setAppendVoiceActive(false);
+        voiceInputRef.current?.cancel();
+      }
+    }
+    return true;
+  }
+
+  function handleAppendPointerDown(event: PointerEvent<HTMLButtonElement>): void {
+    if (event.button !== 0 || !appendVoiceEligible) return;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is unavailable in a few embedded webviews; the timer still guards the click.
+    }
+    beginAppendHold("pointer", event.pointerId);
+  }
+
+  function handleAppendPointerUp(event: PointerEvent<HTMLButtonElement>): void {
+    if (appendHoldSourceRef.current !== "pointer" || appendHoldPointerRef.current !== event.pointerId) return;
+    finishAppendHold(true);
+  }
+
+  function handleAppendPointerCancel(event: PointerEvent<HTMLButtonElement>): void {
+    if (appendHoldSourceRef.current !== "pointer" || appendHoldPointerRef.current !== event.pointerId) return;
+    finishAppendHold(false);
+  }
+
+  function handleAppendKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
+    if (!appendVoiceEligible || event.repeat || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    beginAppendHold("keyboard");
+  }
+
+  function handleAppendKeyUp(event: KeyboardEvent<HTMLButtonElement>): void {
+    if (appendHoldSourceRef.current !== "keyboard" || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    if (!finishAppendHold(true)) handlePrimaryClick();
+  }
+
+  function handleAppendBlur(): void {
+    if (appendHoldSourceRef.current === "keyboard") finishAppendHold(false);
+  }
+
+  function handleAppendMicClick(): void {
+    if (voiceRecordingMode !== "toggle") {
+      handleVoiceError(voiceModeErrorRef.current);
+      return;
+    }
+    if (appendVoiceSessionRef.current) voiceInputRef.current?.stop();
+    else startAppendVoice();
+  }
+
+  function handlePrimaryClick(): void {
+    if (suppressSendClickRef.current) {
+      suppressSendClickRef.current = false;
+      return;
+    }
+    if (appendMicSelected) {
+      handleAppendMicClick();
+      return;
+    }
+    if (appendVoiceSessionRef.current) return;
+    onSendClick();
+  }
 
   // Coalesce revalidations from a burst of key presses, LEADING edge first: the first press in a
   // burst refetches immediately, and only presses that arrive inside the window collapse into one
@@ -1208,136 +1397,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             and NOT flex-1 — it's a settings affordance, not a peer of the three action toggles, and
             keeping it to one square (44px, its tap target and nothing more) leaves the labelled
             buttons the rest of a 390px phone. */}
-        {/* THE STATUS BAND — A STATUS LINE, NOT A HEADING, AND NOW A REGION OF ITS OWN.
-
-            It used to be 12px of `pt-3` reserved at the top of the controls row, with its two runs
-            lifted out of the flex flow into one `absolute` box. It is now a real box, a sibling
-            above the row, because the operator asked for a bottom rule, and a rule cannot be drawn
-            on padding. What it SAYS is unchanged: it reads as ONE SENTENCE —
-            the machine every button on the row (and the field below) writes to, and what that
-            machine's pane is doing. It replaced the word "Controls", which named a row whose five
-            buttons already carry their own labels.
-
-            WHY HERE AND NOT IN THE FIELD. The host was docked inside the text box for one round.
-            The reasoning survives ("which machine will this land on" is asked while writing, not
-            while reading) but the price does not: docked, it took 60px out of the typing area, the
-            widest and most contested part of the composer. This band is at the same write surface
-            and costs the typing area nothing.
-
-            WHY THE STATUS WORD CAME DOWN HERE. It was the pane header's caption line, and once the
-            host left that line it was ONE word holding a whole line of a 60px row — the operator
-            asked for the top back. It could not simply be deleted: on the app's own `--status-*`
-            tokens a deuteranope reads blocked / working / done as one colour in light theme, and
-            "needs you" against "done" collapses in both, so the DOT alone cannot carry the range
-            (status-badge.tsx holds the measurement). The dot stays badged on the agent's tile in the
-            header, welded to its subject; the word stands here, where the same question is being
-            asked about the same machine.
-
-            NOTHING HERE CAN MOVE ANYTHING. Both runs state the same 12px line box (`text-[10px]/3`,
-            one utility — tailwind-merge deletes an earlier `leading-*` when a later `text-<size>`
-            follows it in the same cn()). `h-[14px]` then STATES the band's height rather than
-            letting it be the sum of whatever stands in it, so a solo install (where HostChip renders
-            null, its hide rule unchanged, leaving the word alone), a pack, and a gone pane (no word
-            at all) are identical BY CONSTRUCTION and not by three occupants happening to agree.
-            `text-[10px]/3` is stated on the BAND as
-            well as on both runs, and that is load-bearing rather than decorative: a block layer
-            inside the slot takes its line box from its OWN inherited strut, so without it the 14px
-            page strut won and the band measured 25px instead of 14px.
-            The WORD's own width is the case padding cannot reserve — "needs you" is 54.6px and
-            "done" 27.9px — so it stands in a slot sized to every word it can hold, which is what
-            `StatusWordSlot` is for; the machine's name truncates into what is left, always the same
-            amount of it. DESIGN.md §2: reserve, never reflow.
-
-            THE GROUND IS THE PAGE COLOUR, PER DESIGN.md §4: CHROME SEPARATES WITH A RULE, NOT A
-            FILL. A fill was tried here and measured — 1.19:1 against the dock below, 1.09:1 /
-            1.10:1 against the terminal mirror above, both themes, against a `border-b border-rule`
-            doing 1.45:1 light and 2.19:1 dark — and the rule was doing between 1.2x and 2x more of
-            the separating in light, and all of it in dark, where the fill read as a continuation of
-            the terminal rather than as a band of chrome. It is gone; the band is unpainted, and the
-            two rules are what tell it apart from what stands either side of it.
-
-            THE RULES ARE `--border`, NOT `--rule`, SINCE THE 2026-08-31 ROUND. The operator read
-            the pair as too loud — two 24% hairlines 14px apart make a bright sandwich around 10px
-            type — and the token doctrine agrees with the eye: --rule cuts BETWEEN regions of
-            chrome, and both of this band's neighbours are the same chrome surface (the handle
-            above, the controls below; the regional cut against the terminal is the chrome block's
-            own top rule in agent-chat.tsx). These are component edges inside one surface, which is
-            what --border (12%) is for. Nothing about the geometry below changes: the centring fix
-            was the SYMMETRY of `border-y`, never the weight of the lines.
-
-            IT IS BOUNDED ON BOTH EDGES NOW — `border-y`, and that is the round's actual fix. The
-            band had a rule below it and 10px of the dock's own `pt-2.5` above it, which is why it
-            read as uncentred no matter what the numbers said: the box the EYE draws ran from the
-            dock's top rule to the band's bottom rule, ~23px of one unbroken ground, and the words
-            sat at the bottom of it. Measured on the page (390px, DPR 3, dark) the geometry inside
-            the 13px band was already right to half a pixel — caps 3.0 → 10.0 in a 0 → 13 box — so
-            there was nothing to centre BETTER. There was a box to state. The band now states it:
-            a rule above, a rule below, nothing between them but the two runs.
-
-            The 10px did not vanish, it moved BELOW the band, onto the controls row — `mt-2.5`
-            then, `mt-2` since the 2026-08-31 shave (with `mb-2` going to `mb-1.5` beside it, 4px
-            returned in all) — where it separates the band from the buttons instead of pretending
-            to be part of it.
-            The dock therefore takes NO top padding at all, and its top rule and fill moved out to
-            the chrome block in `agent-chat.tsx` — the swipe handle stands on that same ground, so
-            the boundary against the terminal is drawn once, above everything the thumb operates.
-            Two components drawing one boundary is a fault this codebase has already fixed twice
-            (`space-strip.tsx` / `tab-strip.tsx`).
-
-            THE STACK GOT 9px SHORTER: −10px of dock padding, +1px for the band's new top rule.
-
-            AND THE 1px NUDGE IS GONE WITH IT. The band used to carry `pt-px`, which existed to pay
-            for a rule on ONE edge: `items-center` centres in the CONTENT box, the band the eye read
-            was the border box, and with a hairline below and none above the two centres were half a
-            pixel apart. `border-y` makes the box symmetric by construction, so there is nothing left
-            to compensate for and a compensation still applied would tip it the other way. Both
-            spellings were measured on the page, 390px at DPR 3, as ink rows in the band's own 14px
-            border box (rules at 0 → 1 and 13 → 14):
-
-              with `pt-px`   caps 4.00 → 11.00, centroid 7.33 · all ink centroid 7.83
-              without        caps 3.00 → 10.00, centroid 6.33 · all ink centroid 6.83
-
-            against a border-box centre of 7.00. The eye centres the CLUSTER, not the capital
-            letters — the host's glyph is part of the line — so the all-ink number is the one that
-            decides, and it goes from 0.83px low to 0.17px high. The height is simply stated
-            (14px = 1 + 12 + 1) and `items-center` does the rest. The host's glyph stays `size-2.5`
-            in this variant (host-chip.tsx states why at the line): 10px in a 12px content box
-            clears both rules instead of touching one.
-
-            Nothing about the reserve changes: the slot still stacks every word (§2), and the height
-            is the same 14px solo, on a pack, and on a gone pane.
-
-            FULL-BLEED, and the content still at 10px. `-mx-3` cancels the dock's `px-3` so both
-            rules run edge to edge — one that stopped short would not separate the regions it
-            sits between. `px-2.5` then puts the content back at the 10px inset the controls row
-            asked for, so nothing on this line moved by a pixel: the band is what absorbs the old
-            `-mx-0.5`, a 2px overhang that was invisible on this unpainted strip either way. */}
-        <div
-          data-slot="composer-status"
-          className="-mx-3 flex h-[14px] items-center justify-end gap-1.5 border-y border-border px-2.5 text-[10px]/3"
-        >
-          <HostChip host={writeHost} variant="caption" className="min-w-0" />
-          <StatusWordSlot status={statusWord} stale={stale} />
-        </div>
-        {/* `gap-1.5` rather than `gap-2`: four gaps at 8px is 32px of a 366px row, and 6px reads the
-            same. The group still carries `aria-labelledby` to the word "Controls" — the word is now
-            `sr-only` rather than deleted, because it was doing TWO jobs and only one of them was
-            visual. Sighted, it labelled a row of five self-labelling buttons and earned nothing. In
-            the accessibility tree it is the only thing that names the group at all, and dropping it
-            would leave a bare `role="group"` wrapping Keys/Type/Quick/Agent/⚙ with no name for a
-            screen reader to announce on entry. The host does NOT inherit that job: it names a
-            machine, not a run of controls, and it is absent on every solo install — which is also
-            why it now stands OUTSIDE this group, in the band above, where it belongs to the line it
-            completes rather than to five buttons it does not describe. */}
+        {/* Compact tools row: every action keeps a 44px hit height, while the status dot is a
+            separate accessible control that surfaces the full state through the existing notice. */}
         <div
           data-slot="composer-controls"
           role="group"
           aria-labelledby="composer-controls-label"
-          className="-mx-0.5 mb-1.5 mt-2 flex items-center gap-1.5"
+          className="-mx-0.5 mb-1.5 mt-1 flex min-w-0 items-center gap-1"
         >
           <SectionLabel id="composer-controls-label" className="sr-only">
             {translate("composer.controls.label")}
           </SectionLabel>
+          <div className="flex min-w-0 flex-1 items-center gap-1">
           {/* Keys and Quick are TOGGLES for the in-flow dock above (not overlays): tap to open, tap
               again to close. aria-expanded ties each to the dock; secondary variant marks it pressed
               while open. Both share the single-valued `drawer`, so opening one closes the other. */}
@@ -1423,6 +1494,28 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           >
             <Settings2 className="size-4" />
           </Button>
+          </div>
+          {(writeHost !== undefined || statusDotStatus !== undefined) && (
+            <div className="flex min-w-0 shrink-0 items-center gap-1">
+              <HostChip host={writeHost} variant="caption" className="max-w-20 min-w-0" />
+              {statusDotStatus !== undefined && statusText !== undefined && (
+                <button
+                  type="button"
+                  className="flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  aria-label={writeHostLabel ? `${writeHostLabel}: ${statusText}` : statusText}
+                  title={statusText}
+                  onClick={() =>
+                    setStatus(
+                      writeHostLabel ? `${writeHostLabel} · ${statusText}` : statusText,
+                      statusTone,
+                    )
+                  }
+                >
+                  <StatusDot status={statusDotStatus} surface="bg-chrome" stale={stale} />
+                </button>
+              )}
+            </div>
+          )}
         </div>
         {/* ── THE FOOTER'S NOTICE STRIPS, SORTED BY KIND (DESIGN.md §1, §2) ─────────────────────
             Every strip below arrives and leaves through `Collapse`, which is the only sanctioned way
@@ -1607,11 +1700,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             disabled={locked}
             rows={1}
           />
-            {/* The picker, anchored to the field so it opens ABOVE the button rather than over it
-                (ui/anchored-menu.tsx carries the measurement). Two rows, no confirm — each one
-                opens a native picker, which is its own decision point. The menu closes BEFORE the
-                click so it is not left standing behind the system UI, and the click still counts as
-                the user gesture the browser requires because both happen in this one handler. */}
             <AnchoredMenu
               open={picking}
               onClose={() => setPicking(false)}
@@ -1679,14 +1767,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </div>
           {voiceEnabled && (
             <VoiceInput
+              ref={voiceInputRef}
               paneId={paneId}
               session={scope?.session}
               showControl={customVoiceVisible}
               disabled={locked || dialogPresent || sending}
+              recordingMode={voiceRecordingMode}
               replySpeechSupported={replySpeechSupported}
-              onTranscript={acceptTranscript}
+              onTranscript={handleVoiceTranscript}
               onVoiceStateChange={handleVoiceStateChange}
-              onError={(message) => setStatus(message, "error")}
+              onError={handleVoiceError}
             />
           )}
           {!customVoiceVisible && (!direct.active && forcingSend ? (
@@ -1759,18 +1849,54 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ) : (
             <Button
               size="icon"
+              variant={appendVoiceActive ? "destructive" : "default"}
               className="size-11 shrink-0 rounded-full"
-              onClick={direct.active ? () => direct.deactivate() : onSendClick}
+              onClick={direct.active ? () => direct.deactivate() : handlePrimaryClick}
+              onPointerDown={handleAppendPointerDown}
+              onPointerUp={handleAppendPointerUp}
+              onPointerCancel={handleAppendPointerCancel}
+              onLostPointerCapture={handleAppendPointerCancel}
+              onKeyDown={handleAppendKeyDown}
+              onKeyUp={handleAppendKeyUp}
+              onBlur={handleAppendBlur}
               disabled={locked || sending}
               aria-label={
                 direct.active
                   ? translate("composer.send.stopTypingAria")
-                  : translate("composer.send.sendAria")
+                  : appendVoiceActive
+                    ? translate("composer.mic.stopAria")
+                    : appendMicSelected
+                      ? translate("composer.mic.recordAria")
+                      : translate("composer.send.sendAria")
               }
-              aria-pressed={direct.active}
+              title={
+                !direct.active && voiceEnabled && input.trim() !== ""
+                  ? voiceRecordingMode === "hold"
+                    ? "Hold to record; release to append"
+                    : voiceRecordingMode === "toggle"
+                      ? appendMicSelected
+                        ? "Tap to start or stop voice input; hold to switch to Send"
+                        : "Tap to send; hold to switch to microphone"
+                      : voiceModeErrorRef.current
+                  : undefined
+              }
+              aria-description={
+                !direct.active && voiceEnabled && input.trim() !== ""
+                  ? voiceRecordingMode === "hold"
+                    ? "Hold to record; release to append"
+                    : voiceRecordingMode === "toggle"
+                      ? appendMicSelected
+                        ? "Tap to start or stop voice input; hold to switch to Send"
+                        : "Tap to send; hold to switch to microphone"
+                      : voiceModeErrorRef.current
+                  : undefined
+              }
+              aria-pressed={direct.active || appendVoiceActive || appendMicSelected}
             >
               {direct.active ? (
                 <Keyboard className="size-4" />
+              ) : appendVoiceActive || appendMicSelected ? (
+                <Mic className="size-4" />
               ) : sending ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : justSent ? (

@@ -1906,17 +1906,9 @@ export function AgentChat({
                   and unchanged at rgb(235) in light, where --card would be pure white and land
                   1.04:1 against the inverted mirror. index.css states the whole argument. */}
               <div data-slot="chrome-block" className="border-t border-rule bg-chrome">
-                {/* …and stands down while the keyboard is up, for 30px (`py-3` around the 6px
-                    grip, it was py-3.5/34px until the 2026-08-31 shave; the drag is tracked from
-                    the first pixel past useSheetPull's own slop, and the strip is full-width, so the
-                    gesture still lands). Switching panes is a
-                    BEFORE-typing act, so the row costs its height at the one moment it cannot be
-                    wanted. Nothing is stranded: the tab strip above still switches, the sheet is still
-                    reachable the instant the keyboard closes, and `Collapse` unmounts the button at
-                    the end of the exit so it leaves the tab order with the pixels.
-
-                    Also shown whenever launchers are declared, even with a single pane and no
-                    shells: a lone pane with launchers still needs a way to reach them. */}
+                {/* The handle stays a narrow, full-width touch strip above the composer so tap and
+                    swipe-up switching remain available without spending a full row on chrome. It is
+                    still the same pointer-captured sheetPull gesture and accessible tap target. */}
                 <Collapse
                   open={
                     !composing &&
@@ -1928,7 +1920,7 @@ export function AgentChat({
                     aria-label={t("chat.switcher.aria")}
                     ref={sheetPull.ref}
                     onClick={() => setDrawer("switcher")}
-                    className="flex w-full touch-none items-center justify-center py-3 transition-colors active:bg-muted/50"
+                    className="flex w-full touch-none items-center justify-center py-1.5 transition-colors active:bg-muted/50"
                   >
                     <span className="h-1.5 w-12 rounded-md bg-muted-foreground/50" />
                   </button>

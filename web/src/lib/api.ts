@@ -34,6 +34,10 @@ import type {
 import type { SubscribeBody } from "./push";
 
 export type { NotifyPrefs, UpdateInfo };
+export type VoiceRecordingMode = "hold" | "toggle";
+export interface VoicePreferences {
+  recordingMode: VoiceRecordingMode;
+}
 
 /**
  * Marks every API request as XHR so a fronting identity proxy answers it with a status we can read.
@@ -665,6 +669,10 @@ export function openWorktree(
  */
 export function fetchConfig(): Promise<BridgeConfig> {
   return req<BridgeConfig>("/api/config");
+}
+/** Read the native OMP Voice recording gesture mode. */
+export function fetchVoicePreferences(signal?: AbortSignal): Promise<VoicePreferences> {
+  return req<VoicePreferences>("/api/voice/preferences", signal ? { signal } : undefined);
 }
 
 /** Register push through the same timeout, authentication and error handling as the other APIs. */
