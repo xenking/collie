@@ -239,7 +239,7 @@ export const es: Dictionary = {
   "composer.destructive.confirm": "Acción destructiva: {reason}. Pulsa Enviar de nuevo para confirmar.",
   "composer.destructive.confirmOnHost":
     "Acción destructiva: {reason} en {host}. Pulsa Enviar de nuevo para confirmar.",
-  "composer.upload.success": "Archivo añadido, ruta en el mensaje",
+  "composer.upload.success": "Archivo adjuntado",
   "composer.upload.tooLarge": "El archivo supera los {max} MB, el límite en este collie.",
   "composer.upload.badType": "Collie no puede adjuntar {name}.",
   "composer.noEcho.title": "Solicitud de contraseña: sin eco en terminal",

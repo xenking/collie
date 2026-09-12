@@ -35,9 +35,34 @@ const MAX_CHARS = 8 * 1024;
  */
 const MEMORY_MAX_CHARS = 4 * 1024 * 1024;
 
+export interface DraftAttachment {
+  path: string;
+  name: string;
+  size: number;
+}
+
 interface DraftEntry {
   text: string;
   at: number;
+  attachments: DraftAttachment[];
+}
+
+function isDraftAttachment(value: unknown): value is DraftAttachment {
+  if (typeof value !== "object" || value === null) return false;
+  const attachment = value as Partial<DraftAttachment>;
+  return (
+    typeof attachment.path === "string" &&
+    attachment.path.length > 0 &&
+    typeof attachment.name === "string" &&
+    attachment.name.length > 0 &&
+    typeof attachment.size === "number" &&
+    Number.isFinite(attachment.size) &&
+    attachment.size >= 0
+  );
+}
+
+function normalizeAttachments(attachments: readonly DraftAttachment[]): DraftAttachment[] {
+  return attachments.filter(isDraftAttachment).map(({ path, name, size }) => ({ path, name, size }));
 }
 
 /**
@@ -115,9 +140,11 @@ function parse(raw: string | null): DraftEntry | null {
     // SAFETY: `value` was just checked to be a non-null object, so reading `text`/`at` off it is
     // defined behaviour; both are validated as the right primitive on the very next line before any
     // of them is used. `Partial` is what makes those two checks mandatory rather than assumed.
-    const entry = value as Partial<DraftEntry>;
+    const entry = value as Partial<DraftEntry> & { attachments?: unknown };
     if (typeof entry.text !== "string" || typeof entry.at !== "number") return null;
-    return { text: entry.text, at: entry.at };
+    if (entry.attachments === undefined) return { text: entry.text, at: entry.at, attachments: [] };
+    if (!Array.isArray(entry.attachments) || !entry.attachments.every(isDraftAttachment)) return null;
+    return { text: entry.text, at: entry.at, attachments: entry.attachments.map((attachment) => ({ ...attachment })) };
   } catch {
     return null;
   }
@@ -145,6 +172,17 @@ function loadStored(scope: Scope | undefined, paneId: string): DraftEntry | null
     return null;
   }
 }
+/**
+ * The newer of the memory and disk entries for a pane, or null if neither tier has one.
+ */
+function loadEntry(scope: Scope | undefined, paneId: string): DraftEntry | null {
+  prunedOnce();
+  const cached = memory.get(keyFor(scope, paneId)) ?? null;
+  const stored = loadStored(scope, paneId);
+  if (cached === null) return stored;
+  if (stored === null) return cached;
+  return stored.at > cached.at ? stored : cached;
+}
 
 /**
  * The stored draft for a pane, or null if there is none (or it's expired/unreadable).
@@ -154,31 +192,37 @@ function loadStored(scope: Scope | undefined, paneId: string): DraftEntry | null
  * because it is written first and holds what the disk tier refused.
  */
 export function loadDraft(scope: Scope | undefined, paneId: string): string | null {
-  prunedOnce();
-  const cached = memory.get(keyFor(scope, paneId)) ?? null;
-  const stored = loadStored(scope, paneId);
-  if (cached === null) return stored?.text ?? null;
-  if (stored === null) return cached.text;
-  return stored.at > cached.at ? stored.text : cached.text;
+  return loadEntry(scope, paneId)?.text ?? null;
+}
+
+/** The uploaded-file metadata stored alongside the pane's draft. */
+export function loadDraftAttachments(scope: Scope | undefined, paneId: string): DraftAttachment[] {
+  return loadEntry(scope, paneId)?.attachments.map((attachment) => ({ ...attachment })) ?? [];
 }
 
 /**
- * Persist a pane's draft. Empty/whitespace-only text REMOVES the key — that's what "the user
- * deliberately emptied the box" looks like, and it means the clear-on-send path needs no special
- * case beyond saving the now-empty input.
+ * Persist a pane's draft. Empty text with no attachments removes the key; attachment-only entries
+ * remain persisted so a file can be sent without a textual message.
  */
-export function saveDraft(scope: Scope | undefined, paneId: string, text: string): void {
+export function saveDraft(
+  scope: Scope | undefined,
+  paneId: string,
+  text: string,
+  attachments: readonly DraftAttachment[] = [],
+): void {
   prunedOnce();
-  if (text.trim() === "") {
+  const storedAttachments = normalizeAttachments(attachments);
+  if (text.trim() === "" && storedAttachments.length === 0) {
     clearDraft(scope, paneId);
     return;
   }
   const key = keyFor(scope, paneId);
   const at = Date.now();
+  const entry: DraftEntry = { text, at, attachments: storedAttachments };
 
   // Memory first, and unconditionally: it is the tier that has to hold what the disk tier won't, and
   // it must be written even where there is no storage at all (SSR, Safari private mode).
-  memory.set(key, { text, at });
+  memory.set(key, entry);
   evictMemory(key);
 
   const store = storage();
@@ -192,24 +236,24 @@ export function saveDraft(scope: Scope | undefined, paneId: string, text: string
     return;
   }
   try {
-    const entry: DraftEntry = { text, at };
     store.setItem(key, JSON.stringify(entry));
   } catch {
     // Quota / private mode. The in-memory draft is still on screen; only its persistence is lost.
   }
 }
-
 /** Hold the memory tier under {@link MEMORY_MAX_CHARS}, oldest first, never evicting `keep`. */
 function evictMemory(keep: string): void {
+  const entryChars = (entry: DraftEntry) =>
+    entry.text.length + entry.attachments.reduce((total, attachment) => total + attachment.path.length + attachment.name.length, 0);
   let total = 0;
-  for (const entry of memory.values()) total += entry.text.length;
+  for (const entry of memory.values()) total += entryChars(entry);
   if (total <= MEMORY_MAX_CHARS) return;
   const byAge = [...memory.entries()]
     .filter(([key]) => key !== keep)
     .toSorted((a, b) => a[1].at - b[1].at);
   for (const [key, entry] of byAge) {
     memory.delete(key);
-    total -= entry.text.length;
+    total -= entryChars(entry);
     if (total <= MEMORY_MAX_CHARS) return;
   }
 }

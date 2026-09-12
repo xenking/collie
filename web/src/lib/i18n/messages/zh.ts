@@ -224,7 +224,7 @@ export const zh: Dictionary = {
   "composer.discard.confirmKeys.other": "再次点击以放弃队列中的 {count} 个按键",
   "composer.destructive.confirm": "破坏性操作：{reason}。再次点击“发送”以确认",
   "composer.destructive.confirmOnHost": "破坏性操作：{host} 上的 {reason}。再次点击“发送”以确认",
-  "composer.upload.success": "文件已添加，路径已填入消息",
+  "composer.upload.success": "文件已附加",
   "composer.upload.tooLarge": "文件超过此 collie 的 {max} MB 大小限制。",
   "composer.upload.badType": "Collie 无法附加 {name}。",
   "composer.noEcho.title": "密码提示（无回显）",

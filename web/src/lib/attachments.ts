@@ -14,6 +14,7 @@
 // Nothing here is a security boundary. A file that gets past it still meets the bridge's own sniff.
 
 import type { UploadCapability } from "@/lib/types";
+import type { DraftAttachment } from "./drafts";
 
 /** What a bridge that publishes no `upload` block accepts. See the header. */
 const LEGACY: UploadCapability = {
@@ -95,4 +96,22 @@ export function extensionOf(name: string): string | null {
 /** The cap in whole megabytes, for a sentence. Rounded the same way the bridge rounds its own. */
 export function limitMb(limits: UploadCapability): number {
   return Math.round(limits.maxBytes / (1024 * 1024));
+}
+
+/** Whether a paste is large enough to become a text attachment. */
+export function shouldAttachPaste(text: string): boolean {
+  if (text.length > 1000) return true;
+  let lines = 1;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10 && ++lines > 10) return true;
+  }
+  return false;
+}
+
+/** Build the message sent alongside uploaded attachment paths without changing the original text. */
+export function attachmentMessage(
+  text: string,
+  attachments: readonly DraftAttachment[],
+): string {
+  return [text, ...attachments.map(({ path }) => path)].filter(Boolean).join("\n\n");
 }
