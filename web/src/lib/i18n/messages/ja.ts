@@ -236,7 +236,7 @@ export const ja: Dictionary = {
   "composer.discard.confirmKeys.other": "もう一度タップすると待機中の{count}キーを破棄します",
   "composer.destructive.confirm": "破壊的操作: {reason}。確認のため送信を再タップしてください",
   "composer.destructive.confirmOnHost": "破壊的操作: {host}上の{reason}。確認のため送信を再タップしてください",
-  "composer.upload.success": "ファイルを追加しました（パスを挿入）",
+  "composer.upload.success": "ファイルを添付しました",
   "composer.upload.tooLarge": "上限の {max} MB を超えています。",
   "composer.upload.badType": "{name} は添付できません。",
   "composer.noEcho.title": "パスワード入力プロンプト: エコーバック無効",

@@ -30,13 +30,13 @@ import { describeApiError, describeThrownError } from "@/lib/api-error-message";
 import { commandsFor } from "@/lib/agent-commands";
 import { useMuxCapability, useMuxUnsupportedKeys } from "@/lib/mux-capability";
 import { useOperatorCommands, useOperatorKeys, useUploadCapability } from "@/lib/operator-config";
-import { acceptAttribute, limitMb, offersFiles, PHOTO_ACCEPT, rejectAttachment, uploadLimits } from "@/lib/attachments";
+import { acceptAttribute, attachmentMessage, limitMb, offersFiles, PHOTO_ACCEPT, rejectAttachment, shouldAttachPaste, uploadLimits } from "@/lib/attachments";
 import { ctrlPresetsFor } from "@/lib/operator-keys";
 import { isDestructiveInput } from "@/lib/destructive";
 import { HostChip } from "@/components/host-chip";
 import { StatusDot, StatusWordSlot } from "@/components/status-badge";
 import { useAmbientHost, useHostLabel } from "@/components/crew-provider";
-import { clearDraft, fitsDraftStore, loadDraft, saveDraft } from "@/lib/drafts";
+import { clearDraft, fitsDraftStore, loadDraft, loadDraftAttachments, saveDraft, type DraftAttachment } from "@/lib/drafts";
 import { useHoldReload } from "@/lib/reload-guard";
 import { isSelfEcho, normalizeDraft } from "@/hooks/use-terminal-draft";
 import { adapterFor } from "@/lib/harness";
@@ -215,6 +215,18 @@ function ComposerDock({
 /** How long the attach button holds its pressed tone, in ms. Just under the sheet's own 240ms
  *  entrance, so the flash hands over to the sheet rather than lingering behind it. */
 const ATTACH_PRESS_MS = 220;
+function attachmentSizeLabel(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes;
+  let unit = "B";
+  for (const nextUnit of units) {
+    value /= 1024;
+    unit = nextUnit;
+    if (value < 1024 || nextUnit === units[units.length - 1]) break;
+  }
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${unit}`;
+}
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
   { paneId, scope, agent, isShell, replySpeechSupported = false, status, stale, gone, readOnly, hostBlock, composing, dialogPresent, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setTapToFocus, setExpandClippedReply, onSent },
@@ -281,6 +293,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // pane view is keyed by paneId, so without this, stepping over to another tab mid-reply ate the
   // message. Lazy initialiser so the restore happens on the mount, before first paint.
   const [input, setInput] = useState(() => loadDraft(scope, paneId) ?? "");
+  const [attachments, setAttachments] = useState<DraftAttachment[]>(() => loadDraftAttachments(scope, paneId));
   const [voiceState, setVoiceState] = useState<VoiceState | null>(null);
   const voiceInputRef = useRef<VoiceInputHandle>(null);
   const appendVoiceSessionRef = useRef(false);
@@ -324,38 +337,45 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // functional update AND to persist the result, without either reading stale state or doing the
   // save inside a (double-invoked) state updater.
   const inputValueRef = useRef(input);
-  // Which pane the current `input` belongs to. DetailRoute keys AgentChat by paneId, so in the app a
-  // pane→pane navigation remounts this component and the lazy initialiser above does the work — but
-  // the component must not depend on that: if it is ever rendered with a changed paneId/session in
-  // place, the effect below saves the outgoing pane's draft and loads the incoming one, so pane A's
-  // text can never surface in pane B.
+  const attachmentsRef = useRef<DraftAttachment[]>(attachments);
+  attachmentsRef.current = attachments;
+  // Which pane the current `input` and attachments belong to. DetailRoute keys AgentChat by paneId,
+  // so in the app a pane→pane navigation remounts this component and the lazy initialisers above do
+  // the work — but the component must not depend on that: if it is ever rendered with a changed
+  // paneId/session in place, the effect below saves the outgoing pane's draft and loads the incoming
+  // one, so pane A's text and files can never surface in pane B.
   // Compared by VALUE (its cache key), never by object identity: a scope is a value passed as an
   // object, and an identity compare here would re-run the save/restore below on every poll.
   const scopeId = scopeKey(scope);
+  const paneKey = `${scopeId}\0${paneId}`;
+  const paneKeyRef = useRef(paneKey);
+  paneKeyRef.current = paneKey;
   const draftPaneRef = useRef({ scope, scopeId, paneId });
 
   /**
-   * Set the draft AND persist it. Every write to `input` goes through here — an empty value removes
-   * the stored key, so the deliberate-clear paths (verified send, user emptying the box) need no
-   * special case.
+   * Set the draft AND persist it. Every write to `input` or attachments goes through here — empty
+   * text with no files removes the stored key, while attachment-only drafts remain sendable.
    *
    * PERSISTENCE STOPS while a password prompt is on screen (#103). By the time the notice appears the
-   * secret is already in the 48h store — the write-through ran on every keystroke, before any send was
-   * attempted — so `noEchoRef` gates the save AND the pane-leave save below, and the outcome that sets
-   * it removes the stored copy outright. The button was never enough: the operator who taps Send,
-   * gives up and walks to a laptop (which is exactly what #103 reports doing, for three days) never
-   * presses anything, and the pane-leave path would have re-saved it on the way out.
-   *
-   * Gating on a REF, not the state, because the two must change in the same tick as the outcome that
-   * decides it — a render behind is a render in which the next keystroke is still being stored.
-   * The in-memory draft is untouched: a false positive costs one draft its ability to survive the OS
-   * killing the PWA, which is a cheap price for never storing a real one.
+   * secret is already in the 48h store — the write-through ran on every keystroke, before any send
+   * was attempted — so `noEchoRef` gates the save AND the pane-leave save below.
    */
-  function updateInput(value: string) {
+  function updateDraft(value: string, nextAttachments: readonly DraftAttachment[]) {
+    const storedAttachments = [...nextAttachments];
     inputValueRef.current = value;
+    attachmentsRef.current = storedAttachments;
     setInput(value);
+    setAttachments(storedAttachments);
     if (noEchoRef.current !== null) return;
-    saveDraft(scope, paneId, value);
+    saveDraft(scope, paneId, value, storedAttachments);
+  }
+
+  function updateInput(value: string) {
+    updateDraft(value, attachmentsRef.current);
+  }
+
+  function updateAttachments(nextAttachments: readonly DraftAttachment[]) {
+    updateDraft(inputValueRef.current, nextAttachments);
   }
 
   /** {@link updateInput} for the appenders, which need the current value to build the next one.
@@ -368,15 +388,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   useEffect(() => {
     const prev = draftPaneRef.current;
     if (prev.paneId === paneId && prev.scopeId === scopeId) return;
-    if (noEchoRef.current === null) saveDraft(prev.scope, prev.paneId, inputValueRef.current);
+    if (noEchoRef.current === null) {
+      saveDraft(prev.scope, prev.paneId, inputValueRef.current, attachmentsRef.current);
+    }
     draftPaneRef.current = { scope, scopeId, paneId };
     const restored = loadDraft(scope, paneId) ?? "";
+    const restoredAttachments = loadDraftAttachments(scope, paneId);
     inputValueRef.current = restored;
+    attachmentsRef.current = restoredAttachments;
     setInput(restored);
+    setAttachments(restoredAttachments);
     noticeNoEchoRef.current(null); // it described the pane we just left
   }, [scope, scopeId, paneId]);
   const [sending, setSending] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [pendingUploads, setPendingUploads] = useState(0);
+  const uploading = pendingUploads > 0;
   // Pending-send preview: set on a successful send, cleared when the mirror catches up (next text
   // update) or after a 6s safety timeout. Shows "You sent: …" so the user knows the message landed.
   const [lastSent, setLastSent] = useState<string | null>(null);
@@ -565,6 +591,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       ? voiceState.caption.text
       : null;
   const displayedInput = voiceCaption === null ? input : input ? `${input}\n${voiceCaption}` : voiceCaption;
+  const hasDraft = input.trim() !== "" || attachments.length > 0;
   useEffect(() => {
     const field = inputRef.current;
     if (field && voiceCaption !== null) field.scrollTop = field.scrollHeight;
@@ -572,12 +599,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   useBusyWhile(recorder.phase === "transcribing");
 
   // Whether the round button at the end of the row is the microphone rather than Send. True only on
-  // an EMPTY box, which is the one state where Send can do nothing anyway; the first character typed
-  // hands the button straight back. `direct.active` keeps it, because there the same button is the
-  // "stop typing into the terminal" control and that must not be displaceable.
-  const micIsPrimary = !voiceEnabled && stt !== null && !direct.active && input.trim() === "";
+  // an EMPTY box with no uploaded files, which is the one state where Send can do nothing anyway.
+  // `direct.active` keeps it, because there the same button is the "stop typing into the terminal"
+  // control and that must not be displaceable.
+  const micIsPrimary = !voiceEnabled && stt !== null && !direct.active && !hasDraft;
   const customVoiceVisible =
-    voiceEnabled && !direct.active && (input.trim() === "" || (voiceState !== null && !appendVoiceActive && !appendMicSelected));
+    voiceEnabled &&
+    !direct.active &&
+    (!hasDraft || (voiceState !== null && input.trim() !== "" && !appendVoiceActive && !appendMicSelected));
 
   /**
    * What happens to a finished transcript.
@@ -599,7 +628,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
    */
   async function acceptTranscript(transcript: string): Promise<boolean> {
     acceptedVoiceCaptionRef.current = transcript;
-    const draftEmpty = inputValueRef.current.trim() === "";
+    const draftEmpty = inputValueRef.current.trim() === "" && attachmentsRef.current.length === 0;
     const mayHandsFree =
       handsFree && draftEmpty && noEchoRef.current === null && !locked && !dialogPresent;
     if (mayHandsFree) return send(transcript, false);
@@ -709,12 +738,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   // Block a self-update reload while there's unsent work here: real typed text OR an upload in flight.
   // The composer input is phone-owned, so any non-empty value is genuine unsent work. A terminal draft
-  // is SAFE on its own — it lives on the "❯" line and its preview re-derives after a reload — so it
-  // never holds. When held, the self-updater shows the "tap to update" banner instead and updates once
-  // the hold clears (see lib/self-update.ts). Keyed by pane so panes don't clobber each other's hold.
   useHoldReload(
     `composer:${paneId}`,
-    input.trim() !== "" || direct.active || direct.value !== "" || direct.busy || uploading,
+    hasDraft || direct.active || direct.value !== "" || direct.busy || uploading,
   );
 
   // Preview appearance latch. A STABLE, non-echo, not-already-handled draft flips the preview on —
@@ -833,8 +859,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // submit key went out). The quick-reply grid consumes the verdict to drive its own ✓ and to decide
   // whether to close its dock, so every early return below has to answer honestly.
   async function send(value: string, isDraft: boolean, force = false): Promise<boolean> {
-    const t = value.trim();
-    if (!t || locked || sending) return false;
+    const draftAttachments = isDraft ? attachmentsRef.current : [];
+    const message = isDraft ? attachmentMessage(value, draftAttachments) : value;
+    const t = message.trim();
+    if (!t || locked || sending || uploading) return false;
     // A dialog on screen owns the TUI's keyboard: our text is swallowed and the submit key ANSWERS
     // the dialog, approving whatever option was highlighted (#34). Refuse BEFORE the destructive
     // pre-clear sweep below — those ctrl+k/Backspaces would land in the dialog too. The input is
@@ -932,9 +960,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         },
       });
       if (res.status === "sent") {
-        // Phone-owned input — cleared once the reply is on its way. Via updateInput, so the stored
-        // draft goes with it (an empty value removes the key).
-        if (isDraft) updateInput("");
+        // Phone-owned draft state — clear text and metadata only after the guarded reply is verified.
+        // Quick replies and palette commands pass `isDraft=false`, so they never consume attachments.
+        if (isDraft) updateDraft("", []);
         // Remember what/when we sent, so the next few polls recognise this text echoing on the "❯"
         // line as our own in-flight reply rather than a stranded draft (suppressEcho above).
         lastSentRef.current = { text: t, at: Date.now() };
@@ -1002,6 +1030,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // "Really send?" state instead of sending; the confirming second tap goes through. Non-destructive
   // input sends immediately (and any stray armed state is cleared).
   function onSendClick() {
+    if (!hasDraft || uploading) return;
     // An armed override takes precedence: this tap IS the deliberate "type anyway", so it skips the
     // destructive re-confirm (already answered on the tap that got blocked) and the pre-flight.
     if (forceConfirm.pending === "force") {
@@ -1033,6 +1062,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     !direct.active &&
     !locked &&
     !sending &&
+    !uploading &&
     !dialogPresent &&
     !confirmingSend &&
     !forcingSend;
@@ -1217,40 +1247,71 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     focusInputEnd();
   }
 
-  // Upload an attachment; on success append its host path to the composer so the user can add
-  // context. Shared by the file picker and clipboard paste.
+  // Upload an attachment; successful uploads become metadata cards while the returned host path is
+  // kept only for the guarded message sent later. Shared by the file picker and clipboard paste.
   //
   // The two local refusals below are an ECONOMY, never a gate: the bridge asks the same two
   // questions again on arrival, and its answer is the one that counts (it can read the bytes, which
   // is the only way to catch a binary wearing a `.md` name). Spending a phone's uplink on 40 MB to
   // be told 10 is the limit is the thing worth not doing.
-  async function uploadFile(file: File) {
-    if (locked) return;
+  const pastedTextSequenceRef = useRef(0);
+  async function uploadFile(
+    file: File,
+    pasteFallback?: {
+      text: string;
+      original: string;
+      start: number;
+      end: number;
+      paneKey: string;
+    },
+  ) {
+    if (locked || sending) return;
+    const uploadPaneKey = paneKeyRef.current;
+    const restorePastedText = () => {
+      if (!pasteFallback || paneKeyRef.current !== uploadPaneKey) return;
+      const current = inputValueRef.current;
+      const restored =
+        current === pasteFallback.original
+          ? `${current.slice(0, pasteFallback.start)}${pasteFallback.text}${current.slice(pasteFallback.end)}`
+          : current === ""
+            ? pasteFallback.text
+            : `${current}\n${pasteFallback.text}`;
+      updateInput(restored);
+      focusInputEnd();
+    };
     const refusal = rejectAttachment(file, limits);
     if (refusal === "tooLarge") {
       setStatus(translate("composer.upload.tooLarge", { max: limitMb(limits) }), "error");
+      restorePastedText();
       return;
     }
     if (refusal === "badType") {
       setStatus(translate("composer.upload.badType", { name: file.name }), "error");
+      restorePastedText();
       return;
     }
-    setUploading(true);
+    setPendingUploads((count) => count + 1);
     try {
       const res = await api.uploadFile(paneId, file, scope);
+      if (paneKeyRef.current !== uploadPaneKey) return;
       if (res.ok) {
-        const path = res.path;
+        updateAttachments([
+          ...attachmentsRef.current,
+          { path: res.path, name: file.name, size: file.size },
+        ]);
         direct.deactivateSilently();
-        updateInputFrom((prev) => (prev.trim() ? `${prev.trimEnd()} ${path}` : path));
         focusInputEnd();
         setStatus(translate("composer.upload.success"), "success");
       } else {
         setStatus(describeApiError(res), "error");
+        restorePastedText();
       }
     } catch (err) {
+      if (paneKeyRef.current !== uploadPaneKey) return;
       setStatus(describeThrownError(err), "error");
+      restorePastedText();
     } finally {
-      setUploading(false);
+      setPendingUploads((count) => Math.max(0, count - 1));
     }
   }
 
@@ -1261,14 +1322,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     await uploadFile(file);
   }
 
-  // Paste a file straight from the clipboard (e.g. a screenshot) the same way the picker does.
-  //
-  // A PLAIN TEXT PASTE STILL FALLS THROUGH UNTOUCHED, and that stays true now that text files are
-  // attachable: the branch turns on `item.kind === "file"`, so pasted PROSE is prose and only a
-  // pasted FILE becomes an upload. Copying a `.md` in a file manager produces the second; selecting
-  // its contents in an editor produces the first, and neither has become the other.
+  // A file in the clipboard is uploaded as-is. Large plain text is converted to a .txt attachment;
+  // short prose still uses the browser's native paste path.
   function onPasteFile(e: ClipboardEvent<HTMLTextAreaElement>) {
-    if (locked || direct.active) return;
+    if (locked || direct.active || sending) return;
     const items = e.clipboardData.items;
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -1280,6 +1337,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       void uploadFile(file);
       return;
     }
+    const text = e.clipboardData.getData("text/plain");
+    if (!shouldAttachPaste(text)) return;
+    e.preventDefault();
+    const current = inputValueRef.current;
+    const field = inputRef.current;
+    const start = field?.selectionStart ?? current.length;
+    const end = field?.selectionEnd ?? start;
+    const sequence = ++pastedTextSequenceRef.current;
+    const file = new File([text], `pasted-text-${Date.now()}-${sequence}.txt`, { type: "text/plain" });
+    void uploadFile(file, { text, original: current, start, end, paneKey: paneKeyRef.current });
+  }
+  function removeAttachment(index: number) {
+    if (locked || direct.active || sending) return;
+    updateAttachments(attachmentsRef.current.filter((_, current) => current !== index));
   }
 
   return (
@@ -1314,7 +1385,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
         {/* File input stays mounted here (not inside the keyboard-only key row) so the picker
             callback survives the keyboard collapsing. Attach fires it from the reply-input row
-            below (always visible, not gated behind the keyboard-open quick keys); structural commands
             (New tab/space, Kill) and Stop (Esc, in the Keys dock) live elsewhere. */}
         {/* TWO inputs, because a phone's picker cannot be asked both questions at once. The
             camera roll is offered only when EVERY entry in `accept` maps to a gallery, so the
@@ -1356,7 +1426,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               onClose={closeDrawer}
               agent={agent}
               isShell={isShell}
-              disabled={locked || sending}
+              disabled={locked || sending || uploading}
             />
           </ComposerDock>
         )}
@@ -1694,7 +1764,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <RecordingStrip
               elapsed={recorder.elapsedLabel}
               transcribing={recorder.phase === "transcribing"}
-              handsFree={handsFree && input.trim() === "" && noEcho === null}
+              handsFree={handsFree && input.trim() === "" && attachments.length === 0 && noEcho === null}
               onStop={recorder.stopAndSend}
               onDiscard={recorder.discard}
             />
@@ -1711,6 +1781,33 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             {translate("composer.draft.tooLong")}
           </p>
         </Collapse>
+        {attachments.length > 0 && (
+          <div data-slot="composer-attachments" className="mb-2 flex flex-wrap gap-1.5">
+            {attachments.map((attachment, index) => (
+              <div
+                key={`${attachment.path}\0${attachment.name}\0${index}`}
+                className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 text-xs"
+              >
+                <FileText aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 max-w-[60vw] truncate" title={attachment.name}>
+                  {attachment.name}
+                </span>
+                <span className="shrink-0 text-muted-foreground">{attachmentSizeLabel(attachment.size)}</span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-11 shrink-0 text-muted-foreground"
+                  disabled={locked || direct.active || sending}
+                  aria-label={translate("keys.queue.removeAria", { label: attachment.name })}
+                  onClick={() => removeAttachment(index)}
+                >
+                  <X aria-hidden="true" className="size-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
         {/* gap-3, not gap-2: with the attach button moved inside the field this row is only the
             field and Send, and the old spacing left them looking joined. */}
         <div className="flex items-end gap-3">
@@ -1847,7 +1944,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 // and a trigger that went dark under its own open menu would waste that.
                 (pressed || picking) && "scale-95 bg-primary text-primary-foreground duration-0",
               )}
-              disabled={uploading || locked || direct.active}
+              disabled={uploading || locked || direct.active || sending}
               onPointerDown={(e) => e.preventDefault()}
               onClick={() => {
                 echoAttachPress();
@@ -1871,7 +1968,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               paneId={paneId}
               session={scope?.session}
               showControl={customVoiceVisible}
-              disabled={locked || dialogPresent || sending}
+              disabled={locked || dialogPresent || sending || uploading}
               recordingMode={voiceRecordingMode}
               replySpeechSupported={replySpeechSupported}
               onTranscript={handleVoiceTranscript}
@@ -1895,7 +1992,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               variant="destructive"
               className="h-11 shrink-0 rounded-md px-4 text-sm font-semibold"
               onClick={onSendClick}
-              disabled={locked || !input.trim() || sending}
+              disabled={locked || !hasDraft || sending || uploading}
               aria-label={translate("composer.send.typeAnyway")}
             >
               {translate("composer.send.typeAnyway")}
@@ -1905,7 +2002,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               variant="destructive"
               className="h-11 shrink-0 rounded-md px-4 text-sm font-semibold"
               onClick={onSendClick}
-              disabled={locked || !input.trim() || sending}
+              disabled={locked || !hasDraft || sending || uploading}
               aria-label={translate("composer.send.reallySend")}
             >
               {translate("composer.send.reallySend")}
@@ -1923,7 +2020,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               size="icon"
               variant={recorder.busy ? "destructive" : "default"}
               className="size-11 shrink-0 rounded-full"
-              disabled={!stt.available || locked || sending || recorder.phase === "transcribing"}
+              disabled={!stt.available || locked || sending || uploading || recorder.phase === "transcribing"}
               aria-pressed={recorder.busy}
               // The bridge's own words when it cannot serve — the operator's next move is on the
               // host, so the button says what is wrong rather than just refusing.
@@ -1959,7 +2056,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               onKeyDown={handleAppendKeyDown}
               onKeyUp={handleAppendKeyUp}
               onBlur={handleAppendBlur}
-              disabled={locked || sending}
+              disabled={locked || sending || uploading}
               aria-label={
                 direct.active
                   ? translate("composer.send.stopTypingAria")
