@@ -6,6 +6,7 @@ import { BottomSheet } from "@/components/ui/sheet";
 import { AgentIcon } from "@/components/agent-icon";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
 import { commandsFor, type AgentCommand } from "@/lib/agent-commands";
+import { canonicalAgent } from "@/lib/operator-scope";
 import type { OperatorCommand } from "@/lib/types";
 import { t } from "@/lib/i18n";
 import { useLocale } from "@/hooks/use-locale";
@@ -31,6 +32,7 @@ export function CommandPalette({
   onSubmit,
 }: CommandPaletteProps) {
   useLocale();
+  const isOmp = agent ? canonicalAgent(agent.toLowerCase().trim()) === "omp" : false;
   const all = commandsFor(agent, mine);
   const [query, setQuery] = useState("");
   const { pending, confirm, reset } = usePendingConfirm();

@@ -564,6 +564,21 @@ export interface PaneReadResponse {
   /** Herdr's monotonic pane revision — passed through for the client's prompt-select race guard. */
   revision: number;
 }
+/** One slash command currently available in a live OMP pane. */
+export interface OmpCommand {
+  command: string;
+  description: string;
+  takesArg: boolean;
+  argHint: string;
+  common: boolean;
+  dangerous: boolean;
+}
+
+/** GET /api/pane/:id/commands — OMP's current interactive and cwd-specific command registry. */
+export interface OmpCommandsResponse {
+  version: string;
+  commands: OmpCommand[];
+}
 
 /**
  * GET /api/pane/:id/history — real conversation history for a pane, read from the agent's own

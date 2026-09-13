@@ -59,6 +59,7 @@ let currentStt: SttCapability | null = null;
 // `null` until a read succeeds AND on every bridge older than the field. The two are the same value
 // on purpose: both mean "nothing said otherwise", and lib/attachments.ts answers both with the
 // contract that shipped before attachments existed — 10 MB, images only.
+let currentVoice = false;
 let currentUpload: UploadCapability | null = null;
 let inflight: Promise<void> | null = null;
 let loaded = false;
@@ -86,6 +87,7 @@ export function loadOperatorCommands(): Promise<void> {
       applyOperatorFonts(currentFonts, designPrefs().font);
       currentMux = cfg.mux ?? null;
       currentStt = cfg.stt ?? null;
+      currentVoice = cfg.voice === true;
       currentUpload = cfg.upload ?? null;
       loaded = true;
       emit();
@@ -293,6 +295,7 @@ export function __resetOperatorCommands(): void {
   currentFonts = [];
   currentMux = null;
   currentStt = null;
+  currentVoice = false;
   currentUpload = null;
   inflight = null;
   loaded = false;
