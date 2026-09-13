@@ -11,12 +11,10 @@
 //     `HostHealth`, `DevicesData` and `HomeData` are all imported and annotated, so a wire change
 //     breaks this file at `tsc` rather than at a confusing render.
 //
-//  2. **It EXTENDS `@/test/handlers`, it does not replace it.** A card that wants to show exactly
-//     what a test asserts imports the test suite's fixtures directly from `@/test/handlers`, never
-//     through this file — this file does not re-export them, so a name added here can be trusted to
-//     have no bearing on what a unit test's own fixtures assert. The richer set below exists
-//     alongside them because a two-agent herd cannot show a four-section triage, a nine-machine
-//     formation, or a "needs you" count that means anything.
+//  2. **It EXTENDS `@/test/handlers`, it does not replace it.** The test suite's fixtures are still
+//     re-exported below and still used where a card wants to show exactly what a test asserts. The
+//     richer set lives alongside them because a two-agent herd cannot show a four-section triage,
+//     a nine-machine formation, or a "needs you" count that means anything.
 //
 //  3. **ONE clock anchor, {@link TS}, and every timestamp is expressed as an offset from it.** No
 //     fixture calls `Date.now()` for itself. That matters twice over: the crew surfaces date their
@@ -49,6 +47,14 @@ import type {
 // escape sequences and all, rather than a re-typed approximation of one.
 import claudePermissionBash from "@/fixtures/panes/claude--permission-bash.txt?raw";
 import claudeWorking from "@/fixtures/panes/claude--working.txt?raw";
+
+export {
+  fixtureAgents,
+  fixtureCrewStatus,
+  fixtureServers,
+  fixtureSessions,
+  fixtureShellPanes,
+} from "@/test/handlers";
 
 // ── The one clock ────────────────────────────────────────────────────────────────────────────────
 
@@ -151,39 +157,6 @@ export const tabs: TabView[] = [
   { tabId: "w4:t1", workspaceId: "w4", number: 1, label: "post/collie-launch", focused: false, paneCount: 1 },
   { tabId: "w4:t2", workspaceId: "w4", number: 2, label: "seo-pass", focused: false, paneCount: 1 },
 ];
-
-/**
- * A workspace with far more tabs than fit a 390px strip — the fixture for the "reveal the active
- * tab" playground card and its browser case. Sixteen short, realistic tab names; the ACTIVE one
- * (`aria-current`) is the 14th, deep enough into the row that it starts fully off-screen on mount.
- */
-export const manyTabsWorkspaceId = "w5";
-export const manyTabsActiveTabId = "w5:t14";
-export const manyTabs: TabView[] = [
-  "shell",
-  "docs",
-  "fix-deploy",
-  "migrate-users",
-  "billing-webhooks",
-  "flake-bump",
-  "hosts",
-  "seo-pass",
-  "post/collie-launch",
-  "feat/crew-overview",
-  "nixcfg",
-  "notes",
-  "scratch",
-  "fix-dirty-refusal",
-  "release-notes",
-  "cleanup",
-].map((label, i) => ({
-  tabId: `w5:t${i + 1}`,
-  workspaceId: manyTabsWorkspaceId,
-  number: i + 1,
-  label,
-  focused: false,
-  paneCount: 1,
-}));
 
 // ── The herd ─────────────────────────────────────────────────────────────────────────────────────
 //
@@ -468,7 +441,7 @@ export const sessionsSolo: SessionSummary[] = [
 
 /** The same three on the lead, plus one per peer. Every machine calls its primary "default". */
 export const sessionsCrew: SessionSummary[] = [
-  ...sessionsSolo.map((s) => ({ ...s, host: "lodge" })),
+  ...sessionsSolo.map((s) => ({ ...s, host: "bluefin" })),
   { name: "default", isPrimary: true, reachable: true, agents: 3, working: 1, blocked: 1, host: "workshop" },
   { name: "default", isPrimary: true, reachable: true, agents: 1, working: 0, blocked: 0, host: "attic" },
   { name: "default", isPrimary: true, reachable: false, agents: 0, working: 0, blocked: 0, host: "cellar" },
@@ -480,8 +453,8 @@ export const sessionsCrew: SessionSummary[] = [
 // the LEAD on receipt, so it is comparable to `ts` and to nothing else (CREW_PROTOCOL.md §10.2).
 
 const lead: ServerSummary = {
-  id: "lodge",
-  name: "lodge",
+  id: "bluefin",
+  name: "bluefin",
   isLead: true,
   reachable: true,
   protocol: "ok",
@@ -584,8 +557,8 @@ function member(
 }
 
 const selfMember: CrewMemberStatus = {
-  id: "lodge",
-  name: "lodge",
+  id: "bluefin",
+  name: "bluefin",
   isLead: true,
   health: "reachable",
   lastSeenAt: TS - 2 * SEC,
@@ -595,11 +568,11 @@ const selfMember: CrewMemberStatus = {
 };
 
 const crewMeta = { id: "pk1", name: "kennel", secretGeneration: 4, rotatedAt: TS - 9 * DAY };
-const crewSelf = { id: "lodge", name: "lodge", version: LEAD_VERSION };
+const crewSelf = { id: "bluefin", name: "bluefin", version: LEAD_VERSION };
 
 /** One machine, leading nobody but itself — the smallest census a lead can serve. */
 export const censusSolo: CrewStatusResponse = {
-  crew: { ...crewMeta, name: "lodge" },
+  crew: { ...crewMeta, name: "bluefin" },
   self: crewSelf,
   deputy: null,
   members: [selfMember],
@@ -729,19 +702,19 @@ export function onHost(pane: AgentView, host: string): AgentView {
 
 /**
  * Which machine each herd row lands on. Written out rather than round-robined so the counts are
- * CHOSEN: rows 0 and 1 are the first two blocked panes and land on `lodge` and `workshop`, which
+ * CHOSEN: rows 0 and 1 are the first two blocked panes and land on `bluefin` and `workshop`, which
  * is what gives exactly two machines a non-zero "needs you" number in the server switcher.
  */
 const CREW_HOST_BY_INDEX: readonly string[] = [
-  "lodge", // needs-you #1
+  "bluefin", // needs-you #1
   "workshop", // needs-you #2
-  "lodge", // needs-you #3
-  "lodge", // ready · unseen
+  "bluefin", // needs-you #3
+  "bluefin", // ready · unseen
   "attic", // ready · unseen
-  "lodge", // working
+  "bluefin", // working
   "workshop", // working
   "attic", // working
-  "lodge", // working
+  "bluefin", // working
   "workshop", // working
 ];
 
@@ -753,7 +726,7 @@ const CREW_HOST_BY_INDEX: readonly string[] = [
 export const homeCrew: HomeData = {
   ...homeSolo,
   agents: herd.map((a, i) => onHost(a, CREW_HOST_BY_INDEX[i % CREW_HOST_BY_INDEX.length]!)),
-  shellPanes: shells.map((p) => onHost(p, "lodge")),
+  shellPanes: shells.map((p) => onHost(p, "bluefin")),
   sessions: sessionsCrew,
   servers: rosterFive,
 };
@@ -832,7 +805,7 @@ export const updatePeersFollowing: UpdateInfo = {
   run: {
     ...RUN_BASE,
     state: "done",
-    peers: [{ name: "workshop", state: "restarting", version: "0.31.0" }],
+    peers: [{ name: "minibuch", state: "restarting", version: "0.31.0" }],
   },
 };
 
@@ -845,7 +818,7 @@ export const updatePeerRolledBack: UpdateInfo = {
     state: "done",
     peers: [
       {
-        name: "workshop",
+        name: "minibuch",
         state: "rolled-back",
         version: "0.31.0",
         reason: "health gate timed out after three attempts on the standby door",
@@ -860,7 +833,7 @@ export const updateCrewLevel: UpdateInfo = {
   run: {
     ...RUN_BASE,
     state: "done",
-    peers: [{ name: "workshop", state: "done", version: "0.32.1" }],
+    peers: [{ name: "minibuch", state: "done", version: "0.32.1" }],
   },
 };
 
@@ -941,7 +914,7 @@ export const hostIncompatible: HostHealth = {
  *  bare shell has no grammar to pin, so there is nothing on disk to reuse. Real ANSI, hand-written. */
 const ESC = "";
 const shellPaneText = [
-  `${ESC}[1;32myou@lodge${ESC}[0m:${ESC}[1;34m~/src/collie${ESC}[0m$ bun run test`,
+  `${ESC}[1;32myou@bluefin${ESC}[0m:${ESC}[1;34m~/src/collie${ESC}[0m$ bun run test`,
   "",
   `${ESC}[32m✓${ESC}[0m web/src/lib/triage.test.ts (14 tests) 41ms`,
   `${ESC}[32m✓${ESC}[0m web/src/lib/host-health.test.ts (22 tests) 63ms`,
@@ -952,7 +925,7 @@ const shellPaneText = [
   ` Test Files  ${ESC}[31m1 failed${ESC}[0m | ${ESC}[32m3 passed${ESC}[0m (4)`,
   `      Tests  ${ESC}[31m1 failed${ESC}[0m | ${ESC}[32m55 passed${ESC}[0m (56)`,
   "",
-  `${ESC}[1;32myou@lodge${ESC}[0m:${ESC}[1;34m~/src/collie${ESC}[0m$ `,
+  `${ESC}[1;32myou@bluefin${ESC}[0m:${ESC}[1;34m~/src/collie${ESC}[0m$ `,
 ].join("\n");
 
 /** A pane, and the screen it is showing. */

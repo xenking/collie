@@ -142,6 +142,7 @@ function toView(pane: MuxPane, kind: "agent" | "shell"): AgentView {
   // How the agent named its session — SERVER-SIDE ONLY (stripped by toPaneWire). Whether a ref is
   // meaningful is the journal adapter's call; absent simply means "no history for this pane".
   if (pane.agentSession) view.agentSession = pane.agentSession;
+  if (pane.sleeping) view.sleeping = true;
   // The harness that wrote that ref, when the pane itself no longer names one — a dead agent's pane
   // reads as a shell, and its transcript is still readable. Server-side only, like the ref itself.
   if (pane.sessionAgent) view.sessionAgent = pane.sessionAgent;

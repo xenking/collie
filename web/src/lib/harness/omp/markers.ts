@@ -176,13 +176,12 @@ export function draftGhost(line: StyledLine, start: number, end: number): string
   );
 }
 
-/** The trailing ghost in either boxed, borderless, or wrapped composer rows. */
+/** The boxed composer's specialization: locate its draft span, then apply the shared ghost rule. */
 export function composerGhost(line: StyledLine, continuation = false): string {
   const full = lineText(line);
   const inner = continuation ? rstrip(full.slice(2)) : composerPromptText(full);
   if (inner === null || inner.length === 0) return "";
-  const prefix = continuation ? "  " : isBorderlessPrompt(full) ? "› " : BOTTOM_OPEN;
-  const start = prefix.length;
+  const start = continuation ? 2 : isBorderlessPrompt(full) ? 2 : BOTTOM_OPEN.length;
   return draftGhost(line, start, start + inner.length);
 }
 
@@ -200,14 +199,13 @@ export function composerContText(text: string): string | null {
 }
 
 // A row that OPENS A BOX at column 0 — the single shape every widget omp can put in front of the
-// composer is built out of. Every one of the fourteen modal captures in this corpus (`/model`,
-// `/settings`, `/resume` and their moved-selection twins; the five Ask-tool screens; the three
-// tool-approval screens) draws a full box whose every row starts here: `╭` for the header, `│` for a
-// body row, `├` for an internal rule, `╰` for the footer. So does the welcome panel, the tool-result
-// box, and the `╭─── ✘ Error: … ───╮` banner. omp indents ordinary transcript by one column and
-// paints the slash palette's rows with a `❯ ` marker or a two-space gutter, so column 0 carries a
-// box-drawing glyph only when omp is drawing a BOX there — which is why this can be a glyph
-// predicate rather than a content match.
+// composer is built out of. Every one of the eleven modal captures in this corpus (`/model`,
+// `/settings`, `/resume` and their moved-selection twins; the five Ask-tool screens) draws a full
+// box whose every row starts here: `╭` for the header, `│` for a body row, `├` for an internal rule,
+// `╰` for the footer. So does the welcome panel, the tool-result box, and the `╭─── ✘ Error: … ───╮`
+// banner. omp indents ordinary transcript by one column and paints the slash palette's rows with a
+// `❯ ` marker or a two-space gutter, so column 0 carries a box-drawing glyph only when omp is drawing
+// a BOX there — which is why this can be a glyph predicate rather than a content match.
 //
 // The whole Unicode Box Drawing block is claimed, not just omp's four corners: this predicate's job
 // is to REJECT, so being generous is the fail-closed direction (a rejected row costs a null, i.e. a

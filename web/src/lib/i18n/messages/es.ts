@@ -348,6 +348,7 @@ export const es: Dictionary = {
   "paneActions.status.closeFailed": "Error al cerrar",
 
   // --- keys (the inline Keys tray + its staging strip) ---
+  "keys.tab.keys": "Teclas",
   "keys.presets.label": "Preajustes",
   "keys.fkeys.label": "Teclas de función",
   "keys.confirm.label": "Confirmar",
@@ -591,7 +592,6 @@ export const es: Dictionary = {
 
   // --- pwa (self-update banner) ---
   "pwa.updateAvailable": "Nueva versión. Toca para actualizar.",
-  "pwa.updateInstalling": "Downloading the new version…",
 
   // --- history (pane transcript route) ---
   "history.unavailable.disabled": "El historial de transcripciones está deshabilitado en este bridge (COLLIE_TRANSCRIPT).",
@@ -906,10 +906,9 @@ export const es: Dictionary = {
   "updateRibbon.peerFailed": "Fallo en {name}: {reason}.",
   "updateRibbon.seeUpdates": "Ver Actualizaciones.",
   "updateRibbon.linkChangeShort": "Cambia el enlace del equipo.",
-  "updateRibbon.available": "Collie {version} disponible.",
+  "updateRibbon.available": "Collie {version} disponible. Actualiza.",
   "updateRibbon.availablePackaged": "Collie {version} disponible vía {manager}.",
   "updateRibbon.availablePackagedUnnamed": "Collie {version} disponible.",
-  "updateRibbon.view": "Ver",
   "updateRibbon.dismiss": "Descartar esta versión",
   "updateRibbon.hideNotice": "Ocultar este aviso",
 };

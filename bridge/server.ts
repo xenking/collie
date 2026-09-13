@@ -9,7 +9,8 @@ import { isLoopbackBindHost, type Config } from "./config.ts";
 import { apiError, type ApiErrorBody, type ApiErrorDetail, type ErrorCode } from "./error-codes.ts";
 import { MUX_CAPABILITIES, type MuxCapability, type MuxCapabilityDeclaration } from "./mux/capabilities.ts";
 import type { MuxAdapter, MuxAck, MuxGrid } from "./mux/types.ts";
-import { computeEtag, gzipJsonResponse, notModified, wantsGzip } from "./http-cache.ts";
+import { computeEtag, gzipJsonResponse, notModified } from "./http-cache.ts";
+import { discoverOmpCommands } from "./omp-commands.ts";
 import { pluginRoot } from "./root.ts";
 import type { NotifyPrefs, NotifyPrefsStore } from "./notify-prefs.ts";
 import { createOperatorCommands } from "./operator-commands.ts";
@@ -75,6 +76,7 @@ import type {
   CrewStatusResponse,
   Launcher,
   LaunchersResponse,
+  OmpCommandsResponse,
   PaneHistoryResponse,
   PaneReadResponse,
   PaneWire,
@@ -170,7 +172,7 @@ export function isLoopbackPeer(address: string | null | undefined): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
 }
 
-const PANE_ROUTE = /^\/api\/pane\/([^/]+)(?:\/(reply|keys|upload|close|rename|history|focus))?$/;
+const PANE_ROUTE = /^\/api\/pane\/([^/]+)(?:\/(reply|keys|upload|close|rename|history|focus|commands))?$/;
 
 /**
  * A pairing claim's refusal, as an error code.
@@ -247,12 +249,12 @@ export const SEEN_HEADER = "x-collie-seen";
  * same-origin `fetch` sets it freely.
  *
  * Write actions (reply/keys/upload/close/rename) need no header: they already cleared
- * `guard(…, "write")`, which requires an `Origin`. `history` is a read despite being an action
- * segment, so it needs the header like any other read.
+ * `guard(…, "write")`, which requires an `Origin`. `history` and `commands` are reads despite being
+ * action segments, so they need the header like any other read.
  */
 export function marksPaneSeen(req: Request, action: string | undefined): boolean {
   if (req.headers.get(SEEN_HEADER) !== null) return true;
-  return action !== undefined && action !== "history";
+  return action !== undefined && action !== "history" && action !== "commands";
 }
 
 /**
@@ -522,14 +524,14 @@ export function bridgeConfigBody(opts: {
    * configured none ships the same payload as before, the same rule `mode` follows.
    */
   stt?: SttCapability;
+  /** Realtime Soniox voice conversation path. Omitted when not configured. */
+  voice?: boolean;
   /**
    * What this host accepts as an attachment. Optional here for the reason `mux` is — the crew-mode
    * assertions build this body by hand and are about the crew — and always passed by the real
    * handler, so an absent key on the wire means an older bridge and nothing else.
    */
   upload?: UploadCapability;
-  /** Realtime Soniox voice conversation path. Omitted when not configured. */
-  voice?: boolean;
 }): BridgeConfig {
   const mode = modeForWire(opts.mode);
   const mine = opts.operatorCommands ?? [];
@@ -557,10 +559,10 @@ export function bridgeConfigBody(opts: {
   // Appended after the mux block, and omit-when-absent for the reason `mode` is: no key means no
   // microphone, which is precisely true of a collie with no provider configured.
   if (opts.stt !== undefined) wire.stt = opts.stt;
+  if (opts.voice) wire.voice = true;
   // Same omit-when-absent rule, and the same reading on the other end: no key is an older bridge,
   // which the phone falls back to the pre-attachment contract for (images, 10 MB).
   if (opts.upload !== undefined) wire.upload = opts.upload;
-  if (opts.voice) wire.voice = true;
   return wire;
 }
 
@@ -1049,8 +1051,8 @@ export function startServer(opts: {
       const action = paneMatch[2];
       // Reading a pane is allowed for any access-gated client; every action (reply/keys/upload/
       // close) types into or restructures a terminal, so it additionally needs an authorised device.
-      // `history` is a READ despite being an action segment — it only ever reads a log off disk.
-      const isRead = !action || action === "history";
+      // `history` and `commands` are READs despite being action segments — they only read host state.
+      const isRead = !action || action === "history" || action === "commands";
       const denied = caller.gate(isRead ? "read" : "write");
       if (denied) return denied;
       const rt = await caller.resolve();
@@ -1086,6 +1088,8 @@ export function startServer(opts: {
       if (!action && req.method === "GET") return readPane(herdr, cfg, paneId, url, req);
       if (action === "history" && req.method === "GET")
         return paneHistory(cfg, journals, transcripts, rt.engine, paneId, url, req);
+      if (action === "commands" && req.method === "GET")
+        return paneCommands(rt.engine, paneId, req);
       if (action === "reply" && req.method === "POST") return replyPane(herdr, cfg, paneId, req, audit_, device, session);
       if (action === "keys" && req.method === "POST") return keysPane(herdr, cfg, paneId, req, audit_, device, session);
       if (action === "upload" && req.method === "POST") return uploadPane(cfg, paneId, req, audit_, device, session);
@@ -1385,11 +1389,34 @@ export function startServer(opts: {
         const rt = await target();
         if (rt instanceof Response) return rt;
         const paneId = url.searchParams.get("pane");
-        const pane = paneId ? rt.engine.current().agents.find((candidate) => candidate.paneId === paneId) : undefined;
+        let pane = paneId
+          ? rt.engine.current().agents.find((candidate) => candidate.paneId === paneId)
+          : undefined;
         if (!paneId || !pane) return text("voice requires a live pane", 409);
-        const ompSessionFile = pane.agent === "omp" && pane.agentSession?.kind === "path"
+        const waking = pane.sleeping === true;
+        if (waking) {
+          const sent = await rt.herdr.sendKeys(paneId, ["Enter"]);
+          if (!sent.ok) return text(`voice wake failed: ${sent.detail}`, 409);
+          const deadline = Date.now() + 15_000;
+          while (Date.now() < deadline) {
+            try {
+              await rt.herdr.refresh();
+              rt.engine.pokeNow();
+            } catch {
+              // Keep the bounded wake wait; the next poll may recover the adapter.
+            }
+            pane = rt.engine.current().agents.find((candidate) => candidate.paneId === paneId);
+            if (pane && pane.agent === "omp" && pane.agentSession?.kind === "path") break;
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+        }
+        pane = paneId
+          ? rt.engine.current().agents.find((candidate) => candidate.paneId === paneId)
+          : undefined;
+        const ompSessionFile = pane?.agent === "omp" && pane.agentSession?.kind === "path"
           ? pane.agentSession.value
           : null;
+        if (waking && ompSessionFile === null) return text("voice wake timed out", 409);
         // NUL cannot occur in a real session path; the JSON tuple makes the synthetic namespace unambiguous.
         const sessionFile = ompSessionFile ?? `\0collie:voice:${JSON.stringify([rt.name, paneId])}`;
         const upgraded = server.upgrade(req, {
@@ -1530,6 +1557,7 @@ export function startServer(opts: {
             // builds the byte-identical body it always did (CREW_PROTOCOL.md §11).
             muxWire: memberMux ?? undefined,
             stt: sttWire,
+            voice: cfg.sonioxApiKey ? true : undefined,
             // This host's own limits, read from cfg on every request like everything else here.
             // A crew member answers with ITS number, which is the number that will judge the bytes.
             upload: {
@@ -1537,7 +1565,6 @@ export function startServer(opts: {
               imageTypes: [...IMAGE_EXTS],
               textTypes: [...TEXT_EXTS, ...cfg.uploadExtraTypes],
             },
-            voice: cfg.sonioxApiKey ? true : undefined,
           }),
           req.headers.get("accept-encoding"),
         );
@@ -2001,7 +2028,7 @@ export function startServer(opts: {
       if (isReservedAuthPath(pathname)) return reservedAuthPlaceholder();
 
       // ── Static PWA (with SPA fallback) ───────────────────────────────────
-      return serveStatic(pathname, req.headers.get("accept-encoding"));
+      return serveStatic(pathname);
     },
   });
 
@@ -2117,6 +2144,21 @@ async function readPane(
     );
   } catch (err) {
     return text(`${herdr.mux} read failed: ${errorText(err)}`, 502);
+  }
+}
+
+/** GET /api/pane/:id/commands — live OMP commands for the pane's current cwd, never its TUI. */
+async function paneCommands(engine: StateEngine, paneId: string, req: Request): Promise<Response> {
+  const { agents, shellPanes } = engine.current();
+  const pane = agents.find((candidate) => candidate.paneId === paneId) ??
+    shellPanes.find((candidate) => candidate.paneId === paneId);
+  const accept = req.headers.get("accept-encoding");
+  if (!pane) return jsonError({ error: "pane not found" }, 404, accept);
+  if (pane.agent !== "omp") return jsonError({ error: "commands require a live OMP pane" }, 409, accept);
+  try {
+    return json((await discoverOmpCommands(pane.cwd)) satisfies OmpCommandsResponse, accept);
+  } catch (err) {
+    return jsonError({ error: `OMP command discovery failed: ${errorText(err)}` }, 502, accept);
   }
 }
 
@@ -3855,12 +3897,8 @@ behind your own reverse proxy</em> in the README.</p>
   );
 }
 
-export async function serveStatic(
-  pathname: string,
-  acceptEncoding: string | null,
-  webDir: string = WEB_DIR,
-): Promise<Response> {
-  const resolved = resolveStaticPath(pathname, webDir);
+async function serveStatic(pathname: string): Promise<Response> {
+  const resolved = resolveStaticPath(pathname);
   if (!resolved) return text("forbidden", 403);
   let { rel, full } = resolved;
 
@@ -3869,7 +3907,7 @@ export async function serveStatic(
     // SPA fallback: extension-less paths fall back to index.html; missing assets 404.
     if (extname(rel) === "") {
       rel = "index.html";
-      full = join(webDir, "index.html");
+      full = join(WEB_DIR, "index.html");
       file = Bun.file(full);
       if (!(await file.exists())) {
         return text("frontend not built — run `bun run build` in web/", 503);
@@ -3887,107 +3925,7 @@ export async function serveStatic(
   };
   if (ext === ".html") headers["content-security-policy"] = CSP;
   if (rel === "sw.js") headers["service-worker-allowed"] = "/";
-
-  const gz = await gzippedStatic(file, full, ext, acceptEncoding);
-  if (gz === null) return secure(new Response(file, { headers }));
-  headers["content-encoding"] = "gzip";
-  headers["vary"] = "accept-encoding";
-  // Stated rather than left to the runtime, because the length a client must read is the
-  // COMPRESSED one; a length copied from the file on disk would hang the download.
-  headers["content-length"] = String(gz.byteLength);
-  return secure(new Response(gz, { headers }));
-}
-
-/**
- * Extensions whose bytes are text and therefore worth gzipping. Images, fonts and anything unlisted
- * are already compressed, so a second pass spends CPU to grow the body by its gzip framing.
- */
-const COMPRESSIBLE_EXT = new Set([
-  ".js",
-  ".mjs",
-  ".css",
-  ".html",
-  ".svg",
-  ".json",
-  ".webmanifest",
-  ".txt",
-  ".map",
-]);
-
-/**
- * Below this many bytes a static file goes out raw: gzip's own header and trailer, plus the extra
- * response headers, eat the saving. Higher than the JSON floor in http-cache.ts because a static
- * file is usually served once per release and cached, while a JSON body is served every poll.
- */
-const STATIC_GZIP_MIN_BYTES = 1024;
-
-/** At most this many compressed bodies are held, and at most this many bytes across all of them. */
-const GZIP_CACHE_MAX_ENTRIES = 64;
-const GZIP_CACHE_MAX_BYTES = 16 * 1024 * 1024;
-
-/**
- * The compressed bodies of the static files served so far, keyed by absolute path + mtime + size —
- * so a rebuild never serves the old bytes under the new file's name, and nothing has to be
- * invalidated by hand. A `Map` iterates in insertion order, which makes "evict the oldest" the
- * first key it yields. Every served extension is cached the same way, hashed asset or not: an
- * `index.html` is small, and one code path is worth more here than a second policy.
- */
-const gzipCache = new Map<string, Uint8Array<ArrayBuffer>>();
-let gzipCacheBytes = 0;
-let gzipCacheHits = 0;
-let gzipCacheMisses = 0;
-
-/** What the cache has done so far. Exported so a test can observe a hit without a spy. */
-export function staticGzipStats() {
-  return {
-    entries: gzipCache.size,
-    bytes: gzipCacheBytes,
-    hits: gzipCacheHits,
-    misses: gzipCacheMisses,
-  };
-}
-
-/** Empty the cache and its counters. For tests; the server never needs it. */
-export function resetStaticGzipCache(): void {
-  gzipCache.clear();
-  gzipCacheBytes = 0;
-  gzipCacheHits = 0;
-  gzipCacheMisses = 0;
-}
-
-/**
- * The gzipped bytes of a static file, or null when this file must go out raw. Asks the three cheap
- * questions — did the client offer gzip, is the type text, is it big enough — before reading
- * anything off disk, so an image or a favicon costs exactly what it costs today.
- */
-async function gzippedStatic(
-  file: ReturnType<typeof Bun.file>,
-  full: string,
-  ext: string,
-  acceptEncoding: string | null,
-): Promise<Uint8Array<ArrayBuffer> | null> {
-  if (!COMPRESSIBLE_EXT.has(ext)) return null;
-  const size = file.size;
-  if (!wantsGzip(acceptEncoding, size, STATIC_GZIP_MIN_BYTES)) return null;
-
-  const key = `${full} ${file.lastModified} ${size}`;
-  const cached = gzipCache.get(key);
-  if (cached !== undefined) {
-    gzipCacheHits += 1;
-    return cached;
-  }
-
-  gzipCacheMisses += 1;
-  const compressed = Bun.gzipSync(new Uint8Array(await file.arrayBuffer()));
-  gzipCache.set(key, compressed);
-  gzipCacheBytes += compressed.byteLength;
-  while (gzipCache.size > GZIP_CACHE_MAX_ENTRIES || gzipCacheBytes > GZIP_CACHE_MAX_BYTES) {
-    const oldest = gzipCache.keys().next();
-    if (oldest.done === true) break;
-    gzipCacheBytes -= gzipCache.get(oldest.value)?.byteLength ?? 0;
-    gzipCache.delete(oldest.value);
-  }
-  return compressed;
+  return secure(new Response(file, { headers }));
 }
 
 /**

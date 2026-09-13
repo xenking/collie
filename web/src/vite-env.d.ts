@@ -8,5 +8,4 @@ declare const __BUILD_INFO__: {
   sha: string;
   time: string;
   id: string;
-  channel: "release" | "dev";
 };

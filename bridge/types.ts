@@ -24,6 +24,7 @@ export interface AgentView {
   workspaceNumber: number;
   tabId: string;
   agent: string;
+  sleeping?: boolean;
   status: AgentStatus;
   cwd: string;
   focused: boolean;
@@ -124,7 +125,7 @@ export interface AgentView {
  * NOTE the `Omit` is opt-OUT: a future server-only field on AgentView goes on the wire unless it is
  * added to the omit list here. If you add one, strip it here in the same change.
  */
-export type PaneWire = Omit<AgentView, "agentSession" | "sessionAgent"> & {
+export type PaneWire = Omit<AgentView, "agentSession" | "sessionAgent" | "sleeping"> & {
   /** True when this pane's history is actually offerable: the agent named a session AND its harness
    *  has a journal adapter. Says nothing about whether the log is readable — a named session whose
    *  file is missing still answers `available:false` with reason `no-log`. */
@@ -177,7 +178,7 @@ export function journalAgentOf(pane: AgentView): string {
 }
 
 export function toPaneWire(pane: AgentView, hasJournal: (agent: string) => boolean): PaneWire {
-  const { agentSession, sessionAgent: _sessionAgent, ...rest } = pane;
+  const { agentSession, sessionAgent: _sessionAgent, sleeping: _sleeping, ...rest } = pane;
   return agentSession && hasJournal(pane.agent) ? { ...rest, hasSession: true } : rest;
 }
 
@@ -564,6 +565,7 @@ export interface PaneReadResponse {
   /** Herdr's monotonic pane revision — passed through for the client's prompt-select race guard. */
   revision: number;
 }
+
 /** One slash command currently available in a live OMP pane. */
 export interface OmpCommand {
   command: string;
@@ -926,6 +928,8 @@ export interface BridgeConfig {
    * decides whether to draw a button, not where the audio goes.
    */
   stt?: SttCapability;
+  /** Realtime Soniox voice conversation path. Absent when not configured. */
+  voice?: boolean;
   /**
    * What this collie accepts as an attachment. **Absent is a bridge older than this field**, which
    * a client reads as the contract that shipped before it: 10 MB, images only. Present, it is the
@@ -936,8 +940,6 @@ export interface BridgeConfig {
    * `COLLIE_MAX_UPLOAD_MB` still answers for itself when the bytes arrive. See docs/configure.md.
    */
   upload?: UploadCapability;
-  /** Realtime Soniox voice conversation path. Absent when not configured. */
-  voice?: boolean;
 }
 
 /**

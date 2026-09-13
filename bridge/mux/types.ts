@@ -160,6 +160,7 @@ export interface MuxPane extends MuxIdentity {
    * and a wrong journal adapter.
    */
   readonly agent: string;
+  readonly sleeping?: boolean;
   /** How that agent is doing. `"unknown"` is the honest answer without `agentDetection`. */
   readonly status: AgentStatus;
   /**

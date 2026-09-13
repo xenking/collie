@@ -691,6 +691,20 @@ export interface PaneReadResponse {
   notModified?: boolean;
 }
 
+export interface OmpCommand {
+  command: string;
+  description: string;
+  takesArg: boolean;
+  argHint: string;
+  common: boolean;
+  dangerous: boolean;
+}
+
+export interface PaneCommandsResponse {
+  version: string;
+  commands: OmpCommand[];
+}
+
 /**
  * One renderable piece of a transcript turn. Mirrors `bridge/transcript.ts` (wire types are
  * hand-mirrored across the two sides, as with every other response here).
@@ -1002,6 +1016,8 @@ export interface BridgeConfig {
    * feature is absent, not disabled.
    */
   stt?: SttCapability;
+  /** Realtime Soniox voice conversation path. Absent when not configured. */
+  voice?: boolean;
   /**
    * What this collie accepts as an attachment. Mirrors `UploadCapability` in bridge/types.ts.
    *
@@ -1010,8 +1026,6 @@ export interface BridgeConfig {
    * mid-upgrade operator sees the old picker rather than an empty one.
    */
   upload?: UploadCapability;
-  /** Realtime Soniox voice conversation path. Absent when not configured. */
-  voice?: boolean;
 }
 
 /**

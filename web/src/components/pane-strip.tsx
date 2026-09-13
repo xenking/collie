@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { TerminalSquare } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -12,7 +12,6 @@ import type { AgentView } from "@/lib/types";
 import type { Scope } from "@/lib/scope";
 import { t } from "@/lib/i18n";
 import { useLocale } from "@/hooks/use-locale";
-import { useRevealActive } from "@/hooks/use-reveal-active";
 
 interface PaneStripProps {
   /** The panes that share the current tab (agents + shells), in stable order. */
@@ -48,8 +47,6 @@ export function PaneStrip({
   // Actions need both callbacks wired (revalidate on rename, navigate on close); without them the
   // pills stay plain tap-to-switch — long-press is inert.
   const actionsEnabled = !!onRenamed && !!onClosed;
-  const scrollerRef = useRef<HTMLDivElement>(null);
-  useRevealActive(scrollerRef, currentPaneId);
 
   if (panes.length < 2) return null;
 
@@ -75,7 +72,6 @@ export function PaneStrip({
         label={t("space.paneStrip.title")}
         // No pb-* override: the row's bottom air is LabelledStrip's scroller padding, which is what
         // the pills' tap areas extend into. Overriding it here would clip the 44px floor.
-        scrollerRef={scrollerRef}
       >
         {panes.map((p) => (
           <PanePill

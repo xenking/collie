@@ -56,10 +56,10 @@ let currentMux: MuxConfig | null = null;
 // are the same value on purpose, because both mean "there is no microphone here" (ADR 0029). Absent
 // is the feature being off, so nothing has to distinguish them.
 let currentStt: SttCapability | null = null;
+let currentVoice = false;
 // `null` until a read succeeds AND on every bridge older than the field. The two are the same value
 // on purpose: both mean "nothing said otherwise", and lib/attachments.ts answers both with the
 // contract that shipped before attachments existed — 10 MB, images only.
-let currentVoice = false;
 let currentUpload: UploadCapability | null = null;
 let inflight: Promise<void> | null = null;
 let loaded = false;

@@ -17,10 +17,11 @@ import type {
   DevicesResponse,
   LaunchersResponse,
   NotifyPrefs,
+  PaneCommandsResponse,
+  PairFailure,
   PaneHistoryResponse,
   CrewStatusResponse,
   PaneReadResponse,
-  PairFailure,
   SnapshotResponse,
   UpdateCheckResponse,
   UpdateInfo,
@@ -463,6 +464,18 @@ export function fetchHistory(
     signal,
     headers: { "x-collie-seen": "1" },
   });
+}
+
+/** Discover the commands installed in this OMP pane's current working directory. */
+export function fetchPaneCommands(
+  paneId: string,
+  scope?: Scope,
+  signal?: AbortSignal,
+): Promise<PaneCommandsResponse> {
+  return req<PaneCommandsResponse>(
+    withScope(`/api/pane/${encodeURIComponent(paneId)}/commands`, scope),
+    { signal, headers: { "x-collie-seen": "1" } },
+  );
 }
 
 export function sendReply(

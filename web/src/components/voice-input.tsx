@@ -218,7 +218,7 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
   showControl,
   disabled,
   replySpeechSupported,
-  recordingMode = "toggle",
+  recordingMode,
   onTranscript,
   onVoiceStateChange,
   onError,
@@ -643,7 +643,7 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
     try {
       await playerRef.current.prepare(); // must happen in this gesture for mobile audio playback.
       const socket = await connect();
-      if (disposedRef.current || captureFailedRef.current) {
+      if (disposedRef.current || captureFailedRef.current || !wantsRecordingRef.current) {
         releaseRemote();
         if (!disposedRef.current) setState("idle");
         return;
