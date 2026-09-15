@@ -53,13 +53,13 @@ describe("TabStrip", () => {
     expect(screen.queryByText("Tabs")).toBeNull();
   });
 
-  // GROUND, BORDER AND RADIUS ARE ONE MARK NOW: the open tab is an outlined pill — `border-border`
-  // + `bg-background` + `rounded-md` — while an inactive tab keeps the SAME border-box (a reserved
-  // transparent border, per the C1 recipe) and draws no fill. Every box-affecting class besides the
-  // border's colour and the fill is identical between the two states, so a selection can never
-  // re-flow a label. jsdom has no layout, so this pins the mechanism (which classes differ) rather
-  // than pixels.
-  it("marks the open tab as an outlined pill, with the rest of the box unchanged on selection", () => {
+  // THE fault a folder tab ships with. The active tab gains a border on three sides and a fill; if
+  // the inactive ones did not already reserve that box, every label to the right would jump on every
+  // selection. jsdom has no layout, so this pins the mechanism instead of the pixels: the border and
+  // padding classes are in the BASE string and therefore identical in both states, and only colour /
+  // background classes differ. The measured proof is in the browser — a label's left edge, top edge
+  // and width are the same to three decimals in both states at 390px.
+  it("reserves the active tab's box in every state, so no label moves on selection", () => {
     const { rerender } = render(
       <TabStrip
         workspaceId="w1"
@@ -73,17 +73,10 @@ describe("TabStrip", () => {
     const boxClasses = (el: Element) =>
       el.className
         .split(/\s+/)
-        .filter((c) => /^(h-|min-w-|px-|py-|p-|my-|rounded)/.test(c) || c === "border")
+        .filter((c) => /^(h-|min-w-|px-|py-|p-|border($|-)|rounded)/.test(c))
         .toSorted();
 
-    const inactive = screen.getByRole("button", { name: "tab 2" });
-    // Every tab reserves the same border and radius box; an inactive one keeps the border transparent
-    // and draws no fill.
-    expect(inactive.className).toContain("border-transparent");
-    expect(inactive.className).not.toContain("border-border");
-    expect(inactive.className).not.toContain("bg-background");
-    const inactiveBox = boxClasses(inactive);
-
+    const inactive = boxClasses(screen.getByRole("button", { name: "2" }));
     rerender(
       <TabStrip
         workspaceId="w1"
@@ -94,43 +87,17 @@ describe("TabStrip", () => {
         onNewTab={vi.fn()}
       />,
     );
-    const active = screen.getByRole("button", { name: "tab 2" });
+    const active = screen.getByRole("button", { name: "2" });
     expect(active).toHaveAttribute("aria-current", "true");
-    // Every box-affecting class is shared — the border's colour and the fill are the only differences.
-    expect(boxClasses(active)).toEqual(inactiveBox);
-    expect(active.className).toContain("border-border");
-    expect(active.className).toContain("bg-background");
+    // Every box-affecting class is shared. The only difference is the border COLOUR — tailwind-merge
+    // resolves `border-transparent` against `border-rule`, so exactly one of the two is present in
+    // each state and the 1px border itself is in neither branch.
+    const colour = (c: string) => c === "border-transparent" || c === "border-rule";
+    expect(boxClasses(active).filter((c) => !colour(c))).toEqual(inactive.filter((c) => !colour(c)));
+    expect(inactive.filter(colour)).toEqual(["border-transparent"]);
+    expect(boxClasses(active).filter(colour)).toEqual(["border-rule"]);
     // Rule E: state may not change font weight, or the whole row re-flows.
     expect(active.className).toContain("font-medium");
-  });
-
-  // NO HORIZONTAL RULE, AND NO HAIRLINE BETWEEN TABS EITHER. Altan, from the phone, on the row this
-  // replaced: "the top tabs area has a lot of weird lines now. Completely remove horizontal borders
-  // and just have vertical ones for tab items" — and then, once the open tab got its own box, "the
-  // border left is weird, I'd prefer a full border on the item": the `divide-x` seam that used to
-  // sit on one side of whichever tab was next to it is gone too, replaced by a plain gap and the open
-  // tab's own full border.
-  it("draws no horizontal rule of its own, groups the tabs with a gap instead of a divider, and gives only the open tab a border", () => {
-    const { container } = render(
-      <TabStrip
-        workspaceId="w1"
-        tabs={tabs}
-        agents={[]}
-        selected="w1:t1"
-        onSelect={vi.fn()}
-        onNewTab={vi.fn()}
-      />,
-    );
-    const nav = container.querySelector("nav")!;
-    expect(nav.className).not.toMatch(/\bborder-[tb]\b/);
-    expect(nav.className).toContain("bg-chrome");
-    const group = nav.querySelector("div > div")!;
-    expect(group.className).not.toContain("divide-x");
-    expect(group.className).not.toContain("divide-border");
-    expect(group.className).toContain("gap-1");
-    const open = screen.getByRole("button", { name: "tab 1" });
-    expect(open.className).toContain("rounded-md");
-    expect(open.className).toContain("border-border");
   });
 
   it("shows All plus only this workspace's tabs, and reports selection", async () => {
@@ -148,9 +115,9 @@ describe("TabStrip", () => {
     );
     expect(screen.getByRole("button", { name: "All" })).toBeInTheDocument();
     // w2's tab (also labelled "1") must be excluded, so there's exactly one "1".
-    expect(screen.getAllByRole("button", { name: "tab 1" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "1" })).toHaveLength(1);
 
-    await user.click(screen.getByRole("button", { name: "tab 2" }));
+    await user.click(screen.getByRole("button", { name: "2" }));
     expect(onSelect).toHaveBeenCalledWith("w1:t2");
   });
 
@@ -172,52 +139,6 @@ describe("TabStrip", () => {
   });
 });
 
-// A POSITIONAL LABEL IS NOT A NAME (lib/pane-name.ts § tabTitle). Herdr labels an unnamed tab "1"
-// and zellij calls it "Tab #2"; the tab reads its POSITION instead — "tab 1", "tab 3" — in a
-// shade-lighter ink, on every surface alike. Only a tab with no label at all (no name, no digit)
-// keeps the dot.
-describe("TabStrip — a tab with no name of its own", () => {
-  const strip = (label: string) =>
-    render(
-      <TabStrip
-        workspaceId="w1"
-        tabs={[{ ...tabs[0]!, label }]}
-        agents={[]}
-        selected={null}
-        onSelect={vi.fn()}
-        onNewTab={vi.fn()}
-      />,
-    );
-
-  it("draws its position, in the lighter ink, as the button's own spoken name", () => {
-    strip("1");
-    const tab = screen.getByRole("button", { name: "tab 1" });
-    expect(tab.textContent).toBe("tab 1");
-    expect(tab.querySelector(".text-muted-foreground\\/70")?.textContent).toBe("tab 1");
-    expect(tab.querySelector(".sr-only")).toBeNull();
-  });
-
-  it("treats zellij's own default the same way", () => {
-    strip("Tab #3");
-    expect(screen.getByRole("button", { name: "tab 3" }).textContent).toBe("tab 3");
-  });
-
-  it("draws a real name as text, with no dot and no positional ink standing in for it", () => {
-    strip("review");
-    const tab = screen.getByRole("button", { name: "review" });
-    expect(tab.textContent).toBe("review");
-    expect(tab.querySelector(".sr-only")).toBeNull();
-    expect(tab.querySelector(".text-muted-foreground\\/70")).toBeNull();
-  });
-
-  it("keeps the dot only for a tab with no label at all", () => {
-    const { container } = strip("");
-    const tab = screen.getByRole("button", { name: "" });
-    expect(tab.querySelector(".sr-only")?.textContent).toBe("");
-    expect(container.querySelector(".rounded-full")).not.toBeNull(); // the dot stands in its place
-  });
-});
-
 describe("TabStrip — long-press actions", () => {
   // A long-press on a chip reaches the DOM as a `contextmenu` event (Android Chrome / right-click);
   // with both actions wired it opens the actions sheet (rename / close), like the pane strip.
@@ -235,7 +156,7 @@ describe("TabStrip — long-press actions", () => {
       />,
     );
     expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
-    fireEvent.contextMenu(screen.getByRole("button", { name: "tab 2" }));
+    fireEvent.contextMenu(screen.getByRole("button", { name: "2" }));
     expect(screen.getByRole("button", { name: "Rename" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close tab" })).toBeInTheDocument();
   });
@@ -251,7 +172,7 @@ describe("TabStrip — long-press actions", () => {
         onNewTab={vi.fn()}
       />,
     );
-    fireEvent.contextMenu(screen.getByRole("button", { name: "tab 2" }));
+    fireEvent.contextMenu(screen.getByRole("button", { name: "2" }));
     expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
   });
 
@@ -267,7 +188,7 @@ describe("TabStrip — long-press actions", () => {
         onRenamed={vi.fn()}
       />,
     );
-    fireEvent.contextMenu(screen.getByRole("button", { name: "tab 2" }));
+    fireEvent.contextMenu(screen.getByRole("button", { name: "2" }));
     expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
   });
 
@@ -288,7 +209,7 @@ describe("TabStrip — long-press actions", () => {
         onClosed={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "tab 1" }));
+    await user.click(screen.getByRole("button", { name: "1" }));
     expect(screen.getByRole("button", { name: "Rename" })).toBeInTheDocument();
     expect(onSelect).not.toHaveBeenCalled();
   });
@@ -308,7 +229,7 @@ describe("TabStrip — long-press actions", () => {
         onClosed={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "tab 2" }));
+    await user.click(screen.getByRole("button", { name: "2" }));
     expect(onSelect).toHaveBeenCalledExactlyOnceWith("w1:t2");
     expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
   });
@@ -337,7 +258,7 @@ describe("TabStrip — long-press actions", () => {
         onClosed={onClosed}
       />,
     );
-    fireEvent.contextMenu(screen.getByRole("button", { name: "tab 2" })); // w1:t2, paneCount 1
+    fireEvent.contextMenu(screen.getByRole("button", { name: "2" })); // w1:t2, paneCount 1
     await user.click(screen.getByRole("button", { name: "Close tab" }));
     await user.click(screen.getByRole("button", { name: "Tap again to close 1 pane" }));
 
@@ -511,99 +432,5 @@ describe("TabStrip new-tab busy state", () => {
     );
     await user.click(screen.getByRole("button", { name: "New tab" }));
     expect(onNewTab).not.toHaveBeenCalled();
-  });
-
-  // The many-tabs defect (the whole reason `useRevealActive` exists): jsdom lays nothing out, so the
-  // hook's own guard (`clientWidth === 0`) makes the MOUNT reveal a no-op here — that path is pinned
-  // in `use-reveal-active.test.tsx` instead. What this proves is the WIRING: once the scroller has a
-  // stubbed layout, a selection change that lands off-screen calls `scrollTo`, and one that lands
-  // on-screen does not. Both buttons already exist in the DOM before the switch (only `aria-current`
-  // toggles), so their rects can be stubbed ahead of the re-render that flips the selection.
-  function stubRect(el: HTMLElement, rect: { left: number; right: number }): void {
-    el.getBoundingClientRect = (): DOMRect => ({
-      ...rect,
-      top: 0,
-      bottom: 0,
-      width: rect.right - rect.left,
-      height: 0,
-      x: rect.left,
-      y: 0,
-      toJSON: () => ({}),
-    });
-  }
-
-  it("scrolls the newly active tab into view on a selection change", () => {
-    const { container, rerender } = render(
-      <TabStrip
-        workspaceId="w1"
-        tabs={tabs}
-        agents={[]}
-        selected={tabs[0]!.tabId}
-        onSelect={vi.fn()}
-        onNewTab={vi.fn()}
-      />,
-    );
-    // SAFETY: TabStrip always renders one <nav> with one direct <div> scroller child (its own
-    // structure — see the component's header comment on the -mx-4/px-4 pairing), so a render never
-    // leaves this query unmatched.
-    const scroller = container.querySelector<HTMLDivElement>("nav > div")!;
-    Object.defineProperty(scroller, "clientWidth", { value: 100, configurable: true });
-    scroller.scrollLeft = 0;
-    stubRect(scroller, { left: 0, right: 100 });
-    const scrollTo = vi.fn();
-    scroller.scrollTo = scrollTo;
-    const newlyActive = screen.getByRole("button", { name: "tab 2" });
-    stubRect(newlyActive, { left: 300, right: 340 }); // well past the scroller's right edge
-
-    rerender(
-      <TabStrip
-        workspaceId="w1"
-        tabs={tabs}
-        agents={[]}
-        selected={tabs[1]!.tabId}
-        onSelect={vi.fn()}
-        onNewTab={vi.fn()}
-      />,
-    );
-
-    expect(scrollTo).toHaveBeenCalledTimes(1);
-    expect(scrollTo.mock.calls[0]![0].left).toBeGreaterThan(0);
-  });
-
-  it("does not scroll when the newly active tab is already on screen", () => {
-    const { container, rerender } = render(
-      <TabStrip
-        workspaceId="w1"
-        tabs={tabs}
-        agents={[]}
-        selected={tabs[0]!.tabId}
-        onSelect={vi.fn()}
-        onNewTab={vi.fn()}
-      />,
-    );
-    // SAFETY: TabStrip always renders one <nav> with one direct <div> scroller child (its own
-    // structure — see the component's header comment on the -mx-4/px-4 pairing), so a render never
-    // leaves this query unmatched.
-    const scroller = container.querySelector<HTMLDivElement>("nav > div")!;
-    Object.defineProperty(scroller, "clientWidth", { value: 100, configurable: true });
-    scroller.scrollLeft = 0;
-    stubRect(scroller, { left: 0, right: 100 });
-    const scrollTo = vi.fn();
-    scroller.scrollTo = scrollTo;
-    const newlyActive = screen.getByRole("button", { name: "tab 2" });
-    stubRect(newlyActive, { left: 20, right: 60 }); // comfortably inside the visible range
-
-    rerender(
-      <TabStrip
-        workspaceId="w1"
-        tabs={tabs}
-        agents={[]}
-        selected={tabs[1]!.tabId}
-        onSelect={vi.fn()}
-        onNewTab={vi.fn()}
-      />,
-    );
-
-    expect(scrollTo).not.toHaveBeenCalled();
   });
 });
