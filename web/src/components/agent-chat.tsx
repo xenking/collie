@@ -34,12 +34,11 @@ import { Collapse, CollapseSwap } from "@/components/ui/collapse";
 import { RouteHeader } from "@/components/app-header";
 import { HeaderStatus } from "@/components/header-status";
 import { AnsiOutput } from "@/components/ansi-output";
-import { MIRROR_SPACE, MIRROR_INVERT, styleFor } from "@/components/mirror-space";
+import { MIRROR_SPACE, MIRROR_INVERT, segmentStyle } from "@/components/mirror-space";
 import { cn } from "@/lib/utils";
-import { paneTag } from "@/lib/pane-tag";
 import { parseAnsi } from "@/lib/ansi";
 import { splitLines } from "@/lib/blocks";
-import { adapterFor } from "@/lib/harness";
+import { adapterFor, rendersNativeMirror } from "@/lib/harness";
 import { blockOwnsKeyboard } from "@/lib/harness/dialog-contract";
 import { FindBar } from "@/components/find-bar";
 import { LatestReply } from "@/components/latest-reply";
@@ -49,7 +48,9 @@ import { AgentIcon } from "@/components/agent-icon";
 import { TabStrip } from "@/components/tab-strip";
 import { PaneStrip } from "@/components/pane-strip";
 import { StripsSummary } from "@/components/strips-summary";
+import { CacheSheet } from "@/components/cache-sheet";
 import { PaneActionsSheet } from "@/components/pane-actions-sheet";
+import { PaneSettingsSheet } from "@/components/pane-settings-sheet";
 import { CompactStripLabels, STRIP_TAP_TARGET_SQUARE } from "@/components/ui/labelled-strip";
 import { ReadOnlyBanner } from "@/components/read-only-banner";
 import { HostStaleBanner } from "@/components/host-stale-banner";
@@ -69,6 +70,7 @@ import type { MenuBlockAction } from "@/components/menu-block";
 import { locateReply } from "@/lib/latest-reply";
 import { canGrowRequestedLines, growRequestedLines } from "@/lib/loaders";
 import { cwdBeyondName } from "@/lib/pane-name";
+import { paneTag } from "@/lib/pane-tag";
 import { useMuxCapability } from "@/lib/mux-capability";
 import { hasJournalAdapter } from "@/lib/journal-agents";
 import { historyPath, spacePath } from "@/lib/nav";
@@ -96,6 +98,9 @@ interface AgentChatProps {
   tabLabel?: string;
   /** Pane output from the route loader (refreshed by polling/revalidation). */
   text: string;
+  /** The same rows with soft wraps undone, present only when {@link text} splits a URL — frozen
+   * alongside it so the autolinker never pairs a stale mirror with a fresh logical read. */
+  logicalText?: string;
   /** The scrollback window `text` was fetched with — tells a grown fetch from a stale in-flight poll. */
   requestedLines?: number;
   /** The pane's `revision` for `text` — the race guard checks a tapped menu against this. */
@@ -127,7 +132,7 @@ function foldLabelKey(tabCount: number, paneCount: number): MessageKey {
 
 // At most one drawer/sheet is open at a time; null = none. (The composer's own Keys/Quick/Agent
 // sheets are separate and live inside <Composer>.)
-type Drawer = "switcher" | "paneMenu" | null;
+type Drawer = "switcher" | "paneMenu" | "paneSettings" | null;
 
 /**
  * Is the caret in the MESSAGE COMPOSER's field, as opposed to any other input on the screen?
@@ -179,6 +184,7 @@ export function AgentChat({
   tabs,
   tabLabel,
   text,
+  logicalText,
   requestedLines = 0,
   revision = 0,
   device,
@@ -296,6 +302,10 @@ export function AgentChat({
   // Drawers/sheets are mutually exclusive — at most one open. A single value makes that invariant
   // unrepresentable to violate.
   const [drawer, setDrawer] = useState<Drawer>(null);
+  // The prompt-cache sheet is NOT one of the mutually-exclusive drawers above: it is a reading with no
+  // control in it, opened from the header rather than from the composer, and it closes nothing the
+  // operator was in the middle of. Its own boolean says so.
+  const [cacheSheetOpen, setCacheSheetOpen] = useState(false);
   const closeDrawer = () => {
     setDrawer(null);
     setPull(0);
@@ -401,14 +411,18 @@ export function AgentChat({
 
   const gone = !agent;
 
-  // Drag the handle above the composer up to bring up the pane switcher, tracked finger-by-finger
-  // so the sheet peeks up under the thumb rather than appearing on release. Tapping is still the
-  // reliable fallback (the button's own onClick below). `pull` is the live upward travel in px, fed
+  // Drag the ACTIONS BELT up to bring up the pane switcher, tracked finger-by-finger so the sheet
+  // peeks up under the thumb rather than appearing on release. The whole belt is the drag surface —
+  // `ref` goes on the band, not on the chevron riding its rule — because the chevron alone was a
+  // good sign and a poor target, which is what Altan reported from the phone. Tapping the chevron is
+  // still the reliable fallback (its own onClick). `pull` is the live upward travel in px, fed
   // straight to the switcher BottomSheet's `pull` prop; a release past the open threshold buzzes and
-  // opens for real, a release short of it snaps back to 0. `pullFrom` is the handle's own distance
-  // from the viewport bottom, measured once per gesture (useSheetPull's `onAnchor`) — the handle
-  // sits above the composer, so without it the peek would rise from the screen's bottom edge with
-  // the composer sandwiched between the panel and the thumb dragging it.
+  // opens for real, a release short of it snaps back to 0. `pullFrom` is the BELT's own distance
+  // from the viewport bottom, measured once per gesture (useSheetPull's `onAnchor`) — the belt has
+  // the whole input row below it, so without it the peek would rise from the screen's bottom edge
+  // with the composer sandwiched between the panel and the thumb. The belt is also a sideways
+  // scroller, so the hook arbitrates per gesture which axis a touch belongs to; use-sheet-pull.ts's
+  // header holds that rule.
   const [pull, setPull] = useState(0);
   const [pullFrom, setPullFrom] = useState(0);
   const sheetPull = useSheetPull({
@@ -542,9 +556,9 @@ export function AgentChat({
   // we hold the text steady (no reflow / no re-pin) until you jump back to latest — so a long
   // message stays put long enough to read instead of sliding out of the rolling window.
   //
-  // The frozen snapshot is a {text, revision} PAIR captured at the same instant: the prompt-select
-  // race guard must check a tap against the revision of what the user is LOOKING AT. The live
-  // `revision` prop keeps advancing with background polls while the mirror is frozen — comparing
+  // The frozen snapshot is a {text, revision, logicalText} TRIPLE captured at the same instant: the
+  // prompt-select race guard must check a tap against the revision of what the user is LOOKING AT.
+  // The live `revision` prop keeps advancing with background polls while the mirror is frozen — comparing
   // against it would blind the guard to drift that happened before the freeze (live-vs-live always
   // matches). While following, the frozen pair IS the live pair by definition.
   const [following, setFollowing] = useState(true);
@@ -559,15 +573,17 @@ export function AgentChat({
   // Leaving the pane hands the flag back to its "nothing is open" value. Without this, closing a
   // pane you had scrolled up in would leave the poller believing nobody is following anything.
   useEffect(() => () => publishFollowing(true), []);
-  const [shown, setShown] = useState({ text, revision });
+  const [shown, setShown] = useState({ text, revision, logicalText });
   useEffect(() => {
     if (!following) return;
     // Functional update that returns the previous object when nothing changed keeps React's
     // Object.is bailout — no re-render per poll while the pane is quiet.
     setShown((prev) =>
-      prev.text === text && prev.revision === revision ? prev : { text, revision },
+      prev.text === text && prev.revision === revision && prev.logicalText === logicalText
+        ? prev
+        : { text, revision, logicalText },
     );
-  }, [text, revision, following]);
+  }, [text, revision, logicalText, following]);
   const display = shown.text;
   const hasNew = !following && display !== text;
 
@@ -769,8 +785,8 @@ export function AgentChat({
       return;
     }
     pendingRestore.current = true;
-    setShown({ text, revision });
-  }, [requestedLines, text, revision, display]);
+    setShown({ text, revision, logicalText });
+  }, [requestedLines, text, revision, logicalText, display]);
   // After the enlarged display paints, keep the previously-visible content anchored (content grew at
   // the top, so push scrollTop down by the height delta).
   useLayoutEffect(() => {
@@ -1413,9 +1429,11 @@ export function AgentChat({
             "relative flex min-h-0 min-w-0 flex-1 flex-col",
             // The composer carried the bottom inset, and in zen the composer is gone — so this
             // region takes it over, or the mirror's last row runs under the home indicator. The TOP
-            // inset is deliberately NOT taken: the header element stays mounted with its own
-            // `env(safe-area-inset-top)` even while its row is collapsed away, so claiming it here
-            // would pay for the notch twice.
+            // inset is deliberately NOT taken: the header element stays mounted above this region
+            // even while its row is collapsed away, and the notch is reserved exactly once up there
+            // — by the strip band while it is showing something, by the header itself while it is
+            // not (`app-header.tsx`). Claiming it here would pay for it twice, whichever of the two
+            // currently holds it.
             zen && "[padding-bottom:env(safe-area-inset-bottom)]",
           )}
         >
@@ -1577,8 +1595,9 @@ export function AgentChat({
                     tabbed row rather than tiling the panes; only appears when the tab holds more than one. */}
                 {agent && (
                   <PaneStrip
-                    // The SAME list the header's discriminator is gated on, and hoisted for that reason —
-                    // this row appearing and line 1 gaining a `pN` are one decision, taken once.
+                    // Hoisted above, because this row and the header read one list. The header no
+                    // longer decorates its title from it — telling panes apart is this row's job, and
+                    // only this row's (pane-strip.tsx says why).
                     panes={tabPanes}
                     currentPaneId={paneId}
                     onSelect={switchTo}
@@ -1761,12 +1780,19 @@ export function AgentChat({
                   )}
                   <AnsiOutput
                     text={display}
+                    logicalText={shown.logicalText}
                     wrap={prefs.wrap}
                     fontSize={prefs.fontSize}
                     query={findOpen ? findQuery : ""}
                     currentMatch={findOpen ? currentMatch : -1}
                     onMatchCount={findOpen ? handleMatchCount : undefined}
-                    agent={grammarsOn ? agent?.agent : undefined}
+                    // Native-mirror agents keep their identity with raw-terminal on: the pref
+                    // bypasses block GRAMMARS, and native rendering is display faithfulness, not
+                    // a grammar — muse has no adapter, so dropping the agent here would only
+                    // re-invert the pane (.adr/0047) while bypassing nothing.
+                    agent={
+                      grammarsOn || rendersNativeMirror(agent?.agent) ? agent?.agent : undefined
+                    }
                     onPromptAction={handlePromptAction}
                     onWizardAction={handleWizardAction}
                     onPreviewAction={handlePreviewAction}
@@ -1869,7 +1895,11 @@ export function AgentChat({
                       {row.segments.map((s, si) => (
                         // Text nodes only — colour and weight come from the ANSI parse, never markup.
                         // Same XSS boundary as the mirror.
-                        <span key={si} style={styleFor(s)}>
+                        <span
+                          key={si}
+                          style={segmentStyle(s)}
+                          className={s.mobileTransparentBg ? "terminal-mobile-transparent-bg" : undefined}
+                        >
                           {s.text}
                         </span>
                       ))}
@@ -1879,35 +1909,42 @@ export function AgentChat({
                 )}
               </Collapse>
 
-              {/* Swipe-up / tap handle for the quick pane switcher — the sheet that switches AND closes
-                  panes (each row has a ✕). A tall, full-width hit area so the swipe is easy to land (and a
-                  tap always works). Shown whenever a pane is open — even the last one, so it stays
-                  closable now that the nav drawer is gone. `touch-none` so the gesture is ours, not a
-                  browser scroll.
+              {/* THE PANE SWITCHER'S MARK IS NOT A ROW ANY MORE. It was a 30px full-width band here,
+                  directly above the composer: `py-3` around a 6px grip, tap or drag, gated on there
+                  being somewhere to go. The band is gone and a small up-chevron rides the ACTIONS
+                  BELT'S TOP RULE instead — a small patch straddling the hairline, half above and
+                  half below, absolutely positioned so it costs NO height at all (actions-row.tsx
+                  draws it and holds the geometry). The chrome block is 30px shorter and nothing else
+                  moved, which is the whole point: the mirror gets a row back for a control that is
+                  still there.
 
-                  IT SITS DIRECTLY ABOVE THE COMPOSER, BELOW THE AGENT'S STATUSLINE, AND THAT ORDER IS
-                  THE FIX RATHER THAN A PREFERENCE. It used to render ABOVE the statusline, which made
-                  its position a function of pane state: on a pane whose agent prints a statusline the
-                  handle stood 50px further up than on one that does not, and the same handle moved
-                  again the moment the agent added or dropped a row (the strip is 1–3 rows, re-derived
-                  every poll). A control the thumb reaches for by muscle memory may not move because the
-                  terminal printed something — DESIGN.md §2. Rendered here it is always the last thing
-                  above the composer's status band, on every pane and in every state.
+                  THE TAP AND THE DRAG NOW LIVE ON TWO ELEMENTS. `setDrawer("switcher")` is the
+                  chevron's onClick; `sheetPull.ref` is on the BELT, so an upward drag from anywhere
+                  on the band opens the same sheet. The chevron was the only drag target for half a
+                  day and Altan's verdict from the phone was that it is "kinda difficult to hit" — a
+                  28x16 mark on a hairline says where the sheet comes from well and receives a thumb
+                  badly. The DRAG ANCHOR is unchanged by any of it: useSheetPull measures its node's
+                  distance from the viewport bottom, the chevron is centred ON the belt's top edge,
+                  so the belt and the chevron report the same line. That is the right place — the
+                  belt is the top of the chrome block's working area, and the peek should rise from
+                  the chrome, not from behind it.
 
-                  It also puts the statusline back where it belongs: that strip is the mirror's own last
-                  row, cut from the pane tail, and a 34px gap with a grab handle in it read as a seam
-                  between the terminal and a piece of chrome that IS the terminal. */}
-              {/* THE CHROME BLOCK, DRAWN ONCE. Everything the thumb operates — the grab handle, the
-                  status band, the controls, the input — stands on ONE surface, closed against the
-                  terminal above by ONE rule. The handle used to stand OUTSIDE it, on the mirror's own
-                  black: the dock read as chrome and the handle floating above it read as part of the
-                  terminal, a control with no ground. That is what "hard to distinguish" meant in dark,
-                  where `--background` IS the mirror's fill (mirror-space.ts) and a 6px grip at
-                  `bg-muted-foreground/50` was the only thing on screen saying a control was there.
-                  Given the dock's own ground it is a handle ON the chrome, which is what it does.
+                  The old position lesson survives the move by construction. The band used to render
+                  ABOVE the agent's statusline, so its height was a function of what the terminal had
+                  printed (the strip is 1–3 rows, re-derived every poll) and the thumb's target moved
+                  50px between panes — DESIGN.md §2. The mark now lives INSIDE the composer, below
+                  every one of those rows, so nothing the terminal prints can relocate it. */}
+              {/* THE CHROME BLOCK, DRAWN ONCE. Everything the thumb operates — the switcher mark, the
+                  controls, the input — stands on ONE surface, closed against the terminal above by ONE
+                  rule. The handle used to stand OUTSIDE it, on the mirror's own black: the dock read as
+                  chrome and the handle floating above it read as part of the terminal, a control with
+                  no ground. That is what "hard to distinguish" meant in dark, where `--background` IS
+                  the mirror's fill (mirror-space.ts) and a 6px grip at `bg-muted-foreground/50` was the
+                  only thing on screen saying a control was there. The mark is on the chrome now in the
+                  strongest sense there is: it is drawn on the belt's own rule.
 
                   The rule and the fill live HERE rather than on the composer's dock so that boundary
-                  is UNCONDITIONAL: the handle inside is gated on there being a pane to switch to, this
+                  is UNCONDITIONAL: the grip inside is gated on there being a pane to switch to, this
                   block is not, so the mirror is closed by one hairline in every state (DESIGN.md §2,
                   §4). The composer keeps its own `bg-chrome` — the same value, so nothing changes
                   visually — which leaves it self-sufficient wherever it is mounted alone.
@@ -1940,7 +1977,6 @@ export function AgentChat({
                     <span className="h-1.5 w-12 rounded-md bg-muted-foreground/50" />
                   </button>
                 </Collapse>
-
                 <Composer
                   ref={composerRef}
                   paneId={paneId}
@@ -2046,6 +2082,15 @@ export function AgentChat({
             node. FindBar's own mount effect then focuses the input and pops the keyboard. Verified in
             agent-chat.test.tsx rather than reasoned about, because the ordering is the whole
             argument. */}
+        {/* The rule behind the header chip's number: its source, the date it was last checked, and on a
+            peer's pane the sentence that says why the source is not quoted. A reading, with no control
+            in it — the only lever is `cache-rules.toml` on the machine that computed the number. */}
+        <CacheSheet
+          open={cacheSheetOpen}
+          onClose={() => setCacheSheetOpen(false)}
+          cache={agent?.cache}
+          host={agent?.host}
+        />
         <PaneActionsSheet
           open={drawer === "paneMenu"}
           onClose={closeDrawer}
@@ -2068,6 +2113,19 @@ export function AgentChat({
           // flexible element the budget protects. Zen is also the same FAMILY as the two rows it
           // joins — "look at the output differently" — so the menu it belongs in already existed.
           onZen={zenAvailable && display ? enterZen : undefined}
+          // The settings row, opened from the ⋮ for the reason zen is: the header's Action slot is
+          // already spent. It hands over to the sheet below in one React event, so the actions sheet
+          // unmounts in the same commit the settings sheet mounts.
+          onSettings={() => setDrawer("paneSettings")}
+        />
+        {/* This pane's own settings — one switch today, the prompt-cache warning (ADR 0042). Scoped to
+            the PANE's machine, because `?host=` there names where the pane lives; the preference itself
+            lands on the collie this phone is talking to, which is the only one that can push. */}
+        <PaneSettingsSheet
+          open={drawer === "paneSettings"}
+          onClose={closeDrawer}
+          paneId={paneId}
+          scope={scope}
         />
       </div>
     </CompactStripLabels>

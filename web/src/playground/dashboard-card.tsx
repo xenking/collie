@@ -52,7 +52,7 @@ export function DashboardRowsCard() {
   return (
     <Card
       state="dashboard-rows-live"
-      label="Dashboard rows (live snapshot from this machine)"
+      label="dashboard rows (live snapshot from this machine)"
       reach="the dashboard, on a machine with these eleven panes open. Every row here is the shipped component with the props the home route passes it."
       note="Eleven REAL panes off this machine's bridge (src/playground/fixtures/dashboard-live.ts), in the home route's own triage order, in the real ListGroup the flat sections use. Held dark regardless of the page theme, because that is the dress the row is judged in. Two widths: the reference phone at 390px, and 360px, where a row breaks first."
       span={2}
@@ -92,9 +92,9 @@ function Frame({ width }: { width: number }) {
 
 /**
  * The home route's flat section, as `components/agent-list.tsx` builds it — the same page gutter,
- * the same `SectionHeader`, the same `ListGroup`, and rows at `density="row"` / `statusStyle="dot"`
- * with the working section's `age="active"`. Nothing here is a copy of a component; the only thing
- * this function decides is which rows go in, and that is `ROWS` above.
+ * the same `SectionHeader`, the same `ListGroup`, and rows at `density="row"` / `statusStyle="dot"`.
+ * Nothing here is a copy of a component; the only thing this function decides is which rows go in,
+ * and that is `ROWS` above.
  */
 function RowList() {
   return (
@@ -106,14 +106,7 @@ function RowList() {
         <SectionHeader label="Panes" count={ROWS.length} dot="bg-status-working" />
         <ListGroup>
           {ROWS.map((a) => (
-            <AgentCard
-              key={paneRowKey(a)}
-              agent={a}
-              onClick={() => {}}
-              statusStyle="dot"
-              density="row"
-              age="active"
-            />
+            <AgentCard key={paneRowKey(a)} agent={a} onClick={() => {}} statusStyle="dot" density="row" />
           ))}
         </ListGroup>
       </section>

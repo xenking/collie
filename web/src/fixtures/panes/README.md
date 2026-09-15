@@ -83,14 +83,16 @@ row. That is an ordinary draft, not a dialog.
 | Fixture | State / what's in it | Herdr status |
 |---|---|---|
 | `codex--v0151-draft-indented-line.txt` | Two-line draft: the `› ` row, then a hard line break whose text starts with two spaces, painted as a four-space-indented continuation above the two-field status row. `composerReady` must be TRUE — `/^ {2}\S/` refused it, `locateComposer` returned null, and the pane refused every send with "the agent's input box isn't on screen" until the draft was cleared | `idle` |
+| `codex--v0154-submitted-fill.txt` | Codex 0.154.0, sandbox pane on 2026-09-15: one submitted user message, an assistant turn, a file edit with its unified diff, and the composer box. The message band and the composer are painted `rgb(240,240,240)` and run to the terminal edge; 0.154.0 paints its diff rows as plain text, with no fill at all. See *Codex light fills* below | `idle` |
 
 ## Codex mobile chrome (reconstructed 2026-09-03)
 
 **Not a capture.** This one file is RECONSTRUCTED from the two rows reported in
 [PR #144](https://github.com/AltanS/collie/pull/144), which were seen on a live Codex pane the
 contributor could reach and this repo's capture hosts could not. It carries real ESC bytes in the
-shape the report describes, and it is the ground truth for `codex/display.ts` only. Replace it with
-a real `format:ansi` capture the next time a Codex pane paints these rows, and delete this note.
+shape the report describes, and it is the ground truth for the labelled-rule clip only. It is still
+the only file carrying a `─ Worked for … ───` row and Codex's old fill-painted diff rows, so it
+stays until a capture shows both.
 
 Two rows matter, and both are 100 columns wide:
 
@@ -106,6 +108,21 @@ Two rows matter, and both are 100 columns wide:
 | Fixture | State / what's in it | Herdr status |
 |---|---|---|
 | `codex--submitted-fill-labelled-rule.txt` | Finished turn: the near-white submitted-message row, an assistant line, two coloured diff rows, the labelled `Worked for` rule, then the idle composer and the two-field status row | `idle` |
+
+## Codex light fills (why the rule is luminance, not a value)
+
+`codex--v0154-submitted-fill.txt` was captured to answer PR #144's open ask for a real buffer, and
+it answered a second question on the way. The fill in it is `rgb(240,240,240)`, the value #144
+reported — but a Codex 0.154.0 pane on the same host, same version, same `tui.theme`, same
+workspace, paints `rgb(244,244,244)` on exactly these rows. That buffer is a real work session and
+is not committed here; the four-level difference is pinned as a byte string in
+[`codex.test.ts`](../../lib/harness/codex.test.ts) instead.
+
+What makes one pane light on 240 and another on 244 is not established. That is the point: an exact
+match is a list of the fills someone happened to see, and it fails silently. `lib/harness/light-fill.ts`
+matches by luminance instead, and Codex's floor sits at 220 — every fill in this whole corpus is
+either Codex's 240 band or 188 and below, so 220 stands in a 52-point gap. A capture that ever lands
+inside that gap is the signal to argue the number again.
 
 ## Pi 0.85 working editor (reconstructed 2026-09-05)
 
@@ -238,6 +255,35 @@ neighbours), so the grammar matches on shape and never on colour.
 | `claude--autocomplete-slash-long.txt` | `/model` typed on a machine with many skills: 23 popup rows — 17 entries at a description column of 43, six of whose blurbs wrap onto a continuation row. **No statusline and no key-hint footer**: while the popup is open the run reaches the last line of the screen. The capture the bug was diagnosed from |
 | `claude--autocomplete-slash-short.txt` | The 3-row shape (`/re` → `/rename`, `/resume`, `/release-notes`) at a description column of 23, first row highlighted. **Derived**: written to the same layout and SGR palette as the long capture, at a width that fits the page |
 
+## Model-alias capture (2026-09-13, Claude Code v2.1.270, throwaway Herdr pane)
+
+One byte-faithful `pane.read format:ansi` capture, and the only thing it is evidence for is that
+Claude Code takes an ALIAS as an argument to `/model`. The harness bar's Claude Model chooser offers
+`opus`, `sonnet`, `haiku` and `default`, and those four names are the one set of strings in
+[`harness-bar.ts`](../../lib/harness-bar.ts) that no published catalog vouches for — so the row cites
+this file. `/model sonnet` was typed into an idle pane in `/tmp/fable-capture-claude` and Enter
+pressed; nothing else was sent, and no model turn was ever run. Claude answered on the row under the
+echo, and the statusline under it moved from `[Opus·medium]` to `[Sonnet·xhigh]` in the same frame.
+That acknowledgement is the whole point of the file: it says the command was understood, not merely
+that it was accepted as text.
+
+CRLF throughout with no trailing newline; `wc -l` is 62.
+
+**One sanitization pass, LENGTH-PRESERVING, two substitutions.** The welcome banner names the
+subscription the session runs on (`Claude Max` → `Claude Pro`), and the statusline's `LIMITS` row
+prints per-account quota, whose four values become zeroes (`12%`, `31m`, `14%`, `18h` → `00%`, `00m`,
+`00%`, `00h`) the way the OMP approval corpus below zeroes its own. Byte length is unchanged, 2799
+before and after. Nothing else needed it: the cwd is a throwaway `/tmp` directory, and no username,
+hostname, home path, email, session id or credential-shaped string appears in the file.
+
+| Fixture | State / what's in it | Herdr status |
+|---|---|---|
+| `claude--model-alias.txt` | `❯ /model sonnet` echoed on a filled row, then `⎿ Set model to Sonnet 5 and saved as your default for new sessions`, a screen of blank rows, and the idle input box above a `LIMITS` row and a `[Sonnet·xhigh]` statusline | `idle` |
+
+**Running this capture changes the operator's saved default.** Claude's own sentence says so, and the
+`model` key in `~/.claude/settings.json` really moved. Put it back by hand after capturing, or capture
+with an isolated `CLAUDE_CONFIG_DIR`.
+
 ## Wizard corpus (captured 2026-07-05, sandbox pane; choreography in `../../lib/grammar/WIZARD_NOTES.md`)
 
 | Fixture | State / what's in it |
@@ -285,17 +331,13 @@ all twenty-one are asserted that way (`harness/omp.test.ts`). Ten carry a live c
 eleven are modals the reply pre-flight has to refuse, and they are **six picker screens** (`/model`,
 `/settings` and `/resume`, each with a moved-selection twin) plus **five `ask`-tool screens**.
 
-**What this corpus does not contain: omp's tool-approval dialog.** No capture of it exists here, so
-nothing below pins `composerReady` on the one screen where a wrong `true` would be worst — a reply
-typed at a live approval prompt, with the submit key answering it. Two things stand in for a capture
-today, and neither is a substitute for one: `ompBuildBlocks` returns a `raw` block *unconditionally*,
-so an approval screen cannot be up-levelled whether or not anyone has seen it; and the pre-flight's
-`false` on such a screen is **inferred** from the eleven modals that were captured. The inference now
-rests on something the scanner actually tests rather than on a property of the captures: every one of
-those eleven is a **box drawn at column 0**, and `locateComposer` refuses any composer with a box
-under it (`opensBox`, omp/chrome.ts step (a)), so an approval dialog drawn the way all eleven are is
-declined by the same rule. What remains uncaptured is whether omp draws that one as a box at all.
-Capturing it is the first thing the later Tier-2 contribution owes, ahead of any grammar.
+**omp's tool-approval dialog now has its own section below** ("OMP tool-approval corpus", captured
+2026-09-10). It used to be this corpus's known gap, and the reason it mattered is worth keeping:
+`ompBuildBlocks` returns a `raw` block *unconditionally*, so an approval screen could never be
+up-levelled whether or not anyone had seen it — but the pre-flight's `false` on one was **inferred**
+from the eleven modals here rather than measured, on the one screen where a wrong `true` would be
+worst. That inference rested on a premise nothing tested: whether omp draws that screen as a box at
+all. It does, and the captures below measure it.
 
 | Fixture | State / what's in it | Herdr status |
 |---|---|---|
@@ -415,6 +457,78 @@ prompt, typed `COLLIE_RULE_18110_LIVE_ACK` with `submit:false`, read the pane ba
 empty `submit:true`; the pane rendered the exact marker and not the stale prefix. With `/model` open,
 the UI retained `COLLIE_RULE_18110_MODAL_GUARD`, offered the explicit override, sent no `/reply` or
 `/keys` write, and left the modal unchanged.
+
+## OMP tool-approval corpus (captured 2026-09-10, oh-my-pi `omp` v18.1.17, herdr 0.9.0, two sandbox panes)
+
+Three byte-faithful `pane.read format:ansi` captures from throwaway Herdr panes in
+`/tmp/collie-omp-sandbox` (a `git init` repo), taken with `scripts/capture-fixture.sh`. They close the
+gap `harness/omp/index.ts` named: the tool-approval dialog, which the omp adapter declined without
+anyone ever having captured it.
+
+**One sanitization pass, LENGTH-PRESERVING.** The operator's statusline is the final row and names
+per-account quota. Two substitutions there, both same-length and with the SGR escape sequences left
+untouched: every DIGIT becomes `0`, and the account labels become generic (`A`/`B`/`C`/`D` for the
+Claude profiles, `codex1`/`codex2` for the Codex accounts). The row's byte length is unchanged — 1267
+bytes before and after, all three files. Nothing else needed substitution: no username, hostname,
+home path, session id or credential-shaped string appears in any of the three. LF throughout with no
+trailing newline; their `wc -l` counts are 52, 48 and 48.
+
+The dialog is a BOX AT COLUMN 0 that spans the pane, titled `Allow tool: <tool>`, with two option
+rows (`Approve` then `Deny`) and an `up/down navigate  enter select  esc cancel` footer. Every row of
+it opens with a Box Drawing character — `╭`, `│`, `╰` — which is what `markers.ts`'s `BOX_ROW` matches,
+so `locateComposer` refuses the composer beneath it. That is the premise `omp/index.ts` had to infer
+and these captures measure.
+
+**The body fields are not fixed.** A bash approval gated by a config `approval: prompt` pattern
+carries `Reason:` (naming the pattern) and `Command:`. A `write` approval gated by
+`--approval-mode always-ask` carries `Path:` and `Content:`, and `Content:` runs onto its own row, so
+a body field can be multi-line. `Reason:` appeared only on the pattern-gated capture, so it looks
+tied to WHY approval was requested rather than to the tool — one example each, so that is a
+hypothesis, not a finding.
+
+| Fixture | State / what's in it | Herdr status |
+|---|---|---|
+| `omp--approval-bash.txt` | bash approval from a config pattern: `Reason: Prompt required by bash pattern: gh issue create *`, `Command: gh issue create --help`, Approve selected | `blocked` |
+| `omp--approval-write.txt` | `write` approval under `--approval-mode always-ask`: `Path:` plus a multi-row `Content:`, Approve selected | `blocked` |
+| `omp--approval-write--deny.txt` | The same screen with Deny selected. Three rows differ from the capture above: the two option rows, which swap the U+F054 marker, and the `Working…` spinner row, whose visible text is identical but whose SGR styling is not (the spinner was mid-animation) | `blocked` |
+
+Keys live-probed on the real dialogs, not inferred. `y` is NOT a shortcut: the dialog was unchanged,
+no character was typed anywhere, and the command did not run. `enter` selects the marked row — on the
+bash dialog it approved and `gh issue create --help` then ran. `down` moves the U+F054 marker from
+`Approve` to `Deny`, which is the entire difference between the two `write` captures. `esc` cancels —
+probed on the `write` dialog, with the target file verified absent afterwards. One reproduction trap
+worth recording: `read` is auto-approved even under `--approval-mode always-ask`, so a read call
+paints no dialog and cannot be used to generate one.
+
+## OMP `/tree` capture (2026-09-13, oh-my-pi `omp` v18.1.19, throwaway Herdr pane)
+
+One byte-faithful `pane.read format:ansi` capture, and the only thing it is evidence for is that omp
+has `/tree` and what omp paints for it. The harness bar's omp rows each name a capture, so the Tree
+button waited on this file rather than on the argument that omp is a pi fork
+([`harness-bar.ts`](../../lib/harness-bar.ts)).
+
+omp 18.1.19 was installed into a throwaway prefix and run in `/tmp/fable-omp-sandbox`, a `git init`
+repo. Its five-step first-run setup was skipped with `Escape`, so the session has **no model at all**
+— the screen carries omp's own `No models available` warning. `/tree` still works, which is itself the
+finding: the command is local to the TUI and needs no provider.
+
+The screen is a box at column 0 titled `Session Tree`, with a long hint row
+(`Enter: switch. Alt+↑/↓: previous/next turn. PgUp/PgDn (←/→): page. …`), a `Search:` row, a rule, and
+then the filtered list, which here reads `1 entries hidden by the current filter [default]` over
+`Press Alt+A to show all, Alt+D for default` and `(0/1)`. `Alt+A` was probed: it reveals the one entry
+as `› • [thinking: high]` and flips the footer to `[all]`. `Alt+D` put the default filter back, and the
+capture is that default state — what `/tree` paints on its own, with nothing driven after it.
+
+CRLF throughout with no trailing newline; `wc -l` is 35. **No sanitization pass was needed**, and that
+is verified rather than assumed: the file contains no username, hostname, home path, email, session id,
+credential-shaped string or UUID, and the modal covers the statusline that would otherwise carry the
+cwd. The session had no provider signed in, so there is no vendor account state to rewrite either.
+
+| Fixture | State / what's in it | Herdr status |
+|---|---|---|
+| `omp--tree.txt` | The welcome panel and the `No models available` warning above a `╭─ Session Tree ─╮` box: hint row, `Search:` row, rule, then the default filter's `1 entries hidden` notice and `(0/1)` | `idle` |
+
+`/tree` was dismissed with `Escape`; nothing in the tree was ever switched to.
 
 ## Lessons already encoded here (don't re-learn them)
 

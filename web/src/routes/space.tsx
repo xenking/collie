@@ -13,7 +13,7 @@ import { BuildStamp } from "@/components/build-stamp";
 import { UpdateBanner } from "@/components/update-banner";
 import { useSpaceActions } from "@/hooks/use-spaces";
 import { homePath, panePath, spacePath } from "@/lib/nav";
-import { leadHost, paneScope } from "@/lib/hosts";
+import { ambientHost, paneScope } from "@/lib/hosts";
 import type { AgentView } from "@/lib/types";
 import { setStatus } from "@/lib/status";
 import { isReadOnly } from "@/lib/types";
@@ -49,9 +49,14 @@ export function SpaceRoute() {
   const toDashboard = () => navigate(homePath(data.scope));
   const switchSpace = (id: string) => navigate(spacePath(id, data.scope));
   const switchTab = (id: string | null) => setTab(id);
-  // Lead-local navigator (peer workspaces are not unioned), so its panes are the lead's — but the
-  // pane still supplies its own host, so opening one can never point the URL at another machine.
-  const navHost = leadHost(data.servers);
+  // The machine THIS space is addressed on, not necessarily the one leading the crew. The loader's
+  // `ambientSpaces` narrows `data.workspaces`/`data.tabs` to the host `?h=` names before this route
+  // ever sees them (or the lead, absent one; untagged rows, i.e. every solo snapshot, pass
+  // regardless) — so `selectedWs`, found in that already-narrowed list, is always the addressed
+  // host's own space, and pane grouping (keyed on `(host, workspaceId)`) must use the SAME host, not
+  // re-derive one from the workspace row. Keying on the lead instead matched nothing and drew every
+  // tab as "(empty tab)" (#209). Undefined when solo, which is `undefined` both ways.
+  const navHost = ambientHost(data.servers, data.scope.host);
   const open = (pane: AgentView) =>
     navigate(panePath(pane.paneId, paneScope(data.scope, pane, data.servers, data.sessions)));
 
@@ -97,6 +102,7 @@ export function SpaceRoute() {
             <SpaceStrip
               workspaces={data.workspaces}
               agents={data.agents}
+              host={navHost}
               selected={spaceId}
               onSelect={(id) => (id === null ? toDashboard() : switchSpace(id))}
               onNewSpace={() => setNewSpaceOpen(true)}

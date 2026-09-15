@@ -96,6 +96,7 @@ describe("VoiceInput", () => {
         <VoiceInput
           replySpeechSupported={true}
           paneId="w1:p4"
+          recordingMode="toggle"
           showControl
           disabled={false}
           onTranscript={onTranscript}
@@ -143,6 +144,7 @@ describe("VoiceInput", () => {
       <VoiceInput
         replySpeechSupported={false}
         paneId="w1:p4"
+        recordingMode="toggle"
         showControl
         disabled={false}
         onTranscript={onTranscript}
@@ -174,6 +176,7 @@ describe("VoiceInput", () => {
     render(
       <VoiceInput
         replySpeechSupported={true}
+        recordingMode="toggle"
         paneId="w1:p4"
         showControl
         disabled={false}
@@ -203,6 +206,7 @@ describe("VoiceInput", () => {
     const { unmount } = render(
       <VoiceInput
         replySpeechSupported={true}
+        recordingMode="toggle"
         paneId="w1:p4"
         showControl
         disabled={false}
@@ -233,6 +237,7 @@ describe("VoiceInput", () => {
       render(
         <VoiceInput
           replySpeechSupported={true}
+          recordingMode="toggle"
           paneId="w1:p4"
           showControl
           disabled={false}
@@ -269,6 +274,7 @@ describe("VoiceInput", () => {
     render(
       <VoiceInput
         replySpeechSupported={true}
+        recordingMode="toggle"
         paneId="w1:p4"
         showControl
         disabled={false}
@@ -302,6 +308,7 @@ describe("VoiceInput", () => {
     render(
       <VoiceInput
         replySpeechSupported={true}
+        recordingMode="toggle"
         paneId="w1:p4"
         showControl
         disabled={false}
@@ -320,6 +327,7 @@ describe("VoiceInput", () => {
     render(
       <VoiceInput
         replySpeechSupported={true}
+        recordingMode="toggle"
         paneId="w1:p4"
         showControl
         disabled={false}
@@ -354,6 +362,7 @@ describe("VoiceInput", () => {
           <output>{input}</output>
           <VoiceInput
             replySpeechSupported={true}
+            recordingMode="toggle"
             paneId="w1:p4"
             showControl={!input.trim() || voice !== null}
             disabled={false}
@@ -389,11 +398,12 @@ describe("VoiceInput", () => {
     expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"end"}');
   });
 
-  it("keeps early PCM eligible when recording stops before the bridge is ready", async () => {
+  it("releases a recording stopped before the bridge is ready without starting a late turn", async () => {
     FakeSocket.autoReady = false;
     render(
       <VoiceInput
         replySpeechSupported={true}
+        recordingMode="toggle"
         paneId="w1:p4"
         showControl
         disabled={false}
@@ -408,10 +418,10 @@ describe("VoiceInput", () => {
     await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
     await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce());
     fireEvent.click(button);
-    FakeSocket.instances[0].emit({ kind: "ready" });
-    await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"start"}'));
-    FakeSocket.instances[0].emit({ kind: "recording", generation: 1 });
-    expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"end"}');
+    act(() => FakeSocket.instances[0].emit({ kind: "ready" }));
+    await waitFor(() => expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"release"}'));
+    expect(FakeSocket.instances[0].send).not.toHaveBeenCalledWith('{"kind":"start"}');
+    expect(screen.getByRole("button", { name: "Start voice input" })).toBeEnabled();
   });
 
 
@@ -420,6 +430,7 @@ describe("VoiceInput", () => {
     render(
       <VoiceInput
         replySpeechSupported={true}
+        recordingMode="toggle"
         paneId="w1:p4"
         showControl
         disabled={false}

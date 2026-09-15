@@ -106,6 +106,9 @@ const AGENT_VIEW_KEYS = {
   // present exactly when the snapshot was widened (`?sessions=all`, the "All sessions" view), absent
   // on every other read — which is every read the app made before that view existed.
   session: true,
+  // Also not a crew dimension: the pane's prompt-cache reading (M28/02), computed on the machine the
+  // pane lives on and absent until its agent has taken one turn. A 1.8.x peer omits it.
+  cache: true,
 } satisfies Record<keyof AgentView, true>;
 
 const DEVICE_AUTH_KEYS = {
@@ -148,6 +151,9 @@ const UPDATE_INFO_KEYS = {
   // Whether the release ahead changes the crew wire (M27/06). Optional and ABSENT on a solo
   // install, for the same reason: a machine with no crew has no link to change.
   linkChange: true,
+  // The newest urgent release in the delta (ADR 0046). Optional, and absent on every ordinary
+  // release, so a solo payload is byte-identical to what it was.
+  urgent: true,
 } satisfies Record<keyof UpdateInfo, true>;
 
 describe("solo zero-tax — the client's mirror types carry no crew dimension", () => {
@@ -189,6 +195,7 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
     expect(AGENT_VIEW_KEYS.session).toBe(true);
     expect(Object.keys(AGENT_VIEW_KEYS).toSorted()).toEqual([
       "agent",
+      "cache",
       "cwd",
       "focused",
       "hasSession",
@@ -241,6 +248,9 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
       "restartNeeded",
       "run",
       "settledAt",
+      // The newest urgent release in the delta (ADR 0046) — optional, and absent unless a release
+      // asked for the daily cadence.
+      "urgent",
     ]);
   });
 

@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { ChevronLeft, Loader2, Plus } from "lucide-react";
 
 import { Chip } from "@/components/ui/chip";
@@ -12,10 +13,18 @@ import { useMuxCapability, useMuxHasSpaces } from "@/lib/mux-capability";
 import type { AgentView, WorkspaceView } from "@/lib/types";
 import { t } from "@/lib/i18n";
 import { useLocale } from "@/hooks/use-locale";
+import { useRevealActive } from "@/hooks/use-reveal-active";
 
 interface SpaceStripProps {
   workspaces: WorkspaceView[];
   agents: AgentView[];
+  /**
+   * The addressed host (`?h=`, or the lead absent one) — the same value the space route looks its
+   * panes up under. Without it, a chip matched agents by `workspaceId` alone, so a blocked agent in
+   * another machine's identically-numbered space coloured this one's chip too (#209). Undefined on a
+   * solo install, which is what every agent's own `host` is there too.
+   */
+  host?: string;
   /** Selected workspace id, or null for the "All" triage view. */
   selected: string | null;
   onSelect: (workspaceId: string | null) => void;
@@ -36,6 +45,7 @@ interface SpaceStripProps {
 export function SpaceStrip({
   workspaces,
   agents,
+  host,
   selected,
   onSelect,
   onNewSpace,
@@ -49,6 +59,10 @@ export function SpaceStrip({
   // not have — and a row of switches with exactly one switch on it says the wrong thing about which.
   const hasSpaces = useMuxHasSpaces();
   useLocale();
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  // Keyed on `selected`; the drill-in (`onBack` set) has no active chip at all — "Back" isn't one —
+  // so there is nothing this strip needs to reveal there, and the hook simply finds no element.
+  useRevealActive(scrollerRef, selected);
   // On a one-space multiplexer the tab strip is the top level and this row has nothing to offer —
   // except the way back, which is navigation rather than a space and must not disappear with them.
   // With no back button there is nothing left to render at all.
@@ -62,7 +76,11 @@ export function SpaceStrip({
     // border-b border-rule: this band closes its own bottom, from ABOVE, so the division between
     // the Spaces row and the Tabs row below it is drawn once — not by whatever the tab bar draws
     // from below, which would land on the same y and read as a doubled 2px line.
-    <LabelledStrip label={t("space.strip.title")} className="border-b border-rule">
+    <LabelledStrip
+      label={t("space.strip.title")}
+      className="border-b border-rule"
+      scrollerRef={scrollerRef}
+    >
       {onBack ? (
         <button
           type="button"
@@ -90,8 +108,15 @@ export function SpaceStrip({
             label={w.label}
             active={selected === w.workspaceId}
             ring={w.focused}
-            // Same dot language as the tab strip directly below it, and as the herd list.
-            status={worstTriage(agents.filter((a) => a.workspaceId === w.workspaceId))}
+            // Same dot language as the tab strip directly below it, and as the herd list. Host-
+            // qualified: another machine's identically-numbered space is not this one, however an
+            // UNTAGGED agent (an un-widened solo body) matches any host — the same rule
+            // `ambientPanes`/`findPane` use in lib/hosts.ts.
+            status={worstTriage(
+              agents.filter(
+                (a) => a.workspaceId === w.workspaceId && (a.host === undefined || a.host === host),
+              ),
+            )}
             onClick={() => onSelect(w.workspaceId)}
           />
         ))}

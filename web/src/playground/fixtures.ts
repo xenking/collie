@@ -11,10 +11,12 @@
 //     `HostHealth`, `DevicesData` and `HomeData` are all imported and annotated, so a wire change
 //     breaks this file at `tsc` rather than at a confusing render.
 //
-//  2. **It EXTENDS `@/test/handlers`, it does not replace it.** The test suite's fixtures are still
-//     re-exported below and still used where a card wants to show exactly what a test asserts. The
-//     richer set lives alongside them because a two-agent herd cannot show a four-section triage,
-//     a nine-machine formation, or a "needs you" count that means anything.
+//  2. **It EXTENDS `@/test/handlers`, it does not replace it.** A card that wants to show exactly
+//     what a test asserts imports the test suite's fixtures directly from `@/test/handlers`, never
+//     through this file — this file does not re-export them, so a name added here can be trusted to
+//     have no bearing on what a unit test's own fixtures assert. The richer set below exists
+//     alongside them because a two-agent herd cannot show a four-section triage, a nine-machine
+//     formation, or a "needs you" count that means anything.
 //
 //  3. **ONE clock anchor, {@link TS}, and every timestamp is expressed as an offset from it.** No
 //     fixture calls `Date.now()` for itself. That matters twice over: the crew surfaces date their
@@ -33,6 +35,9 @@ import type {
   DeviceAuth,
   CrewMemberStatus,
   CrewStatusResponse,
+  CacheWatchListEntry,
+  CacheWatchState,
+  PaneCache,
   ServerSummary,
   SessionSummary,
   TabView,
@@ -47,14 +52,6 @@ import type {
 // escape sequences and all, rather than a re-typed approximation of one.
 import claudePermissionBash from "@/fixtures/panes/claude--permission-bash.txt?raw";
 import claudeWorking from "@/fixtures/panes/claude--working.txt?raw";
-
-export {
-  fixtureAgents,
-  fixtureCrewStatus,
-  fixtureServers,
-  fixtureSessions,
-  fixtureShellPanes,
-} from "@/test/handlers";
 
 // ── The one clock ────────────────────────────────────────────────────────────────────────────────
 
@@ -158,6 +155,39 @@ export const tabs: TabView[] = [
   { tabId: "w4:t2", workspaceId: "w4", number: 2, label: "seo-pass", focused: false, paneCount: 1 },
 ];
 
+/**
+ * A workspace with far more tabs than fit a 390px strip — the fixture for the "reveal the active
+ * tab" playground card and its browser case. Sixteen short, realistic tab names; the ACTIVE one
+ * (`aria-current`) is the 14th, deep enough into the row that it starts fully off-screen on mount.
+ */
+export const manyTabsWorkspaceId = "w5";
+export const manyTabsActiveTabId = "w5:t14";
+export const manyTabs: TabView[] = [
+  "shell",
+  "docs",
+  "fix-deploy",
+  "migrate-users",
+  "billing-webhooks",
+  "flake-bump",
+  "hosts",
+  "seo-pass",
+  "post/collie-launch",
+  "feat/crew-overview",
+  "nixcfg",
+  "notes",
+  "scratch",
+  "fix-dirty-refusal",
+  "release-notes",
+  "cleanup",
+].map((label, i) => ({
+  tabId: `w5:t${i + 1}`,
+  workspaceId: manyTabsWorkspaceId,
+  number: i + 1,
+  label,
+  focused: false,
+  paneCount: 1,
+}));
+
 // ── The herd ─────────────────────────────────────────────────────────────────────────────────────
 //
 // Fourteen panes across those four spaces and four harnesses, laid out so every triage section has
@@ -192,6 +222,7 @@ const needsYou: AgentView[] = [
     lastActiveAt: TS - 90 * SEC,
     lastSeenAt: TS - 26 * MIN,
     readableLines: 400,
+    cache: { state: "warm", expiresAt: TS + 41 * MIN, ttlSeconds: 3600, ruleId: "claude.subscription", confidence: "documented" },
   },
   {
     paneId: "w2:p3",
@@ -209,6 +240,8 @@ const needsYou: AgentView[] = [
     lastActiveAt: TS - 7 * MIN,
     lastSeenAt: TS - 55 * MIN,
     readableLines: 400,
+    // Under the warn window: the countdown reads as `expiring`, not `warm`.
+    cache: { state: "expiring", expiresAt: TS + 2 * MIN, ttlSeconds: 300, ruleId: "codex.subscription", confidence: "documented" },
   },
   {
     paneId: "w3:p2",
@@ -249,6 +282,7 @@ const readyUnseen: AgentView[] = [
     lastActiveAt: TS - 11 * MIN,
     lastSeenAt: TS - 2 * HOUR,
     readableLines: 400,
+    cache: { state: "warm", expiresAt: TS + 23 * MIN, ttlSeconds: 3600, ruleId: "claude.subscription", confidence: "documented" },
   },
   {
     paneId: "w4:p2",
@@ -286,6 +320,9 @@ const working: AgentView[] = [
     lastActiveAt: TS - 40 * SEC,
     lastSeenAt: TS - 40 * SEC,
     readableLines: 400,
+    // Populated bottom slot: a warm reading, so the "Working" section shows one row with a cache
+    // chip beside rows carrying the empty slot the two-slot column reserves for it either way.
+    cache: { state: "warm", expiresAt: TS + 8 * MIN, ttlSeconds: 300, ruleId: "anthropic-claude-sonnet", confidence: "documented" },
   },
   {
     paneId: "w2:p1",
@@ -301,6 +338,7 @@ const working: AgentView[] = [
     terminalTitle: "running drizzle-kit generate",
     lastActiveAt: TS - 4 * MIN,
     lastSeenAt: TS - 12 * MIN,
+    cache: { state: "warm", expiresAt: TS + 6 * MIN, ttlSeconds: 300, ruleId: "codex.api", confidence: "documented" },
   },
   {
     paneId: "w3:p1",
@@ -316,6 +354,8 @@ const working: AgentView[] = [
     hasSession: true,
     lastActiveAt: TS - 12 * MIN,
     lastSeenAt: TS - 40 * MIN,
+    // A cold reading needs no `expiresAt` — the bridge's own state is trusted outright.
+    cache: { state: "cold", ttlSeconds: 300, ruleId: "pi.anthropic", confidence: "documented" },
   },
   {
     paneId: "w4:p1",
@@ -331,6 +371,7 @@ const working: AgentView[] = [
     paneLabel: "launch post",
     lastActiveAt: TS - 38 * MIN,
     lastSeenAt: TS - 38 * MIN,
+    cache: { state: "warm", expiresAt: TS + 4 * MIN, ttlSeconds: 300, ruleId: "opencode.google", confidence: "documented" },
   },
   {
     paneId: "w2:p2",
@@ -347,6 +388,7 @@ const working: AgentView[] = [
     terminalTitle: "waiting on CI",
     lastActiveAt: TS - 2 * HOUR - 20 * MIN,
     lastSeenAt: TS - 2 * HOUR - 20 * MIN,
+    cache: { state: "warm", expiresAt: TS + 12 * MIN, ttlSeconds: 3600, ruleId: "claude.subscription", confidence: "documented" },
   },
 ];
 
@@ -366,6 +408,9 @@ const resting: AgentView[] = [
     hasSession: true,
     lastActiveAt: TS - 4 * HOUR,
     lastSeenAt: TS - 34 * MIN,
+    // A cold reading needs no `expiresAt` — the bridge's own state is trusted outright
+    // (`lib/cache-view.ts`).
+    cache: { state: "cold", ttlSeconds: 300, ruleId: "anthropic-claude-sonnet", confidence: "documented" },
   },
   {
     paneId: "w1:p3",
@@ -378,12 +423,13 @@ const resting: AgentView[] = [
     status: "idle",
     cwd: "/home/you/src/collie",
     focused: false,
-    // A title the program that printed it has already exited under: it demotes to the muted line and
-    // stops being the pane's NAME (see `paneDisplayName`), which is a state worth being able to see.
+    // A title the program that printed it has already exited under: it stops being the pane's NAME
+    // (see `paneName` in lib/pane-name.ts), which is a state worth being able to see.
     terminalTitle: "pnpm test --watch",
     terminalTitleStale: true,
     lastActiveAt: TS - 6 * HOUR,
     lastSeenAt: TS - 3 * HOUR,
+    cache: { state: "cold", ttlSeconds: 300, ruleId: "codex.api", confidence: "documented" },
   },
   {
     paneId: "w1:p4",
@@ -441,7 +487,7 @@ export const sessionsSolo: SessionSummary[] = [
 
 /** The same three on the lead, plus one per peer. Every machine calls its primary "default". */
 export const sessionsCrew: SessionSummary[] = [
-  ...sessionsSolo.map((s) => ({ ...s, host: "bluefin" })),
+  ...sessionsSolo.map((s) => ({ ...s, host: "lodge" })),
   { name: "default", isPrimary: true, reachable: true, agents: 3, working: 1, blocked: 1, host: "workshop" },
   { name: "default", isPrimary: true, reachable: true, agents: 1, working: 0, blocked: 0, host: "attic" },
   { name: "default", isPrimary: true, reachable: false, agents: 0, working: 0, blocked: 0, host: "cellar" },
@@ -453,8 +499,8 @@ export const sessionsCrew: SessionSummary[] = [
 // the LEAD on receipt, so it is comparable to `ts` and to nothing else (CREW_PROTOCOL.md §10.2).
 
 const lead: ServerSummary = {
-  id: "bluefin",
-  name: "bluefin",
+  id: "lodge",
+  name: "lodge",
   isLead: true,
   reachable: true,
   protocol: "ok",
@@ -557,8 +603,8 @@ function member(
 }
 
 const selfMember: CrewMemberStatus = {
-  id: "bluefin",
-  name: "bluefin",
+  id: "lodge",
+  name: "lodge",
   isLead: true,
   health: "reachable",
   lastSeenAt: TS - 2 * SEC,
@@ -568,11 +614,11 @@ const selfMember: CrewMemberStatus = {
 };
 
 const crewMeta = { id: "pk1", name: "kennel", secretGeneration: 4, rotatedAt: TS - 9 * DAY };
-const crewSelf = { id: "bluefin", name: "bluefin", version: LEAD_VERSION };
+const crewSelf = { id: "lodge", name: "lodge", version: LEAD_VERSION };
 
 /** One machine, leading nobody but itself — the smallest census a lead can serve. */
 export const censusSolo: CrewStatusResponse = {
-  crew: { ...crewMeta, name: "bluefin" },
+  crew: { ...crewMeta, name: "lodge" },
   self: crewSelf,
   deputy: null,
   members: [selfMember],
@@ -702,19 +748,19 @@ export function onHost(pane: AgentView, host: string): AgentView {
 
 /**
  * Which machine each herd row lands on. Written out rather than round-robined so the counts are
- * CHOSEN: rows 0 and 1 are the first two blocked panes and land on `bluefin` and `workshop`, which
+ * CHOSEN: rows 0 and 1 are the first two blocked panes and land on `lodge` and `workshop`, which
  * is what gives exactly two machines a non-zero "needs you" number in the server switcher.
  */
 const CREW_HOST_BY_INDEX: readonly string[] = [
-  "bluefin", // needs-you #1
+  "lodge", // needs-you #1
   "workshop", // needs-you #2
-  "bluefin", // needs-you #3
-  "bluefin", // ready · unseen
+  "lodge", // needs-you #3
+  "lodge", // ready · unseen
   "attic", // ready · unseen
-  "bluefin", // working
+  "lodge", // working
   "workshop", // working
   "attic", // working
-  "bluefin", // working
+  "lodge", // working
   "workshop", // working
 ];
 
@@ -726,7 +772,7 @@ const CREW_HOST_BY_INDEX: readonly string[] = [
 export const homeCrew: HomeData = {
   ...homeSolo,
   agents: herd.map((a, i) => onHost(a, CREW_HOST_BY_INDEX[i % CREW_HOST_BY_INDEX.length]!)),
-  shellPanes: shells.map((p) => onHost(p, "bluefin")),
+  shellPanes: shells.map((p) => onHost(p, "lodge")),
   sessions: sessionsCrew,
   servers: rosterFive,
 };
@@ -805,7 +851,7 @@ export const updatePeersFollowing: UpdateInfo = {
   run: {
     ...RUN_BASE,
     state: "done",
-    peers: [{ name: "minibuch", state: "restarting", version: "0.31.0" }],
+    peers: [{ name: "workshop", state: "restarting", version: "0.31.0" }],
   },
 };
 
@@ -818,7 +864,7 @@ export const updatePeerRolledBack: UpdateInfo = {
     state: "done",
     peers: [
       {
-        name: "minibuch",
+        name: "workshop",
         state: "rolled-back",
         version: "0.31.0",
         reason: "health gate timed out after three attempts on the standby door",
@@ -833,7 +879,7 @@ export const updateCrewLevel: UpdateInfo = {
   run: {
     ...RUN_BASE,
     state: "done",
-    peers: [{ name: "minibuch", state: "done", version: "0.32.1" }],
+    peers: [{ name: "workshop", state: "done", version: "0.32.1" }],
   },
 };
 
@@ -914,7 +960,7 @@ export const hostIncompatible: HostHealth = {
  *  bare shell has no grammar to pin, so there is nothing on disk to reuse. Real ANSI, hand-written. */
 const ESC = "";
 const shellPaneText = [
-  `${ESC}[1;32myou@bluefin${ESC}[0m:${ESC}[1;34m~/src/collie${ESC}[0m$ bun run test`,
+  `${ESC}[1;32myou@lodge${ESC}[0m:${ESC}[1;34m~/src/collie${ESC}[0m$ bun run test`,
   "",
   `${ESC}[32m✓${ESC}[0m web/src/lib/triage.test.ts (14 tests) 41ms`,
   `${ESC}[32m✓${ESC}[0m web/src/lib/host-health.test.ts (22 tests) 63ms`,
@@ -925,7 +971,7 @@ const shellPaneText = [
   ` Test Files  ${ESC}[31m1 failed${ESC}[0m | ${ESC}[32m3 passed${ESC}[0m (4)`,
   `      Tests  ${ESC}[31m1 failed${ESC}[0m | ${ESC}[32m55 passed${ESC}[0m (56)`,
   "",
-  `${ESC}[1;32myou@bluefin${ESC}[0m:${ESC}[1;34m~/src/collie${ESC}[0m$ `,
+  `${ESC}[1;32myou@lodge${ESC}[0m:${ESC}[1;34m~/src/collie${ESC}[0m$ `,
 ].join("\n");
 
 /** A pane, and the screen it is showing. */
@@ -1018,6 +1064,46 @@ export const paneStack: PaneFixture = paneHostUnreachable;
 /** A device the fronting proxy names and the bridge does not allowlist — the OTHER composer lock,
  *  independent of the crew host gate above, both driven at once for the stack card. */
 export const deviceStack: DeviceAuth = deviceRefused;
+
+// ── Prompt cache readings ────────────────────────────────────────────────────────────────────────
+//
+// `CacheChip` reads the live page clock (`lib/cache-clock.ts`'s own `Date.now()`), never a fixture's
+// clock, so a card's `expiresAt` has to be measured from THIS module's load time or every card would
+// read cold the moment it renders. `cacheNow` is that anchor — a second one from `TS` above, because
+// the cache chip's countdown and the herd's "since" ages are unrelated facts and have no reason to
+// share a number.
+
+export const cacheNow = Date.now();
+
+/**
+ * One pane's prompt-cache reading, with the ordinary defaults a rule-driven number carries. A card
+ * overrides only what it is demonstrating — `state` and usually `expiresAt` — so the ones it doesn't
+ * mention read as a plain, unremarkable rule.
+ */
+export function paneCache(overrides: Partial<PaneCache> & { state: PaneCache["state"] }): PaneCache {
+  return {
+    ttlSeconds: 300,
+    ruleId: "anthropic-claude-sonnet",
+    confidence: "documented",
+    ...overrides,
+  };
+}
+
+// ── The prompt-cache watch list ──────────────────────────────────────────────────────────────────
+
+/**
+ * Two watched panes: one on this collie, one on a member. Enough to show both row shapes the Settings
+ * list has — the bare label, and the label with a machine under it — plus the remove button beside each.
+ *
+ * The ids are what the bridge would publish: eight hex characters of a hash nobody can reverse.
+ */
+export const watchedPanes: CacheWatchListEntry[] = [
+  { id: "b7f1c2a9", label: "collie · next", session: "next", paneId: "%1" },
+  { id: "3d90ee14", label: "infra · claude", host: "minibuch", paneId: "w2:p1" },
+];
+
+/** One pane's place in the list: off, watchable, with the bridge's own 300-second window. */
+export const cacheWatchOff: CacheWatchState = { on: false, global: false, watchable: true, warnSeconds: 300 };
 
 // ── NoEchoNotice (gap 2) ─────────────────────────────────────────────────────────────────────────
 

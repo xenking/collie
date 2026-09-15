@@ -24,7 +24,7 @@ until explicitly configured.
 **Features**
 
 - **React Router + Vite** with TypeScript, Tailwind, shadcn, and a Bun bridge
-- **Status dashboard** ordered by pending user input rather than recent output
+- **Status dashboard** led by what needs your input; every other pane sits under its own workspace, tab on the row
 - **Push notifications** when an agent blocks on user input
 - **Quick actions and slash commands** configured per agent
 - **Keypad for terminal control keys**: `Esc`, `Ctrl+C`, arrows, and modifier combinations
@@ -48,7 +48,7 @@ data without installation.
 
 <table>
   <tr>
-    <td align="center" width="50%"><img src="assets/dashboard.png" alt="Collie dashboard — Needs you, Recent, Spaces" width="250"><br><sub><b>Dashboard</b> — agents needing you float to the top</sub></td>
+    <td align="center" width="50%"><img src="assets/dashboard.png" alt="Collie dashboard — Needs you, then panes grouped by workspace, then Spaces" width="250"><br><sub><b>Dashboard</b> — agents needing you float to the top</sub></td>
     <td align="center" width="50%"><img src="assets/ask-question.png" alt="A Claude permission prompt up-leveled into tappable buttons" width="250"><br><sub><b>Ask</b> — the agent's own prompts become tappable buttons</sub></td>
   </tr>
   <tr>
@@ -117,7 +117,7 @@ requirements table, and what the initial run writes to the host.
 
 | | |
 | --- | --- |
-| [**Install**](./docs/install.md) | Requirements, the two ways in — fresh install or through Herdr — first run, and opening it on your phone |
+| [**Install**](./docs/install.md) | Install, update and uninstall, each spelled for a Herdr plugin and for a standalone install; requirements, packages, first run, and opening it on your phone |
 | [**Security**](./docs/security.md) | What a Collie exposes, the defenses, and pairing a device as the write credential |
 | [**Configure**](./docs/configure.md) | The `.env`, your own slash commands, keys, quick replies and typefaces; appearance, Zen mode, language |
 | [**Deployment**](./docs/deployment.md) | Front doors other than the default: an identity-aware proxy, a reverse proxy with no Tailscale, an off-host ingress, several Collies on one host (one per user, or several instances for one user), and a crew's standby door |
@@ -254,7 +254,8 @@ in place.
 
 A development page that renders the web components across mock states (boot, idle, dashboard, crew,
 settings) without a running agent. This lets you inspect visual elements like banners, marks, boot
-screens, and lock states without manually reproducing each condition.
+screens, and lock states without manually reproducing each condition. Its browser tab wears a red
+icon, so it is never mistaken for a real Collie build.
 
 ```
 cd web && COLLIE_DEV_HOSTS=bluefin,localhost bun run playground
@@ -265,8 +266,27 @@ disables `/api`, preventing requests to a live Collie instance. Vite targets onl
 during production builds, keeping `playground.html` and `src/playground/` out of `dist` and the PWA
 precache. This exclusion is tested in `src/playground/playground-entry.test.ts`.
 
-To add a state, add a `<Section>` in `src/playground/app.tsx` and the corresponding mock data in
-`src/playground/fixtures.ts`.
+The page is tabbed: one section is shown at a time, picked from a sidebar on wide screens and a top
+bar on narrow ones, and only the selected section's components are mounted. The selected tab lives
+in the URL hash. `#pane` opens
+the Pane tab, and `#pane/<card-handle>` also scrolls that card into view once it mounts (the handle
+is the card's `data-state`, e.g. `pane-mid-tool-run`). With no hash, the last tab you were on is
+remembered (`localStorage`); with neither, the page opens on the first tab.
+
+The tabs, in order: Dashboard, Pane, Crew, Settings, Boot & connection, Idle & resume, Brand,
+Notices, Motion. Notices covers everything that ANNOUNCES (the notice primitive, the strip band,
+the status toast); Motion covers everything that MOVES without announcing anything (collapse and
+swap primitives, loading bars, sheets, menus, pending and pulsing controls).
+
+Within a tab, cards are grouped under a `Group` — a small heading over its own `.pg-grid` — ordered
+from the everyday state to the rare one, so a tab with a dozen cards can be skimmed by its group
+titles instead of scrolled blind.
+
+To add a state, add a `<Card>` to the relevant `Group` in the relevant file under
+`src/playground/sections/` and the corresponding mock data in `src/playground/fixtures.ts`. To add
+a whole new section, add a file there exporting `DEF` (a `SectionDef`) and a `<Something>Section`
+component wrapping its cards in one or more `Group`s, then add one line to the `SECTIONS` registry
+in `src/playground/app.tsx`.
 
 For Herdr adapter development, refer to upstream documentation for the plugin system:
 [authoring](https://herdr.dev/docs/plugins/) ·

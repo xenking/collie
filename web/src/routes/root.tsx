@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   Outlet,
   useLoaderData,
@@ -16,11 +17,15 @@ import { useConnectionLost } from "@/hooks/use-connection-lost";
 import { UpdateRibbon } from "@/components/update-ribbon";
 import { ConnectionBanner } from "@/components/connection-banner";
 import { AppHeaderHost } from "@/components/app-header";
+import { StripHost } from "@/components/ui/strip-host";
+import { ScreenTransition } from "@/components/screen-transition";
 import { CrewProvider } from "@/components/crew-provider";
 import { CollieMark } from "@/components/collie-mark";
+import { TourHost } from "@/components/tour-sheet";
 import { describeThrownError } from "@/lib/api-error-message";
 import { homePath } from "@/lib/nav";
 import { scopeFromUrl } from "@/lib/session";
+import { noteLeadName, noteSnapshotRun } from "@/lib/update-run-store";
 import { PANE_ROUTE_ID, type HomeData, type PaneData } from "@/lib/loaders";
 import { t } from "@/lib/i18n";
 import { useLocale } from "@/hooks/use-locale";
@@ -79,7 +84,28 @@ export function RootLayout() {
   // the common one — say nothing at all.
   useBusyWhile(useNavigation().state !== "idle");
   useAgentTransitions(data.agents, paneId ?? null);
-  usePushSetup();
+  // THE PUSH RACE. `usePushSetup` can raise the browser's permission prompt on its own, behind the
+  // tour's backdrop, so it waits until the tour has decided it is not showing. "pending" is what
+  // makes this correct rather than racy: a child's effect runs before the parent's, but the state it
+  // sets is not visible to the parent's effect in the same commit, so a `paused` that started false
+  // would fire the prompt before `TourHost` had decided anything.
+  const [tourDecision, setTourDecision] = useState<"pending" | "open" | "closed">("pending");
+  usePushSetup(tourDecision !== "closed");
+
+  // TWO FACTS PUBLISHED OUT OF THIS ROUTER, and nothing mounted (M28/01). The update screen lives in
+  // `App.tsx`, beside the wrapper it makes inert, so it has no loader data and no `CrewProvider` — and
+  // it needs the snapshot's run record and this machine's own name. Both go into
+  // `lib/update-run-store.ts`, which is the one place the run is reconciled. A component rendered here
+  // would be a descendant of the node the sheet makes inert, which is the arrangement the sheet exists
+  // to avoid.
+  const leadName = data.servers?.find((server) => server.isLead)?.name ?? null;
+  useEffect(() => {
+    noteLeadName(leadName);
+  }, [leadName]);
+  const snapshotRun = data.update?.run;
+  useEffect(() => {
+    noteSnapshotRun(snapshotRun);
+  }, [snapshotRun]);
 
   // A viewport-height flex column: the top banners (when shown) are in-flow rows at the top and the
   // active route fills the rest (each route root is `min-h-0 flex-1`). This is what keeps a banner
@@ -95,24 +121,42 @@ export function RootLayout() {
     // second derivation of it, so the tolerance can never be computed against a cadence we aren't
     // using. That mattered more once the cadence gained inputs beyond the snapshot (#156).
     <CrewProvider servers={data.servers} sessions={data.sessions} ts={data.ts} pollMs={pollMs}>
+      {/* The first-launch tour, and the one component on this shelf that usually renders nothing. It
+          is the GATE as well as the sheet: it reads the per-device store, opens once on the first
+          real snapshot, marks itself seen before the first slide paints, and reports what it decided
+          so the push setup above can hold its prompt back. It sits beside the band rather than
+          inside it because it is not a strip: it covers the screen, it does not share the top of
+          it. */}
+      <TourHost home={data} onDecision={setTourDecision} />
       <div className="flex h-[100dvh] flex-col overflow-hidden">
-        {/* THE update band, and the only one: a release on offer, a confirm just tapped, a run in
-            flight, a new bridge this bundle is behind, and peers following — one fixed-height row
-            that says whichever of those is true. Mounted unconditionally so the bundle self-updater's
-            controller runs (and can auto-update) for the app's lifetime; it returns null when it has
-            nothing to say. */}
-        <UpdateRibbon />
-        {/* The app's ONE connection surface: a thin, animated bar that stays hidden while healthy, fades
-            in amber "reconnecting…" only after ≥4s of sustained trouble (the flicker fix), escalates to a
-            red "not connected" cause + Retry/Reload at ≥15s, and flashes green on recovery. Reads the
-            same shared-clock signals as the header dog, so the two always agree. */}
-        <ConnectionBanner
-          bridge={data.bridge}
-          error={data.error}
-          authError={data.authError}
-          lastSeenAt={shownLastSeenAt(data, pane)}
-        />
-        {/* THE ONE HEADER, and the third thing on this shelf. The two banners above it have always
+        {/* THE BAND, and the rule that there is only ever one strip in it. Four facts can be true at
+            once above the header — the auth refusal, a lost connection, a degraded one, an update on
+            offer — and none of them excludes another. Before this host arbitrated them, each row
+            reserved the notch for itself (each was written assuming it might be the first thing on
+            screen), so ribbon + header on an iPhone paid for the safe-area inset twice and left a
+            dead band at the top of the app. One winner, one inset, one owner.
+
+            The two features below register into it and render nothing where they sit; the header and
+            the route are the host's `children` and follow the band in the DOM. Which fact beats
+            which is `lib/strip-priority.ts` — a fact about this app, deliberately not about `ui/`. */}
+        <StripHost>
+          {/* THE update band, and the only one: a release on offer, a confirm just tapped, a run in
+              flight, a new bridge this bundle is behind, and peers following — one row that says
+              whichever of those is true. Mounted unconditionally so the bundle self-updater's
+              controller runs (and can auto-update) for the app's lifetime; it registers no slot when
+              it has nothing to say. */}
+          <UpdateRibbon />
+          {/* The app's ONE connection surface: a thin bar that stays hidden while healthy, appears
+              amber "reconnecting…" only after ≥4s of sustained trouble (the flicker fix), escalates to a
+              red "not connected" cause + Retry/Reload at ≥15s, and flashes green on recovery. Reads the
+              same shared-clock signals as the header dog, so the two always agree. */}
+          <ConnectionBanner
+            bridge={data.bridge}
+            error={data.error}
+            authError={data.authError}
+            lastSeenAt={shownLastSeenAt(data, pane)}
+          />
+          {/* THE ONE HEADER, and the third thing on this shelf. The two banners above it have always
             survived a navigation because they are rendered HERE rather than inside `<Outlet/>`; the
             header did not, because all six routes mounted their own copy of it, and a header inside
             the outlet unmounts and remounts on every route change. That restarted the Collie mark's
@@ -126,9 +170,19 @@ export function RootLayout() {
             `bridge` and `error` are read here, once, off the root snapshot every route was
             forwarding them from anyway — six copies of the same two fields was six chances to
             disagree with the ConnectionBanner two lines up. */}
-        <AppHeaderHost bridge={data.bridge} error={data.error}>
-          <Outlet />
-        </AppHeaderHost>
+          <AppHeaderHost bridge={data.bridge} error={data.error}>
+            {/* The everyday move, animated: dashboard → pane slides in from the right, back from
+                the left, and every other navigation — a poll revalidation, a scope change, pane to
+                pane — arrives with no animation at all. It wraps the OUTLET and sits BELOW the
+                header for the reason the header sits above it: the key inside remounts the route's
+                subtree so the entrance replays, and everything that must survive a navigation (the
+                band, the header shell, the mark's 37 animations) is already outside it. It is not
+                the View Transitions API and may not become one — see the file's header. */}
+            <ScreenTransition>
+              <Outlet />
+            </ScreenTransition>
+          </AppHeaderHost>
+        </StripHost>
       </div>
     </CrewProvider>
   );

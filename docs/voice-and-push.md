@@ -7,11 +7,10 @@ browser notifications that trigger when an agent is waiting for input.
 
 A **microphone button in the composer**, and a **hands-free switch** in Settings. Tap the button,
 speak, and the transcript lands in the message box for you to read and send. With hands-free on it is
-sent for you — down the same guarded reply path a typed message takes, never around it.
-
-The microphone **is** the round button at the end of the row, for as long as the box is empty; the
-first character you type turns it back into Send. You dictate a message or you type one, so there is
-one primary action rather than two competing for the width of the field.
+sent for you — down the same guarded reply path a typed message takes, never around it. The
+microphone **is** the round button at the end of the row, for as long as the box is empty; the first
+character you type turns it back into Send. You dictate a message or you type one, so there is one
+primary action rather than two competing for the width of the field.
 
 **It does not exist until you run `collie stt setup`.** No button is drawn, no audio leaves the
 phone, no credential is held, no child process runs. Absent, not disabled. Two providers:
@@ -237,6 +236,41 @@ subscription controls in Settings.
 
 Collie sends notifications when an agent enters the **blocked** or **done** state, placing the agent
 message in the body. Selecting the notification navigates directly to that agent in the web UI.
+
+### Which alerts Collie sends
+
+Four kinds, each with its own switch under **Settings → Notify when**.
+
+| Alert | Fires when | Default |
+| --- | --- | --- |
+| Needs input | an agent is waiting on you | on |
+| Finished | an agent completes its task | off |
+| App updates | a newer Collie release is available | on |
+| Cache about to go cold | a pane's prompt cache expires in about five minutes | off |
+
+Every switch is bridge-wide. A push fans out to every subscribed device, so there is nothing
+per-device to set.
+
+The cache warning can also be switched on for **one pane at a time**, from that pane's own settings:
+open the pane, tap the ⋮, then **Pane settings**. Those panes are listed under the global switch in
+Settings, with a Remove button each.
+
+The two states add up rather than override. A pane is warned when the global switch is on **or** the
+pane is on that list, so turning the global switch off does not silence a pane you watched by hand.
+
+A watched pane is warned **once per warm cycle**. The agent's next request moves the deadline, and
+only then can the same pane warn again. The quiet hours apply: a snoozed bridge sends nothing, and a
+snooze that ends inside the window still warns.
+
+`COLLIE_CACHE_WARN_SECONDS` moves the window, default 300 seconds
+([configure.md](configure.md#the-prompt-cache-countdown)).
+
+> **Note.** This alert needs the prompt-cache reading, so it covers the panes that show a cache
+> countdown and no others: the harness has to keep a transcript Collie can read, and the agent has to
+> have taken at least one turn. The window a pane actually warns at is the configured seconds, or half
+> that pane's own cache lifetime, whichever is shorter. A one-hour Claude cache keeps the full 300
+> second window. A five-minute cache, Codex, OpenCode, pi and omp, warns about two and a half minutes
+> before it goes cold instead.
 
 Stale subscriptions can accumulate over time because home-screen reinstalls and service-worker
 resets create new endpoints without always returning an HTTP 410. Collie updates the record when a

@@ -1,11 +1,23 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { createMemoryRouter, RouterProvider } from "react-router";
 
 import { BootSplash, RootLayout, shownLastSeenAt } from "./root";
+import { RouteHeader } from "@/components/app-header";
+import { server } from "@/test/setup";
+import { __resetOperatorCommands } from "@/lib/operator-config";
 import { CONNECTION_LOST_MS } from "@/hooks/use-connection-lost";
 import { __resetConnectionHealth } from "@/lib/connection-health";
 import { collieMark, markIsLive, markPaper } from "@/test/collie-mark";
 import { ROOT_ROUTE_ID, type HomeData, type PaneData } from "@/lib/loaders";
+import { en } from "@/lib/i18n/messages/en";
+import {
+  __resetTourStore,
+  markTourSeen,
+  TOUR_STORAGE_KEY,
+  tourSeenVersion,
+  TOUR_VERSION,
+} from "@/lib/tour";
 
 // BootSplash is the router's HydrateFallback: it stays mounted until the FIRST loader run settles, so
 // over a dead tailnet (a hanging initial fetch) it can otherwise bloom the mark forever with no way
@@ -138,5 +150,364 @@ describe("RootLayout — the document itself never scrolls", () => {
       return el!;
     });
     expect(column.className).toMatch(/(?:^|\s)overflow-hidden(?=\s|$)/);
+  });
+});
+
+// THE NOTCH IS PAID FOR ONCE, IN BOTH STATES, AND THIS IS THE REPORTED BUG.
+//
+// Three rows at the top of this app each set `env(safe-area-inset-top)` for themselves — the update
+// ribbon, the connection bar and the header — every one of them written when it was, or might have
+// been, the first thing on the screen. Any two of them showing at once therefore reserved the notch
+// twice, and on an iPhone that is a tall dead band above the notice. Ribbon + header is the everyday
+// case and the one that was reported.
+//
+// It is asserted HERE, on the whole layout, and not in the three components' own files, because it
+// is exactly the kind of fault that hides from per-component tests: each row was individually
+// correct, and the total was wrong. So the assertion is a count over the rendered tree.
+describe("RootLayout — the safe-area inset is reserved exactly once", () => {
+  function renderLayout(data: HomeData) {
+    const router = createMemoryRouter(
+      [{ id: ROOT_ROUTE_ID, path: "/", loader: () => data, element: <RootLayout /> }],
+      { initialEntries: ["/"] },
+    );
+    return render(<RouterProvider router={router} />);
+  }
+
+  const offered: HomeData = {
+    ...home(AFTERNOON),
+    error: false,
+    update: {
+      current: "1.4.1",
+      latest: "1.5.0",
+      latestUrl: null,
+      releaseAvailable: true,
+      majorAvailable: null,
+      majorUrl: null,
+      bridgeStale: false,
+      checkedAt: 0,
+    },
+  };
+
+  /** Every element reserving the top inset, anywhere in the app's column. */
+  function reservations(container: HTMLElement) {
+    return container.querySelectorAll("[class*='safe-area-inset-top']");
+  }
+
+  it("gives it to the band while a strip is showing, and not to the header as well", async () => {
+    const { container } = renderLayout(offered);
+    await waitFor(() => expect(screen.getByText(/Collie 1.5.0 available/)).toBeInTheDocument());
+
+    expect(reservations(container)).toHaveLength(1);
+    // And it is the band's, above the header — not the header's.
+    const reserved = reservations(container)[0]!;
+    expect(container.querySelector("header")?.contains(reserved)).toBe(false);
+    expect(container.querySelector("header")?.className).not.toMatch(/safe-area/);
+  });
+
+  it("gives it to the header while the band is empty", async () => {
+    const { container } = renderLayout({ ...home(AFTERNOON), error: false });
+    await waitFor(() => expect(container.querySelector("header")).not.toBeNull());
+
+    expect(reservations(container)).toHaveLength(1);
+    expect(container.querySelector("header")?.className).toMatch(/safe-area-inset-top/);
+  });
+});
+
+// NOTHING ABOVE THE OUTLET MAY REMOUNT ON A NAVIGATION, and the screen transition is the change
+// that could break it: it keys the outlet region on the pathname so the arriving screen's entrance
+// replays. A key placed one level too high would take the header shell with it, which is the fault
+// `AppHeaderHost` was hoisted out of the routes to end — the Collie mark's 37 CSS animations
+// restarting at zero on every tap — and it would take the band's two permanent live regions with it
+// as well, which is how a strip stops being announced. So the assertion is element IDENTITY across
+// a real dashboard → pane navigation, not a class or a count.
+describe("RootLayout — the shell survives a navigation", () => {
+  it("keeps the header and the band's live regions as the same DOM nodes", async () => {
+    // Counted, because the OTHER half of the claim is that the key remounts a React subtree and
+    // nothing more: a key is a reconciliation hint, and loaders belong to the router, which never
+    // sees it. A root loader that ran twice here would mean the navigation had reloaded the app's
+    // whole snapshot to slide one screen in.
+    let rootLoads = 0;
+    const router = createMemoryRouter(
+      [
+        {
+          id: ROOT_ROUTE_ID,
+          path: "/",
+          loader: () => {
+            rootLoads += 1;
+            return home(AFTERNOON);
+          },
+          element: <RootLayout />,
+          children: [
+            { index: true, element: <div>dashboard</div> },
+            { path: "pane/:paneId", element: <div>pane</div> },
+          ],
+        },
+      ],
+      { initialEntries: ["/"] },
+    );
+    const { container } = render(<RouterProvider router={router} />);
+    await waitFor(() => expect(screen.getByText("dashboard")).toBeInTheDocument());
+
+    const header = container.querySelector("header");
+    const polite = container.querySelector("[data-slot='strip-live-polite']");
+    const assertive = container.querySelector("[data-slot='strip-live-assertive']");
+    expect(header).not.toBeNull();
+    expect(polite).not.toBeNull();
+    expect(assertive).not.toBeNull();
+
+    await act(() => router.navigate("/pane/w1%3Ap1"));
+    await waitFor(() => expect(screen.getByText("pane")).toBeInTheDocument());
+
+    expect(container.querySelector("header")).toBe(header);
+    expect(container.querySelector("[data-slot='strip-live-polite']")).toBe(polite);
+    expect(container.querySelector("[data-slot='strip-live-assertive']")).toBe(assertive);
+    // …while the region that DOES remount is the one holding the route.
+    expect(container.querySelector("[data-slot='screen-transition']")).not.toBeNull();
+    expect(rootLoads).toBe(1);
+  });
+});
+
+// THE IDENTITY BLOCK IS MOUNTED ONCE AND HIDDEN, NEVER UNMOUNTED — the same claim as the one above,
+// one level deeper, and a reported bug rather than a theory. "Collie on <mux>" rides the wordmark
+// claim, which the dashboard makes and a pane does not. Rendered ON that claim, the block left the
+// DOM on every dashboard → pane move and came back new, and with it a NEW mux-logo `<img>`. The
+// bridge serves that logo with `Cache-Control: no-cache` plus an ETag, so every dashboard open cost
+// a conditional request before the picture could paint: on a phone over Tailscale that is a blank
+// logo box for a round trip, which is what the operator saw glitch (reproduced 2026-09-10). So the
+// assertion is element IDENTITY over a round trip, on the block AND on the image inside it.
+describe("RootLayout — the header identity survives a round trip to a pane", () => {
+  beforeEach(() => {
+    __resetOperatorCommands(); // the mux block is cached for the life of the page; re-read it here
+    server.use(
+      http.get("/api/config", () =>
+        HttpResponse.json({
+          push: false,
+          vapidPublicKey: "",
+          mux: {
+            name: "reference",
+            capabilities: {},
+            unsupportedKeys: [],
+            notes: {},
+            logoUrl: "/api/mux/logo.svg",
+          },
+        }),
+      ),
+    );
+  });
+
+  it("keeps the block and its mux logo as the same DOM nodes, hidden inside the pane", async () => {
+    const router = createMemoryRouter(
+      [
+        {
+          id: ROOT_ROUTE_ID,
+          path: "/",
+          loader: () => ({ ...home(AFTERNOON), error: false }),
+          element: <RootLayout />,
+          children: [
+            {
+              index: true,
+              element: (
+                <>
+                  <RouteHeader wordmark />
+                  <div>dashboard</div>
+                </>
+              ),
+            },
+            {
+              path: "pane/:paneId",
+              element: (
+                <>
+                  <RouteHeader>
+                    <span>webapp › main</span>
+                  </RouteHeader>
+                  <div>pane</div>
+                </>
+              ),
+            },
+          ],
+        },
+      ],
+      { initialEntries: ["/"] },
+    );
+    const { container } = render(<RouterProvider router={router} />);
+    await waitFor(() => expect(screen.getByText("on reference")).toBeInTheDocument());
+
+    const identity = container.querySelector('[data-slot="header-identity"]');
+    const logo = container.querySelector('[data-slot="header-identity"] img');
+    expect(identity).toBeVisible();
+    expect(logo).not.toBeNull();
+    expect(logo).toHaveAttribute("src", "/api/mux/logo.svg");
+
+    // Into the pane: the block yields the width, so it must not be SEEN…
+    await act(() => router.navigate("/pane/w1%3Ap1"));
+    await waitFor(() => expect(screen.getByText("webapp › main")).toBeInTheDocument());
+    expect(container.querySelector('[data-slot="header-identity"]')).toBe(identity);
+    expect(identity).not.toBeVisible();
+    // …and it is still the same two nodes, so nothing re-requests the logo on the way back.
+    expect(container.querySelector('[data-slot="header-identity"] img')).toBe(logo);
+
+    await act(() => router.navigate("/"));
+    await waitFor(() => expect(screen.getByText("dashboard")).toBeInTheDocument());
+    expect(container.querySelector('[data-slot="header-identity"]')).toBe(identity);
+    expect(container.querySelector('[data-slot="header-identity"] img')).toBe(logo);
+    expect(identity).toBeVisible();
+  });
+});
+
+// THE FIRST-RUN SCREEN'S GATE. It lives in `components/tour-sheet.tsx` but it is decided here, at
+// the data root, because the only signal that says "this render is real" is the root snapshot. The
+// screen's own behaviour is pinned in `components/tour-sheet.test.tsx`; these cases are about WHEN
+// it is allowed to appear, what it writes when it does, and what it holds back while it is up.
+describe("RootLayout — the first-run gate", () => {
+  beforeEach(() => __resetTourStore());
+  afterEach(() => __resetTourStore());
+
+  function renderWith(data: HomeData) {
+    const router = createMemoryRouter(
+      [{ id: ROOT_ROUTE_ID, path: "/", loader: () => data, element: <RootLayout /> }],
+      { initialEntries: ["/"] },
+    );
+    return { ...render(<RouterProvider router={router} />), router };
+  }
+
+  /** The shell has rendered. RootLayout alone mounts no route, so there is no `main` to wait on. */
+  async function shellReady(container: HTMLElement) {
+    await waitFor(() => expect(container.querySelector("header")).not.toBeNull());
+  }
+
+  const live: HomeData = { ...home(AFTERNOON), error: false };
+
+  it("opens on the first live snapshot of a device that has never seen it", async () => {
+    renderWith(live);
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(screen.getByRole("dialog")).toHaveAccessibleName(en["tour.title"]);
+    expect(screen.getByRole("heading", { name: en["tour.title"] })).toBeInTheDocument();
+  });
+
+  // Marked seen on OPEN, before the screen paints. Nothing in the close path writes the key, so a
+  // phone that loses the tab half way down recovers through the Settings row and nowhere else.
+  it("marks itself seen as soon as it opens, not when it closes", async () => {
+    renderWith(live);
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(tourSeenVersion()).toBe(TOUR_VERSION);
+    expect(localStorage.getItem(TOUR_STORAGE_KEY)).toBe(String(TOUR_VERSION));
+  });
+
+  it("stays shut on a device that has already seen this screen", async () => {
+    markTourSeen();
+    const { container } = renderWith(live);
+    await shellReady(container);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  // `error` true means this render is the LAST-GOOD snapshot after a failed refresh. Narrating a
+  // first launch over stale data is narrating something that may not be true any more.
+  it("stays shut while the snapshot on screen is the stale one", async () => {
+    const { container } = renderWith(home(AFTERNOON)); // home() carries error: true
+    await shellReady(container);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("stays shut when the refresh was refused outright", async () => {
+    const { container } = renderWith({ ...live, error: true, authError: true });
+    await shellReady(container);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  // A read-only device SEES it. A family tablet left on the dashboard is exactly the device that
+  // needs to be told what it is looking at; the setup row and the first card branch instead.
+  it("still opens on a read-only device, and offers pairing as the first thing to do", async () => {
+    renderWith({
+      ...live,
+      device: { enforced: true, device: "tablet", authorized: false },
+    });
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(screen.getByText(en["tour.setup.readOnly"])).toBeInTheDocument();
+    expect(screen.getByText(en["tour.pair.title"])).toBeInTheDocument();
+  });
+
+  it("does not re-open itself once it has been closed", async () => {
+    const { router } = renderWith(live);
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: en["tour.skip"] }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // A poll revalidation re-renders this subtree; the decision is taken once, behind a ref.
+    await act(() => router.revalidate());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+// THE PUSH RACE. `usePushSetup` raises the browser's own permission prompt with no user gesture
+// behind it, and behind the tour's backdrop that is a dialog about something the operator has not
+// been told about yet. So it waits for the tour to say it is closed. Observed at the DOM boundary —
+// `navigator.serviceWorker.register` is the first thing `enablePush()` reaches for — rather than by
+// mocking the module.
+describe("RootLayout — the tour holds the push prompt back", () => {
+  let register: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    __resetTourStore();
+    register = vi.fn(() => Promise.resolve({}));
+    Object.defineProperty(navigator, "serviceWorker", {
+      value: {
+        register,
+        ready: Promise.resolve({ pushManager: { getSubscription: () => Promise.resolve(null) } }),
+      },
+      configurable: true,
+    });
+    // `pushSupported()` only asks whether the name is on `window`, never what it is.
+    Object.defineProperty(window, "PushManager", { value: () => {}, configurable: true });
+    Object.defineProperty(window, "Notification", {
+      value: { permission: "granted" },
+      configurable: true,
+    });
+    // jsdom leaves this false; `enablePush()` refuses before it ever reaches `register` without it.
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, "serviceWorker");
+    Reflect.deleteProperty(window, "PushManager");
+    Reflect.deleteProperty(window, "Notification");
+    Reflect.deleteProperty(window, "isSecureContext");
+    __resetTourStore();
+  });
+
+  it("attempts no subscribe while the tour is up, and exactly one once it closes", async () => {
+    const router = createMemoryRouter(
+      [
+        {
+          id: ROOT_ROUTE_ID,
+          path: "/",
+          loader: () => ({ ...home(AFTERNOON), error: false }),
+          element: <RootLayout />,
+        },
+      ],
+      { initialEntries: ["/"] },
+    );
+    render(<RouterProvider router={router} />);
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(register).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: en["tour.skip"] }));
+    await waitFor(() => expect(register).toHaveBeenCalledTimes(1));
+  });
+
+  it("attempts it straight away when the tour has nothing to show", async () => {
+    markTourSeen();
+    const router = createMemoryRouter(
+      [
+        {
+          id: ROOT_ROUTE_ID,
+          path: "/",
+          loader: () => ({ ...home(AFTERNOON), error: false }),
+          element: <RootLayout />,
+        },
+      ],
+      { initialEntries: ["/"] },
+    );
+    render(<RouterProvider router={router} />);
+    await waitFor(() => expect(register).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });
