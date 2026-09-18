@@ -45,6 +45,7 @@ interface AgentCardProps {
    * signal — see a card, something wants you; all flat, nothing does.
    */
   density?: "card" | "row";
+
 }
 
 /** The row's text: line 1's name, and line 2's two runs. */
@@ -102,6 +103,7 @@ export function AgentCard({
   scope = "herd",
   statusStyle = "badge",
   density = "card",
+
 }: AgentCardProps) {
   useLocale();
   const isShell = agent.kind === "shell";

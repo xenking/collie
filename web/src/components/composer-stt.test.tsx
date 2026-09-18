@@ -168,7 +168,10 @@ describe("Composer — the record button is drawn only when there is a microphon
 
   it("uses the realtime Soniox control instead of the clip recorder when configured", async () => {
     const user = userEvent.setup();
-    server.use(configHandler({ push: false, vapidPublicKey: "", voice: true }));
+    server.use(
+      configHandler({ push: false, vapidPublicKey: "", voice: true }),
+      http.get("/api/voice/preferences", () => HttpResponse.json({ recordingMode: "toggle" })),
+    );
     renderComposer();
 
     const box = await screen.findByPlaceholderText(/type a reply/i);
@@ -340,7 +343,7 @@ describe("Composer — hands-free", () => {
     await waitFor(() => expect(bodies.length).toBeGreaterThanOrEqual(2));
     expect(bodies[0]).toMatchObject({ text: "ship it", submit: false });
     expect(bodies.at(-1)?.submit).toBe(true);
-    expect(screen.getByPlaceholderText(/type a reply/i)).toHaveValue("");
+    await waitFor(() => expect(screen.getByPlaceholderText(/type a reply/i)).toHaveValue(""));
   });
 
   it("falls back to inserting when the draft already holds text", async () => {

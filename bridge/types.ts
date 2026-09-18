@@ -78,6 +78,20 @@ export interface AgentView {
    */
   tabLabel?: string;
   /**
+   * The tab's name, when the operator named that tab and this pane is alone in it. The bridge decides
+   * (bridge/state-engine.ts) because only the multiplexer adapter knows whether a label was chosen
+   * (`MuxPane.tabNamed`: tmux's automatic window name is not). The name rule reads it: a one-pane tab
+   * is how most operators name a pane, and that name outranks the title Claude rewrites every turn.
+   * Absent from an older peer, which keeps the title.
+   */
+  soleTabName?: string;
+  /**
+   * The pane's 0-based position inside its tab, in the multiplexer's own order. The dashboard's fixed
+   * order reads it, since a pane id's alphabetical order is not the order on screen. Absent from an
+   * older peer.
+   */
+  tabPosition?: number;
+  /**
    * What the pane's own process says it is doing — its OSC title, glyph-stripped and dropped when
    * uninformative (see `meaningfulTerminalTitle`). Claude rewrites this per turn, so unlike
    * `paneLabel` and `sessionName` — both set once, by hand — it tracks the work as it moves, which

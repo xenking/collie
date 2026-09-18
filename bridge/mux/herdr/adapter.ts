@@ -23,6 +23,7 @@
 // the list is that the NEXT adapter's is shorter.
 
 import { meaningfulTabLabel, meaningfulTerminalTitle } from "../../activity.ts";
+import { isUnnamedTab } from "../../pane-name.ts";
 import type { DialMode } from "../../dial.ts";
 import { declareCapabilities } from "../capabilities.ts";
 import { herdrMachineCandidates } from "./machine-list.ts";
@@ -574,7 +575,10 @@ function toMuxPane(
   if (raw.label !== null && raw.label !== undefined && raw.label.length > 0) pane.paneLabel = raw.label;
   // The tab's label, dropped when it's Herdr's positional default in a single-tab space.
   const tabLabel = meaningfulTabLabel(tabById.get(raw.tab_id)?.label, space?.tab_count ?? 0);
-  if (tabLabel) pane.tabLabel = tabLabel;
+  if (tabLabel) {
+    pane.tabLabel = tabLabel;
+    if (!isUnnamedTab(tabLabel)) pane.tabNamed = true;
+  }
   // Parked OMP panes lose `agent_session`; Herdr's reaper keeps their conversation title in
   // display_agent instead. Prefer that metadata, then normalize the live OSC title fallback.
   const displayTitle = displayAgentTitle(display.display_agent);

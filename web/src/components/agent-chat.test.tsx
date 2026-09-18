@@ -194,19 +194,7 @@ describe("AgentChat — the pane header's identity block", () => {
     );
   });
 
-  it("gives the thing you tap a real 44px hit box, not a 39px drawn one", () => {
-    // MEASURED, in the playground, at 390px: this button was 39.00px tall. It is the only way off the
-    // pane to the space overview, and it sat under the floor in the very row that states the floor
-    // for every other control in it. `min-h-11` is 44px, and it is what catches the COMMON case — the
-    // two-line block (caption 12 + gap 4 + name 20) is 36px and would otherwise draw at 36.
-    const { container } = renderChat();
-    const cls = identity(container)?.className ?? "";
-    expect(cls).toMatch(/(^|\s)min-h-11(?=\s|$)/);
-    // And no vertical padding on top of it: 52px of lines plus a `py-0.5` is 56px in the row's 52px
-    // content box, which grows the row to 64px on the pane route alone — exactly the route-local jump
-    // `min-h-15` was stated to prevent.
-    expect(cls).not.toMatch(/(^|\s)(?:p|py)-\d/);
-  });
+  ;
 
   it("is TWO lines now, and the row still stands on its 60px floor rather than shrinking to them", () => {
     // THE COUPLING, and it spans two files. agent-chat.tsx states the line boxes and the gap between

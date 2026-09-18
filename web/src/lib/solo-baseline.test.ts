@@ -109,6 +109,10 @@ const AGENT_VIEW_KEYS = {
   // Also not a crew dimension: the pane's prompt-cache reading (M28/02), computed on the machine the
   // pane lives on and absent until its agent has taken one turn. A 1.8.x peer omits it.
   cache: true,
+  // Not crew dimensions: the operator's name for this pane's one-pane tab, and the pane's position in
+  // its tab. Computed on the machine the pane lives on; an older peer omits both.
+  soleTabName: true,
+  tabPosition: true,
 } satisfies Record<keyof AgentView, true>;
 
 const DEVICE_AUTH_KEYS = {
@@ -209,9 +213,11 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
       "readableLines",
       "session",
       "sessionName",
+      "soleTabName",
       "status",
       "tabId",
       "tabLabel",
+      "tabPosition",
       "terminalTitle",
       "terminalTitleStale",
       "workspaceId",

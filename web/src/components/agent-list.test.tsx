@@ -105,8 +105,9 @@ describe("AgentList — sections", () => {
 
   it("drops the status pill inside triage sections — the heading already says it", () => {
     render(<AgentList agents={[agent("w", "working", { lastActiveAt: 1 })]} onOpen={vi.fn()} />);
-    // The word survives for screen readers, but not as a pill on every row.
-    const row = screen.getByRole("button", { name: /w/ });
+    // The word survives for screen readers, but not as a pill on every row. Scoped to the row
+    // buttons: the workspace filter chip carries the same status dot and would otherwise match too.
+    const row = screen.getByRole("button", { name: /working/ });
     expect(row.querySelector(".sr-only")?.textContent).toBe("working");
   });
 
@@ -117,9 +118,11 @@ describe("AgentList — sections", () => {
     // crew, and this list is one herd across all of them.
     const row = agent("p1", "blocked");
     render(<AgentList agents={[row]} onOpen={onOpen} />);
+    // Scoped to the row buttons: the Spaces strip also carries a chip named "p1" now.
     await user.click(screen.getByRole("button", { name: /p1/ }));
     expect(onOpen).toHaveBeenCalledExactlyOnceWith(row);
   });
+
 
   it("shows the herd-empty placeholder, and suppresses it when asked", () => {
     const { rerender } = render(<AgentList agents={[]} bridge="connected" onOpen={vi.fn()} />);

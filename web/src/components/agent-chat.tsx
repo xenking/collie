@@ -47,6 +47,7 @@ import { ThreadSidebar } from "@/components/agent-sidebar";
 import { AgentIcon } from "@/components/agent-icon";
 import { TabStrip } from "@/components/tab-strip";
 import { PaneStrip } from "@/components/pane-strip";
+import { PaneMeta } from "@/components/pane-meta";
 import { StripsSummary } from "@/components/strips-summary";
 import { CacheSheet } from "@/components/cache-sheet";
 import { PaneActionsSheet } from "@/components/pane-actions-sheet";
@@ -73,6 +74,7 @@ import { cwdBeyondName } from "@/lib/pane-name";
 import { paneTag } from "@/lib/pane-tag";
 import { useMuxCapability } from "@/lib/mux-capability";
 import { hasJournalAdapter } from "@/lib/journal-agents";
+import { paneRowKey } from "@/lib/hosts";
 import { historyPath, spacePath } from "@/lib/nav";
 import { isReadOnly, statusLabel } from "@/lib/types";
 import { usePairing } from "@/lib/pairing";
@@ -439,6 +441,33 @@ export function AgentChat({
       setPullFrom(0);
     },
   });
+  // THE MARK AND THE DRAG, handed to the composer, which hands both to the actions belt — the belt
+  // owns the rule the mark is drawn on and the band the drag runs over, so the belt wires both
+  // (actions-row.tsx: `ref` to the band, `onClick` to the chevron). `undefined` means neither: no
+  // mark, and the belt is not a drag surface.
+  //
+  // Shown whenever there is somewhere to go: a pane to switch to, a shell, or a launcher to start.
+  // Launchers count on their own, because a lone pane with launchers still needs a way to reach
+  // them, and the sheet is that way.
+  //
+  // `composing` IS NOT IN THIS CONDITION ANY MORE, and its absence is the decision. The old band
+  // stood down while the soft keyboard was up because it cost 30px at the one moment the screen had
+  // none to give. The mark costs 0px in every state, so there is nothing left to buy back by hiding
+  // it — and the switcher sheet is now reachable mid-sentence, which it never was before.
+  // ANOTHER PANE NEEDS YOU: a red dot on the switcher mark when any pane but this one is blocked.
+  // Red only, on purpose: an unseen reply or a working pane is not worth pulling the eye off the
+  // pane you are in, and the pane on screen already shows its own state.
+  const hereKey = agent ? paneRowKey(agent) : null;
+  const elsewhereNeedsYou = agents.some((a) => a.status === "blocked" && paneRowKey(a) !== hereKey);
+  const pullHandle =
+    agents.length + shellPanes.length > 0 || launchers.length > 0
+      ? {
+          ref: sheetPull.ref,
+          onClick: () => setDrawer("switcher"),
+          label: t(elsewhereNeedsYou ? "chat.switcher.ariaNeedsYou" : "chat.switcher.aria"),
+          alert: elsewhereNeedsYou,
+        }
+      : undefined;
   // ── COMPOSING MODE — read ONCE, here, for the whole pane ──────────────────────
   // The soft keyboard takes roughly 45% of a phone. What is left has to hold the header, the tab
   // strip, the agent's statusline, the grab handle, the status band, the controls row and the draft
@@ -1252,36 +1281,21 @@ export function AgentChat({
               — see that component's header for the reasoning and what replaced. */}
           <HeaderStatus>
           {agent ? (
-            <button
-              type="button"
-              onClick={() => openSpace(agent.workspaceId)}
-              // The block's TEXT does not reach a screen reader — an aria-label on a button replaces
-              // everything inside it — so the state has to be spelled into the label itself, or moving
-              // the status word in here would have taken the pane's status out of the accessibility
-              // tree entirely. The suffix is a locale string, not a "," glued on in code, because
-              // where the punctuation goes is a translator's decision (host-chip.tsx does the same
-              // with its unreachable suffix).
-              aria-label={t("chat.header.openOverviewAria", {
-                workspace: agent.workspaceLabel,
-                status: t("chat.header.statusAria", {
-                  label: isShell ? t("status.shellBadge") : statusLabel(agent.status),
-                }),
-              })}
-              // The three-line block's geometry is a rule that spans two files — this one states the
-              // line boxes, app-header.tsx states the row floor and the padding that has to hold them —
-              // so it is asserted mechanically in agent-chat.test.tsx. These slots are what that test
-              // reads; renaming one without updating it fails there rather than on a phone.
-              data-slot="pane-identity"
-              // A REAL 44px hit box, stated. This button is the only way off the pane to the space
-              // overview and it measured 39px — under the floor, in the row that states the floor for
-              // everything else. `min-h-11` is 44px and it is now what DRAWS this button: with the
-              // caption line gone the block is 36px of lines (name 20 + gap 4 + cwd 12), or 20px with
-              // no cwd, so the floor catches every case rather than only the short one. No vertical
-              // padding on top of it, for the reason it never had any: lines plus padding must stay
-              // inside the row's 52px content box or the header grows on the pane route alone — the
-              // route-local growth `min-h-15` exists to prevent.
-              className="-mx-1 flex min-h-11 min-w-0 flex-1 items-center rounded-lg px-1 text-left transition-colors active:bg-muted/60"
-            >
+            <div data-slot="pane-identity-block" className="relative -mx-1 flex min-h-11 min-w-0 flex-1 items-center rounded-lg px-1 text-left">
+              {/* The identity button is an overlay so the cache reading can remain an independent
+                  control on the same path line without invalid button-inside-button markup. */}
+              <button
+                type="button"
+                onClick={() => openSpace(agent.workspaceId)}
+                aria-label={t("chat.header.openOverviewAria", {
+                  workspace: agent.workspaceLabel,
+                  status: t("chat.header.statusAria", {
+                    label: isShell ? t("status.shellBadge") : statusLabel(agent.status),
+                  }),
+                })}
+                data-slot="pane-identity"
+                className="absolute inset-0 rounded-lg transition-colors active:bg-muted/60"
+              />
               {/* TWO lines with 4px between them — see the row's own note in app-header.tsx for why
                   the air moved from outside the block to inside it. Each line states its own height
                   (20 / 12) so the block is a sum of boxes: as bare inline spans they inherit the
@@ -1304,7 +1318,10 @@ export function AgentChat({
                   The row does not shrink for the missing line: `min-h-15` is a FLOOR (app-header.tsx),
                   36px of lines centred in it still measures 60px, and that floor is shared by every
                   route and must not be lowered to fit this one. */}
-              <div data-slot="pane-lines" className="flex min-w-0 flex-1 flex-col gap-1">
+              <div
+                data-slot="pane-lines"
+                className="pointer-events-none relative flex min-w-0 flex-1 flex-col gap-1"
+              >
                 {/* Line 1: the agent's own mark, then the name. The mark used to stand OUTSIDE this
                     column, centred against both lines, which spent the block's entire left edge on it
                     and pushed the path in under the name with nothing above it. On line 1 it reads as
@@ -1396,20 +1413,28 @@ export function AgentChat({
                     </span>
                   )}
                 </div>
-                {/* Line 2, conditional: the path, but only when it names a segment line 1 does not
-                    already show — see cwdBeyondName. Gated against the RENDERED NAME rather than
-                    against the project, because a hand-set label ("logs") puts no directory on line 1
-                    at all and the path is then the only thing locating the work. */}
-                {cwd !== null && (
-                  <span
-                    data-slot="pane-cwd"
-                    className="block truncate font-mono text-[11px] leading-3 text-muted-foreground"
-                  >
-                    {cwd}
-                  </span>
-                )}
+                {/* Line 2 keeps the custom cwd only when it names a segment line 1 does not already
+                    show, then reserves the upstream host/cache metadata at the right edge. The cwd is
+                    gated against the rendered name rather than the project, because a hand-set label
+                    ("logs") puts no directory on line 1 at all and the path is then the only locator. */}
+                <div className="flex h-3 min-w-0 items-baseline gap-2">
+                  {cwd !== null && (
+                    <span
+                      data-slot="pane-cwd"
+                      className="min-w-0 truncate font-mono text-[11px] leading-3 text-muted-foreground"
+                    >
+                      {cwd}
+                    </span>
+                  )}
+                  <PaneMeta
+                    host={agent.host}
+                    cache={agent.cache}
+                    onOpenCache={() => setCacheSheetOpen(true)}
+                    className="pointer-events-auto ml-auto"
+                  />
+                </div>
               </div>
-            </button>
+            </div>
           ) : (
             <div className="min-w-0 flex-1">
               <span className="truncate font-semibold">{t("chat.header.agentGone")}</span>
@@ -1958,25 +1983,6 @@ export function AgentChat({
                   and unchanged at rgb(235) in light, where --card would be pure white and land
                   1.04:1 against the inverted mirror. index.css states the whole argument. */}
               <div data-slot="chrome-block" className="border-t border-rule bg-chrome">
-                {/* The handle stays a narrow, full-width touch strip above the composer so tap and
-                    swipe-up switching remain available without spending a full row on chrome. It is
-                    still the same pointer-captured sheetPull gesture and accessible tap target. */}
-                <Collapse
-                  open={
-                    !composing &&
-                    (agents.length + shellPanes.length > 0 || launchers.length > 0)
-                  }
-                >
-                  <button
-                    type="button"
-                    aria-label={t("chat.switcher.aria")}
-                    ref={sheetPull.ref}
-                    onClick={() => setDrawer("switcher")}
-                    className="flex w-full touch-none items-center justify-center py-1.5 transition-colors active:bg-muted/50"
-                  >
-                    <span className="h-1.5 w-12 rounded-md bg-muted-foreground/50" />
-                  </button>
-                </Collapse>
                 <Composer
                   ref={composerRef}
                   paneId={paneId}
@@ -1984,12 +1990,6 @@ export function AgentChat({
                   agent={agent?.agent}
                   isShell={isShell}
                   replySpeechSupported={agent?.agent === "omp" && agent.hasSession === true}
-                  // The state, as the WORD on the composer's status strip. It used to be the pane
-                  // header's caption line; the dot badged onto the agent's tile up there stays, because
-                  // the two carry the range together (status-badge.tsx). `stale` is the same
-                  // `connecting` the dot reads, so the pair still dims as one.
-                  status={agent?.status}
-                  stale={connecting}
                   // The one read of the keyboard, handed down. See `composing` above.
                   composing={composing}
                   gone={gone}
@@ -2009,6 +2009,7 @@ export function AgentChat({
                   setTapToFocus={setTapToFocus}
                   setExpandClippedReply={setExpandClippedReply}
                   onSent={onSent}
+                  pullHandle={pullHandle}
                 />
               </div>
             </div>

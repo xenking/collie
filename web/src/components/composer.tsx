@@ -5,7 +5,6 @@ import { Check, FileText, Image, Keyboard, Loader2, Mic, Paperclip, Send, Settin
 
 import { applyDraftFontSize, fontStack, inputFocusZoomsPage } from "@/hooks/use-display-prefs";
 import type { DisplayPrefs } from "@/hooks/use-display-prefs";
-import { statusLabel, type AgentStatus } from "@/lib/types";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
 import { useDirectTyping } from "@/hooks/use-direct-typing";
 import { useLocale } from "@/hooks/use-locale";
@@ -20,6 +19,7 @@ import { ChatInput } from "@/components/ui/chat/chat-input";
 import { NavTray, type NavTrayView } from "@/components/nav-tray";
 import { CommandPalette } from "@/components/command-palette";
 import { QuickActionsContent } from "@/components/quick-actions";
+import { ActionsRow } from "@/components/actions-row";
 import { DisplayPrefsContent } from "@/components/display-prefs";
 import { SectionLabel } from "@/components/ui/section-label";
 import { Collapse } from "@/components/ui/collapse";
@@ -34,7 +34,6 @@ import { acceptAttribute, attachmentMessage, limitMb, offersFiles, PHOTO_ACCEPT,
 import { ctrlPresetsFor } from "@/lib/operator-keys";
 import { isDestructiveInput } from "@/lib/destructive";
 import { HostChip } from "@/components/host-chip";
-import { StatusDot } from "@/components/status-badge";
 import { useAmbientHost, useHostLabel } from "@/components/crew-provider";
 import { clearDraft, fitsDraftStore, loadDraft, loadDraftAttachments, saveDraft, type DraftAttachment } from "@/lib/drafts";
 import { useHoldReload } from "@/lib/reload-guard";
@@ -65,20 +64,6 @@ interface ComposerProps {
   isShell: boolean;
   /** Only a path-backed OMP pane can hand replies to the local speech daemon. */
   replySpeechSupported?: boolean;
-  /**
-   * What the pane is DOING, as the word on the status strip above the controls row. Undefined only
-   * when there is no pane left to describe (`gone`), where the strip stands empty.
-   *
-   * It lives here rather than in the pane header because that is where the operator's question is:
-   * the header's caption line held this one word and nothing else, so the top of a 60px row was
-   * spent on it. Beside the host it completes a sentence — which machine, and what is it doing —
-   * at the surface being typed into. The header keeps the DOT badged on the agent's own tile; the
-   * word is the half of that pair a colour-blind reader can use (status-badge.tsx measures why),
-   * so it moved rather than went.
-   */
-  status?: AgentStatus;
-  /** The reading is the last snapshot's, not live — dims the word exactly as the header's dot dims. */
-  stale?: boolean;
   /** Pane is gone (no agent) — locks the composer with a distinct placeholder. */
   gone: boolean;
   /** This device isn't authorised to type — locks the composer with a distinct placeholder. */
@@ -127,6 +112,23 @@ interface ComposerProps {
   setExpandClippedReply: (expandClippedReply: boolean) => void;
   /** Snap the mirror to the live tail (follow + revalidate + scroll) after a successful send. */
   onSent: () => void;
+
+  /**
+   * The pane switcher, in two pieces: a Switch pill pinned at the actions belt's right end
+   * (`onClick`, the tap) and the belt itself as a drag surface (`ref`, the finger-tracked pull).
+   * Threaded straight through to {@link import("@/components/actions-row").ActionsRow} — this file
+   * decides nothing about either and draws none of it.
+   *
+   * Absent, rather than flagged off: the pane passes nothing here when there is nowhere to switch
+   * to.
+   */
+  pullHandle?: {
+    ref: (node: HTMLElement | null) => void;
+    onClick: () => void;
+    label: string;
+    /** Another pane needs you: the switcher mark wears a red dot. */
+    alert?: boolean;
+  };
 }
 
 // The composer cluster at the bottom of the pane view — everything a phone keyboard can't do on its
@@ -144,17 +146,6 @@ interface ComposerProps {
 // them). Find moved the other way — to the header, where its find bar already takes over the row.
 type ComposerDrawer = "quick" | "cmd" | "keys" | "display" | null;
 
-// The Controls row's "on" look, authored once so an open dock and an armed mode can never drift
-// apart. `hover:` is pinned to the same tint: without it, hovering an already-on control repaints it
-// with the ghost variant's hover background and it reads as switching off under the cursor.
-const CONTROL_ON = "bg-control-on text-control-on-foreground hover:bg-control-on";
-const CONTROL_OFF = "text-muted-foreground";
-
-// Tools stay in one compact, labelled row. Every button keeps the 44px height floor while its
-// horizontal label can truncate instead of widening the composer on a narrow or translated screen.
-const CONTROL_BUTTON =
-  "h-11 min-w-0 flex-1 shrink flex-row gap-1 px-1 has-[>svg]:px-1 text-[10px] font-medium leading-none [&>svg]:shrink-0";
-const CONTROL_LABEL = "max-w-full truncate";
 const VOICE_HOLD_MS = 350;
 
 // Pause after clearing a stranded terminal draft so the TUI settles before pane.send_text. Exported
@@ -231,7 +222,7 @@ function attachmentSizeLabel(bytes: number): string {
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { paneId, scope, agent, isShell, replySpeechSupported = false, status, stale, gone, readOnly, hostBlock, composing, dialogPresent, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setTapToFocus, setExpandClippedReply, onSent },
+  { paneId, scope, agent, isShell, replySpeechSupported = false, gone, readOnly, hostBlock, composing, dialogPresent, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setTapToFocus, setExpandClippedReply, onSent, pullHandle },
   ref,
 ) {
   const revalidator = useRevalidator();
@@ -272,16 +263,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // a solo install, which renders no chip and leaves every confirm string unchanged.
   const writeHost = useAmbientHost(scope?.host);
   const writeHostLabel = useHostLabel(scope?.host);
-  const statusWord: AgentStatus | "shell" | undefined = isShell ? "shell" : status;
-  const statusText =
-    statusWord === "shell"
-      ? translate("status.shellBadge")
-      : statusWord === undefined
-        ? undefined
-        : statusLabel(statusWord);
-  const statusDotStatus: AgentStatus | undefined =
-    statusWord === undefined ? undefined : statusWord === "shell" ? "unknown" : statusWord;
-  const statusTone = status === "blocked" ? "warn" : status === "done" ? "success" : "info";
   // …and a ref alongside it, for the ONE caller that reads it after an await. `send()` checks
   // `locked` once, up front, but its pre-clear sweep goes out on the far side of the pre-flight's
   // pane read; a re-render that locks the composer in that window must be able to stop the most
@@ -635,7 +616,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       handsFree && draftEmpty && noEchoRef.current === null && !locked && !dialogPresent;
     if (mayHandsFree) {
       updateInput(transcript);
-      return send(transcript, false);
+      return send(transcript, true);
     }
     insertTranscript(transcript);
     return false;
@@ -1463,132 +1444,73 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             />
           </ComposerDock>
         )}
-        {/* The one action row: Keys · Quick · Agent · ⚙ (Agent only when the pane's agent has
-            commands). Display prefs used to sit on a second, permanent icon-only "View" row above
-            this one; folding them behind the ⚙ gives the mirror that row back. The gear is icon-only
-            and NOT flex-1 — it's a settings affordance, not a peer of the three action toggles, and
-            keeping it to one square (44px, its tap target and nothing more) leaves the labelled
-            buttons the rest of a 390px phone. */}
-        {/* Compact tools row: every action keeps a 44px hit height, while the status dot is a
-            separate accessible control that surfaces the full state through the existing notice. */}
-        <div
-          data-slot="composer-controls"
-          role="group"
-          aria-labelledby="composer-controls-label"
-          className="-mx-0.5 mb-1.5 mt-1 flex min-w-0 items-center gap-1"
-        >
-          <SectionLabel id="composer-controls-label" className="sr-only">
-            {translate("composer.controls.label")}
-          </SectionLabel>
-          <div className="flex min-w-0 flex-1 items-center gap-1">
-          {/* Keys and Quick are TOGGLES for the in-flow dock above (not overlays): tap to open, tap
-              again to close. aria-expanded ties each to the dock; secondary variant marks it pressed
-              while open. Both share the single-valued `drawer`, so opening one closes the other. */}
-          <Button
-            variant="ghost"
-            size="sm"
-            className={cn(CONTROL_BUTTON, drawer === "keys" ? CONTROL_ON : CONTROL_OFF)}
-            disabled={locked}
-            aria-expanded={drawer === "keys"}
-            aria-label={translate("composer.controls.keys")}
-            onClick={() => requestDrawer(drawer === "keys" ? null : "keys")}
-          >
-            <Keyboard className="size-4" />
-            <span className={CONTROL_LABEL}>{translate("composer.controls.keys")}</span>
-          </Button>
-          {/* "Type into terminal" lives HERE, beside Keys, rather than on the Send button.
-              It is the same problem split in half: Keys exists because the phone keyboard cannot
-              send Esc/Tab/arrows/chords, this exists because it cannot send bare printable letters —
-              so someone who wants to press `b` looks in this row first. It is also used in bursts
-              (a picker, a y/n prompt) and then not for days, which is the wrong shape for a
-              permanent fixture on the app's most-used control: a split Send button cost a third of
-              the primary action's width every day to serve a mode used on a few of them.
-              Unlike its neighbours this toggles state instead of opening a dock — the armed strip
-              above the input is what makes that visible. Arming is still an explicit NAMED choice,
-              which is what keeps an accidental touch from quietly wiring the keyboard to a live
-              terminal; see use-direct-typing.ts for the rest of that argument. */}
-          <Button
-            variant="ghost"
-            size="sm"
-            className={cn(CONTROL_BUTTON, direct.active ? CONTROL_ON : CONTROL_OFF)}
-            disabled={locked || sending}
-            aria-pressed={direct.active}
-            aria-label={translate("composer.controls.typeAria")}
-            onClick={() => {
-              if (direct.active) {
-                direct.deactivate();
-                return;
-              }
-              // Close whatever dock is open first: the mode needs the phone keyboard, and a dock
-              // holding half the viewport is the thing in its way. Routed through requestDrawer so a
-              // staged key queue still gets its discard confirm (ADR 0005).
-              requestDrawer(null);
-              direct.activate();
-            }}
-          >
-            <Terminal className="size-4" />
-            <span className={CONTROL_LABEL}>{translate("composer.controls.type")}</span>
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className={cn(CONTROL_BUTTON, drawer === "quick" ? CONTROL_ON : CONTROL_OFF)}
-            disabled={locked}
-            aria-expanded={drawer === "quick"}
-            aria-label={translate("composer.controls.quick")}
-            onClick={() => requestDrawer(drawer === "quick" ? null : "quick")}
-          >
-            <Zap className="size-4" />
-            <span className={CONTROL_LABEL}>{translate("composer.controls.quick")}</span>
-          </Button>
-          {commands.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(CONTROL_BUTTON, "text-muted-foreground")}
-              disabled={locked}
-              aria-label={translate("composer.controls.agent")}
-              onClick={() => requestDrawer("cmd")}
-            >
-              <Slash className="size-4" />
-              <span className={CONTROL_LABEL}>{translate("composer.controls.agent")}</span>
-            </Button>
-          )}
-          {/* Display prefs. Not gated on `locked`: wrap/font/raw-terminal are local view state, so a
-              read-only device or a gone pane can still make its mirror readable. */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn("size-11 shrink-0", drawer === "display" ? CONTROL_ON : CONTROL_OFF)}
-            aria-label={translate("composer.controls.displayAria")}
-            aria-expanded={drawer === "display"}
-            onClick={() => requestDrawer(drawer === "display" ? null : "display")}
-          >
-            <Settings2 className="size-4" />
-          </Button>
-          </div>
-          {(writeHost !== undefined || statusDotStatus !== undefined) && (
-            <div className="flex min-w-0 shrink-0 items-center gap-1">
-              <HostChip host={writeHost} variant="caption" className="max-w-20 min-w-0" />
-              {statusDotStatus !== undefined && statusText !== undefined && (
-                <button
-                  type="button"
-                  className="flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                  aria-label={writeHostLabel ? `${writeHostLabel}: ${statusText}` : statusText}
-                  title={statusText}
-                  onClick={() =>
-                    setStatus(
-                      writeHostLabel ? `${writeHostLabel} · ${statusText}` : statusText,
-                      statusTone,
-                    )
-                  }
-                >
-                  <StatusDot status={statusDotStatus} surface="bg-chrome" stale={stale} />
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+        {/* The upstream action belt is the single owner of Keys, Type, Quick, Agent, display
+            settings, harness commands, and the pane switcher. The docks above stay in-flow; this
+            row only chooses their callbacks and state. */}
+        <ActionsRow
+          general={[
+            {
+              id: "keys",
+              icon: Keyboard,
+              label: translate("composer.controls.keys"),
+              on: drawer === "keys",
+              expanded: drawer === "keys",
+              disabled: locked,
+              onSelect: () => requestDrawer(drawer === "keys" ? null : "keys"),
+            },
+            {
+              id: "type",
+              icon: Terminal,
+              label: translate("composer.controls.typeAria"),
+              word: translate("composer.controls.type"),
+              on: direct.active,
+              pressed: direct.active,
+              disabled: locked || sending,
+              onSelect: () => {
+                if (direct.active) {
+                  direct.deactivate();
+                  return;
+                }
+                requestDrawer(null);
+                direct.activate();
+              },
+            },
+            {
+              id: "quick",
+              icon: Zap,
+              label: translate("composer.controls.quick"),
+              on: drawer === "quick",
+              expanded: drawer === "quick",
+              disabled: locked,
+              onSelect: () => requestDrawer(drawer === "quick" ? null : "quick"),
+            },
+            ...(commands.length > 0
+              ? [
+                  {
+                    id: "agent",
+                    icon: Slash,
+                    label: translate("composer.controls.agent"),
+                    disabled: locked,
+                    onSelect: () => requestDrawer("cmd"),
+                  },
+                ]
+              : []),
+            {
+              id: "display",
+              icon: Settings2,
+              label: translate("composer.controls.displayAria"),
+              word: translate("composer.controls.display"),
+              on: drawer === "display",
+              expanded: drawer === "display",
+              onSelect: () => requestDrawer(drawer === "display" ? null : "display"),
+            },
+          ]}
+          agent={agent}
+          mine={operatorCommands}
+          onRun={(command) => send(command, false)}
+          disabled={locked}
+          handle={pullHandle}
+        />
         {/* ── THE FOOTER'S NOTICE STRIPS, SORTED BY KIND (DESIGN.md §1, §2) ─────────────────────
             Every strip below arrives and leaves through `Collapse`, which is the only sanctioned way
             an in-flow surface appears at all. Before this they were bare conditionals, so each one

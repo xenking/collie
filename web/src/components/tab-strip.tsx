@@ -1,14 +1,15 @@
 import { useState, type ReactNode } from "react";
 import { Loader2, Plus } from "lucide-react";
 
-import { AgentIcon } from "@/components/agent-icon";
-import { STRIP_TAP_TARGET_SQUARE } from "@/components/ui/labelled-strip";
+import { STRIP_TAP_TARGET, STRIP_TAP_TARGET_SQUARE } from "@/components/ui/labelled-strip";
 import { TabActionsSheet } from "@/components/tab-actions-sheet";
 import { StatusDot } from "@/components/status-badge";
+import { UnseenMark } from "@/components/ui/unseen-mark";
 import { useLongPress } from "@/hooks/use-long-press";
 import { cn } from "@/lib/utils";
 import { TRIAGE_STATUS, worstTriage, type TriageKey } from "@/lib/triage";
 import { hostKey } from "@/lib/hosts";
+import { tabTitle, type TabTitle } from "@/lib/pane-name";
 import { statusLabel } from "@/lib/types";
 import type { AgentView, TabView } from "@/lib/types";
 import { useMuxCapability } from "@/lib/mux-capability";
@@ -75,12 +76,20 @@ interface TabStripProps {
 //  3. Inactive tabs are recessed: a quieter fill, muted text, and their box stops one pixel short,
 //     so the baseline runs unbroken underneath them.
 //
-// The geometry that buys (2) is measured, not guessed, and the three numbers below are one set:
-// the scroller is pulled one pixel down over the <nav>'s bottom border (`-mb-px`), carries one pixel
-// of bottom padding so that pixel is INSIDE its clip box (`overflow-x` forces `overflow-y: auto`,
-// so anything past the padding box is clipped away), and the active tab covers it with a 1px
-// absolutely-positioned strip in the content colour. Change any one and the baseline shows through
-// under the active tab, which is the whole thing.
+// THE OPEN TAB IS AN INVERTED PILL — its own `rounded-md` box, filled `bg-primary` with
+// `text-primary-foreground`, the same paint the open pane pill in the row below has always used.
+// It was an outlined pill (`border-border` on `bg-background`) and on the phone that read too close
+// to its neighbours: Altan, "active tab needs to be clearer, panes are inverted and white". One
+// mark for "open" across both rows now. `my-px`: the box must sit fully INSIDE the row rather
+// than touch its top or bottom edge, so it reads as a pill floating in the 32px row rather than as
+// a box that clips against the row's own bounds — 1px in on both sides is enough for the 1px border
+// to paint whole. An inactive tab stays exactly as before: plain on the row's bare chrome ground, no
+// fill, no border, no radius, so only the open tab ever draws a box at all. There is no folder shape
+// to reserve room for, so nothing here needs the no-shift border-reservation trick the old shape
+// needed. The dashed desktop-focus ring that used to paint on top is gone too (see the cell's own
+// comment on why), so the open tab's border is the only box any cell ever draws.
+//
+// Preserve the operator's tab label, including numeric labels, independently of the pane title.
 //
 // This row draws no name. The shape announces itself — that is the operator's reason for choosing
 // it — so `LabelledStrip` is gone from here and the structure it provided lives inline: the <nav>,
@@ -152,34 +161,41 @@ export function TabStrip({
             trailing ? "-ml-4 min-w-0 flex-1 pl-4 pr-2" : "-mx-4 px-4",
           )}
         >
-          {allowAll && (
-            <Tab
-              label={translate("space.tabStrip.all")}
-              active={selected === null}
-              onClick={() => onSelect(null)}
-            />
-          )}
-          {wsTabs.map((t) => (
-            <Tab
-              key={t.tabId}
-              label={t.label}
-              active={selected === t.tabId}
-              ring={t.focused}
-              // What's actually going on in there — blocked / ready / working / idle — instead of a
-              // dot that only ever appeared for blocked and left every other state unreadable.
-              status={worstTriage(here.filter((a) => a.tabId === t.tabId))}
-              // WHICH agent is in there. The pane header names ONE agent, and a tab is exactly the
-              // dimension along which that answer changes: `docs` may be Claude and `shell` a bare
-              // terminal, and switching between them used to change the header's mark with no warning
-              // in the row you switched from. Named here, the answer is in the row you choose.
-              agent={soleAgent(here, t.tabId)}
-              onClick={() => onSelect(t.tabId)}
-              // Long-press (and a tap on the already-active tab) opens the actions sheet — only when
-              // the parent wired the actions; otherwise the tabs stay plain tap-to-switch.
-              onLongPress={actionsEnabled ? () => setSheetTab(t) : undefined}
-              onTapActive={actionsEnabled ? () => setSheetTab(t) : undefined}
-            />
-          ))}
+          {/* THE TAB GROUP: every tab cell, separated by a plain GAP rather than a hairline — no
+              `divide-x` any more (the header comment above says why). It is its own flex child of the
+              scroller (not the scroller's own `gap-1`) so the "+" button, a sibling outside this
+              group, keeps its own gap from the group rather than inheriting the tabs' tighter one; the
+              two numbers happen to match today (both `gap-1`) but are two declarations on purpose, so
+              a future change to one never silently moves the other. `items-stretch` so the open tab's
+              border-box runs the tab's full drawn height. */}
+          <div className="flex shrink-0 items-stretch gap-1">
+            {allowAll && (
+              <Tab
+                label={translate("space.tabStrip.all")}
+                active={selected === null}
+                onClick={() => onSelect(null)}
+              />
+            )}
+            {wsTabs.map((t) => {
+              const inTab = here.filter((a) => a.tabId === t.tabId);
+              return (
+              <Tab
+                key={t.tabId}
+                label={t.label}
+                title={tabTitle(t.label)}
+                active={selected === t.tabId}
+                // What's actually going on in there — blocked / ready / working / idle — instead of a
+                // dot that only ever appeared for blocked and left every other state unreadable.
+                status={worstTriage(inTab)}
+                onClick={() => onSelect(t.tabId)}
+                // Long-press (and a tap on the already-active tab) opens the actions sheet — only when
+                // the parent wired the actions; otherwise the tabs stay plain tap-to-switch.
+                onLongPress={actionsEnabled ? () => setSheetTab(t) : undefined}
+                onTapActive={actionsEnabled ? () => setSheetTab(t) : undefined}
+              />
+              );
+            })}
+          </div>
           {/* HIDE, don't explain (M10/06). A "+" at the end of the tab row is an affordance, not a
               promise: nobody arrives at Collie needing to know why a particular multiplexer will not
               open a tab, the way they arrive needing to know where their agent's history went. Every
@@ -236,32 +252,19 @@ export function TabStrip({
   );
 }
 
-// The ONE agent a tab runs, or undefined. Undefined is the honest answer in two different cases and
-// both must stay unmarked: a tab with no agent at all (a bare shell), and a tab running two brands at
-// once — a mark for either would be a claim about the whole tab that only one pane in it supports.
-// Scoped to `here`, the panes on THIS machine, for the same reason the status count is: tab ids
-// collide across a crew.
-function soleAgent(here: AgentView[], tabId: string): string | undefined {
-  const brands = new Set(here.filter((a) => a.tabId === tabId).map((a) => a.agent));
-  if (brands.size !== 1) return undefined;
-  const [only] = brands;
-  return only || undefined;
-}
-
 interface TabProps {
+  /** The tab's raw label — the spoken fallback when the cell has no title to draw. */
   label: string;
+  /** The tab label; the "All" cell passes its word as a plain title. */
+  title?: TabTitle | null;
   active: boolean;
-  /** Dimmed folder outline marking the tab focused in the desktop TUI. */
-  ring?: boolean;
+
   /**
    * The most urgent thing happening inside this tab ({@link worstTriage}) — drawn as a leading dot
    * in the same palette the herd list uses. Omit (or pass null) when the tab holds no agent at all:
    * that's not the same as idle, and a resting dot would claim otherwise.
    */
   status?: TriageKey | null;
-  /** The agent every pane in this tab runs, drawn as its brand tile. Omitted when the tab runs none,
-   *  or more than one — see {@link soleAgent}. */
-  agent?: string;
   onClick: () => void;
   /** Long-press (or right-click / Android contextmenu) opens actions. Inert when unset. */
   onLongPress?: () => void;
@@ -269,9 +272,20 @@ interface TabProps {
   onTapActive?: () => void;
 }
 
-// One folder tab.
-function Tab({ label, active, ring, status, agent, onClick, onLongPress, onTapActive }: TabProps) {
+// One plain tab cell.
+function Tab({
+  label,
+  title: titleProp,
+  active,
+  status,
+  onClick,
+  onLongPress,
+  onTapActive,
+}: TabProps) {
   const longPress = useLongPress(onLongPress);
+  // A cell given no title (the "All" cell) says its label, plainly.
+  const title: TabTitle | null = titleProp === undefined ? { text: label, positional: false } : titleProp;
+  // Empty tab labels retain the status dot and their accessible fallback.
 
   // A long-press already suppresses the ensuing click (via longPress.onClickCapture), so this only
   // ever sees a genuine tap. Tapping the already-active tab opens actions rather than a dead
@@ -308,61 +322,65 @@ function Tab({ label, active, ring, status, agent, onClick, onLongPress, onTapAc
         // (Rule E): bolding the active label re-flows every tab to its right. Measured: a label's
         // left edge, top edge and width are the same to three decimals in both states.
         //
-        // Radius: the house 2px on the TOP corners only. A drawer tab does not round where it meets
-        // the drawer, and the bottom of this one is an open edge, not an edge at all.
-        //
-        // h-11 is a REAL 44px tap target, not a hit area faked over a smaller box. That is a thing a
-        // tab can do and a pill cannot without becoming a slab, and it is why this row needs none of
-        // STRIP_TAP_TARGET's machinery.
-        //
-        // The `after` strip is the cover: 1px tall, one pixel BELOW the tab, in the content surface,
-        // spanning the full border box so the side borders stop where the content begins. It is
-        // absolutely positioned, so it is outside layout and can never move anything; it is present
-        // in every state and merely transparent when inactive.
-        "relative flex h-11 min-w-11 shrink-0 select-none items-center justify-center gap-1.5 [-webkit-touch-callout:none] whitespace-nowrap rounded-t-md border border-b-0 border-transparent px-3 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring after:absolute after:inset-x-0 after:-bottom-px after:h-px after:content-['']",
+        // COMPACT: `h-8` draws a 32px tab, `text-[11px]` the size of the header's path line — Altan's
+        // ask, from the phone: this row "feel[s] too tall and the fonts too large". A tab used to BE
+        // a real 44px tap target, drawn at that height; now it draws small and answers 44px the way
+        // every other strip pill does, through `STRIP_TAP_TARGET`'s transparent `::before` — the
+        // reach it needs lives in the scroller's own `pt-1.5 pb-1.5` (see the scroller's comment
+        // above), not in this box, so the drawn tab can shrink without the thumb losing anything.
+        STRIP_TAP_TARGET,
+        "relative flex h-8 min-w-11 shrink-0 select-none items-center justify-center gap-1.5 [-webkit-touch-callout:none] whitespace-nowrap border-b-2 px-3 text-[11px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        // GROUND IS THE ONLY MARK. The open tab is inverted, `bg-primary` under `text-primary-
+        // foreground`, the pane pill's own "open" paint; every other tab sits on the row's bare chrome
+        // ground, draws no fill and keeps its reserved border transparent — a quiet hover wash is the
+        // one concession, so a tap target still answers a finger hovering over it on a device that
+        // has one. The border stays in the box on both (`border-primary` under the fill, so it never
+        // draws a seam of its own) for the no-shift rule.
+        // THE OPEN TAB IS UNDERLINED (2026-09-16). The inverted pill read "too white" on the phone and
+        // left the other tabs hard to spot beside it. Now every tab reads in near-full ink, and the
+        // open one takes a 2px bar under its label in full ink; the bar is reserved transparent on
+        // every tab, so opening one never shifts a neighbour.
         active
-          ? "border-rule bg-background text-foreground after:bg-background"
-          : "bg-muted/40 text-muted-foreground after:bg-transparent hover:bg-muted/60",
-        // The desktop-focus mark: the SAME folder outline, in the same --rule, but dashed. It used
-        // to be `border-primary/40`, which worked when the active state was a full primary fill and
-        // stopped working the moment the active state became a 1px --rule outline — measured in
-        // dark, primary/40 composites brighter than --rule, so the TUI-focused tab out-shouted the
-        // one that was actually open. Dashed says "this is where the desktop is looking" at exactly
-        // the weight of the thing it is a variant of, and it borrows the vocabulary the "+" button
-        // already uses: dashed is potential, solid is real. A border-STYLE change moves nothing.
-        ring && !active && "border-rule border-dashed",
+          ? "border-foreground text-foreground"
+          : "border-transparent text-foreground/70 hover:bg-muted/40",
+        // NO DESKTOP-FOCUS RING. `TabView.focused` (the tab the desktop TUI is looking at) used to
+        // paint a dashed outline on its cell. On the phone that read as a second selection beside the
+        // solid pill, and the phone's reader does not care where the desktop is looking. It is gone;
+        // the open tab's border is the only box any cell draws.
       )}
     >
-      {status && (
+      {status === "ready" && <UnseenMark size="sm" />}
+      {status && status !== "ready" && (
         <>
           {/* A hollow resting dot is filled with the surface it sits ON, and the two states of this
-              tab are two different surfaces. */}
+              tab are two different surfaces: the open tab's own bg-primary, or the row's bare chrome
+              ground everywhere else. */}
           <StatusDot
             status={TRIAGE_STATUS[status]}
-            surface={active ? "bg-background" : "bg-muted/40"}
-            className="size-2"
+            surface="bg-chrome"
+            className="size-1.5"
           />
           {/* The dot is colour-only; say it in words for screen readers. */}
           <span className="sr-only">{statusLabel(TRIAGE_STATUS[status])}</span>
         </>
       )}
-      {/* The brand tile, 14px, between the dot and the label. ORDER MATTERS and it is this one: the
-          dot has always led this row and it keeps that position, because it is the mark the eye
-          scans the whole row for — "where is the trouble" is asked of every tab at once, "which
-          agent" is asked of one tab at a time. The tile then sits against the label it introduces.
-          It is `aria-hidden` and it has to be: AgentIcon names itself "<agent> logo", and a tab that
-          already carries a label and a status announces enough — a third name on the same control is
-          noise, not information. The dot keeps its own `sr-only` word, which is the one thing here
-          with no visible text.
-          14px rather than 16: the row is `h-11` and unpadded vertically, so the tile must not become
-          the tallest thing in a tab whose height belongs to the tap target, and it may not outweigh
-          the label it introduces. */}
-      {agent && (
-        <span aria-hidden="true" className="flex shrink-0 items-center">
-          <AgentIcon agent={agent} className="size-3.5" />
+      {title === null ? (
+        <>
+          {/* `bg-current`, so the dot takes the tab's own text colour in both states and nothing has
+              to be themed twice. 4px, the smallest mark the row already uses. Only an EMPTY label
+              falls here now — a numbered one reads its position instead, below. */}
+          <span aria-hidden="true" className="size-1 shrink-0 rounded-full bg-current opacity-50" />
+          <span className="sr-only">{label}</span>
+        </>
+      ) : title.positional ? (
+        // The tab's position, a shade lighter than a name someone chose, so it never reads as one.
+        // On the inverted open tab the lighter shade is of the inverted ink.
+        <span className="text-muted-foreground">
+          {title.text}
         </span>
+      ) : (
+        title.text
       )}
-      {label}
     </button>
   );
 }

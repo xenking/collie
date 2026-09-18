@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { cwdBeyondName, paneParts, paneTitleInTab, TITLE_SEP } from "./pane-name";
+import { cwdBeyondName, paneHasOwnName, paneParts, paneTitleInTab, TITLE_SEP, tabCellTitle } from "./pane-name";
 import type { AgentView } from "./types";
 
 function pane(over: Partial<AgentView> = {}): AgentView {
@@ -256,5 +256,45 @@ describe("cwdBeyondName — the header's cwd line", () => {
       "logs",
     );
     expect(cwdBeyondName("/home/kon/dev/moonward_os", "logs")).toBe("~/dev/moonward_os");
+  });
+});
+
+// A BELT CELL NAMES WHAT THE HEADER NAMES. A one-pane tab is that pane, so the cell says the pane's
+// name (`paneName`) and the open cell matches the header line above it. The tab's own title stays
+// for a group, for an empty tab, and for a sole pane that has only a kind to its name.
+describe("tabCellTitle — what a belt cell says", () => {
+  it("names a one-pane tab after its pane", () => {
+    expect(tabCellTitle("work", [pane({ sessionName: "plumbing" })])).toEqual({
+      text: "plumbing",
+      positional: false,
+    });
+  });
+
+  it("prefers the pane's name even over a positional tab label", () => {
+    expect(tabCellTitle("1", [pane({ terminalTitle: "Figaro ad removal test" })])).toEqual({
+      text: "Figaro ad removal test",
+      positional: false,
+    });
+  });
+
+  it("keeps the tab's title when the sole pane has only a kind to its name", () => {
+    expect(paneHasOwnName(pane())).toBe(false);
+    expect(tabCellTitle("docs", [pane()])).toEqual({ text: "docs", positional: false });
+    expect(tabCellTitle("2", [pane({ kind: "shell", agent: "shell" })])).toEqual({
+      text: "2",
+      positional: true,
+    });
+  });
+
+  it("treats a stale title as no name", () => {
+    expect(paneHasOwnName(pane({ terminalTitle: "vim", terminalTitleStale: true }))).toBe(false);
+    expect(tabCellTitle("docs", [pane({ terminalTitle: "vim", terminalTitleStale: true })])?.text).toBe("docs");
+  });
+
+  it("keeps the tab's title for a group of panes, and for an empty tab", () => {
+    const two = [pane({ terminalTitle: "one" }), pane({ paneId: "w0:p2", terminalTitle: "two" })];
+    expect(tabCellTitle("work", two)?.text).toBe("work");
+    expect(tabCellTitle("work", [])?.text).toBe("work");
+    expect(tabCellTitle("", [])).toBeNull();
   });
 });
