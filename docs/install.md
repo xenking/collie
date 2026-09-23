@@ -33,6 +33,10 @@ a Herdr plugin can mirror tmux.
 Supported hosts: Linux and macOS. Windows is experimental; see
 [Windows](../README.md#windows-experimental).
 
+The published Mac binary is Apple Silicon only, and it needs **macOS 13 or newer**, which is the
+minimum its Bun build was linked against. An Intel Mac builds from source; `collie update` says so
+rather than handing you a binary that cannot run.
+
 | Tool | Needed for | Purpose |
 | --- | --- | --- |
 | `curl`, `tar`, sha256 tool (`sha256sum`/`shasum`) | Binary install script and updates | Download and verify release archives. |
@@ -110,6 +114,11 @@ To pin a version or rescue an existing install (see
 ```bash
 curl -fsSL https://colliepwa.dev/install.sh | COLLIE_TAG=v1.0.0 sh
 ```
+
+The script asks GitHub's API for the release list, which is rate-limited per network address. If
+that answers `HTTP 403`, pin the version as above, or set `GH_TOKEN` to a GitHub token with no
+scopes for the run. See
+[If GitHub rate-limits the release check](upgrading.md#if-github-rate-limits-the-release-check).
 
 For prereleases, pass `--beta`: it takes the newest prerelease, and the install then tracks that
 major's prereleases until the final release ships

@@ -5,11 +5,11 @@ import type { OpsRecord } from "../bridge/crew/ops-store.ts";
 import { CrewOpsStore } from "../bridge/crew/ops-store.ts";
 import { TrustStore, type TrustedMember, type TrustStoreData } from "../bridge/crew/trust-store.ts";
 import { CREW_PROTOCOL_VERSION } from "../bridge/crew/enrollment.ts";
-import { compareSemver, githubTagsUrl, parseTagsResponse } from "../bridge/update.ts";
+import { compareSemver, githubCredential, githubTagsUrl, parseTagsResponse } from "../bridge/update.ts";
 import { collieVersionBare, manifestVersionFrom } from "../bridge/version.ts";
 import { loadContext, type CliContext } from "./context.ts";
 import { cmdDoctor, doctorDeps } from "./doctor.ts";
-import type { Finding } from "./finding.ts";
+import { isLocal, type Finding } from "./finding.ts";
 import {
   binaryLayout,
   classifyInstall,
@@ -270,13 +270,44 @@ export async function doctorCheck(deps: UpdateCheckDeps): Promise<PreflightCheck
   } catch (err) {
     return amber("doctor", `could not run doctor here (${String(err)})`, "collie doctor");
   }
-  const errors = findings.filter((f) => f.status === "error").map((f) => f.check);
-  if (errors.length > 0) {
+  // ── ONLY A LOCAL ERROR IS RED (ADR 0050) ──────────────────────────────────
+  // This check answers one question — can THIS machine take a new version — and a fault on another
+  // machine is not an answer to it. `cli/doctor.ts` already builds its findings as two lists and
+  // stamps the crew's; this reads that stamp rather than a list of check ids.
+  //
+  // Measured 2026-09-20: a laptop went to sleep, `member-reach` went red, and a healthy desktop with
+  // the disk, the bun and a clean tree could not take a release for the rest of the day. A crew of
+  // one desktop and one laptop had the button disabled most of every day. The crew is built for
+  // this: a member levels itself to its lead's release when it comes back (ADR 0016), and
+  // CREW_PROTOCOL.md §7.1 makes the skew in between harmless.
+  //
+  // ADR 0045's floor check is NOT here and is untouched — it is `skewCheck`, its own preflight check
+  // on the member walk. A member the update would strand still blocks the confirm.
+  const errors = findings.filter((f) => f.status === "error");
+  const local = errors.filter(isLocal).map((f) => f.check);
+  if (local.length > 0) {
     return red(
       "doctor",
-      `collie doctor reports ${errors.length} problem${errors.length === 1 ? "" : "s"}: ${errors.join(", ")}`,
+      `collie doctor reports ${local.length} problem${local.length === 1 ? "" : "s"}: ${local.join(", ")}`,
       "collie doctor — clear each error it names, then re-run this check",
     );
+  }
+  // ── A CREW ERROR IS AMBER, AND IS REPORTED BY CHECK ID ────────────────────
+  // By ID, never by the finding's `detail`. Every check's reason is rendered verbatim on the phone,
+  // in the update card's preflight list, and a red one also becomes the card's `blockedReason`. The
+  // detail is free prose written for a terminal: `reach` builds `minibuch at minibuch:8788 — <why>`,
+  // so a real host and port would ride this reason into the phone UI, a screenshot and a log. It is
+  // No preflight reason is translated, so the choice here is between an untranslated IDENTIFIER and
+  // an untranslated SENTENCE — and the card already prints check ids in monospace beside translated
+  // text. The id is what the local branch above already reports, its vocabulary is closed, and
+  // naming the MACHINES is the update card's job from the roster the phone holds (ADR 0050 point 3).
+  //
+  // Every crew error is listed. Two at once is an ordinary state — a member that is asleep is both
+  // unreachable and, once a rotation passes it, enrolled but inactive — and reporting one would hide
+  // the other behind a fault the operator then cannot see.
+  const crew = errors.filter((f) => !isLocal(f)).map((f) => f.check);
+  if (crew.length > 0) {
+    return amber("doctor", `this machine can still update; the crew reports: ${crew.join(", ")}`);
   }
   const warns = findings.filter((f) => f.status === "warn").map((f) => f.check);
   if (warns.length > 0) {
@@ -547,16 +578,37 @@ async function listTags(deps: UpdateCheckDeps, install: InstallKind, repo: strin
     }
     return { ok: true, tags: parseRemoteTags(ls.stdout) };
   }
+  const credential = githubCredential(deps.ctx.env);
   const response = await deps.net.getJson(githubTagsUrl(repo));
   if (!response.ok) {
     const status = response.failure.status;
+    // The token is named by the variable it came from, never by value (#254). A 401 without one is
+    // not a credential problem and reads as the generic failure below.
+    if (status === 401 && credential !== null) {
+      return {
+        ok: false,
+        reason: `GitHub refused the token in ${credential.source} (HTTP 401)`,
+        remedy: `fix ${credential.source}, or unset it`,
+      };
+    }
+    if (status === 403 || status === 429) {
+      if (credential === null) {
+        return {
+          ok: false,
+          reason: `github.com rate-limited the release check (HTTP ${status})`,
+          remedy: "wait an hour, or set GH_TOKEN to a GitHub token with no scopes, then re-run this check",
+        };
+      }
+      return {
+        ok: false,
+        reason: `github.com rate-limited the release check (HTTP ${status}), even with the token in ${credential.source}`,
+        remedy: "wait an hour, then re-run this check",
+      };
+    }
     return {
       ok: false,
-      reason:
-        status === 403 || status === 429
-          ? `github.com rate-limited the release check (HTTP ${status})`
-          : `could not reach github.com for the release check (${response.failure.message})`,
-      remedy: status === 403 || status === 429 ? "wait an hour, then re-run this check" : "check this machine's network",
+      reason: `could not reach github.com for the release check (${response.failure.message})`,
+      remedy: "check this machine's network",
     };
   }
   // SAFETY: `Net.getJson` hands back what `Response.json()` produced, which IS a JsonValue by
@@ -997,7 +1049,7 @@ export function updateCheckDeps(io: Io): UpdateCheckDeps {
     exec,
     files: realFiles,
     link: realLinkFs,
-    net: realNet,
+    net: realNet(githubCredential(ctx.env)),
     platform: process.platform,
     store: new TrustStore(ctx.stateDir),
     ops: new CrewOpsStore(ctx.stateDir),

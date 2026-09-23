@@ -591,6 +591,14 @@ export const CONFIG_SETTINGS: readonly ConfigSetting[] = [
     doc: "The owner/repo releases are taken from. Set it only when you run a fork on purpose.",
   },
   {
+    key: "github_token",
+    env: "COLLIE_GITHUB_TOKEN",
+    section: "update",
+    kind: "secret",
+    default: "",
+    doc: "A GitHub token for the release check, so the API rate limit is yours and not your network's. No scopes are needed. GH_TOKEN and GITHUB_TOKEN are read too.",
+  },
+  {
     key: "keep_versions",
     env: "COLLIE_KEEP_VERSIONS",
     section: "update",
@@ -618,6 +626,15 @@ export const CONFIG_SETTINGS: readonly ConfigSetting[] = [
     default: false,
     doc: "Publish no front door. Your own reverse proxy owns the ingress instead.",
     configField: "skipServe",
+  },
+  {
+    key: "base_path",
+    env: "COLLIE_BASE_PATH",
+    section: "serve",
+    kind: "string",
+    default: "",
+    doc: "The path Collie is mounted under when a proxy gives it one, such as /collie. Empty means the root.",
+    configField: "basePath",
   },
   {
     key: "serve_mode",

@@ -35,34 +35,38 @@ const MAX_CHARS = 8 * 1024;
  */
 const MEMORY_MAX_CHARS = 4 * 1024 * 1024;
 
+/**
+ * An attachment waiting in the composer as a chip (ADR 0060): its number (the `#N` its marker in
+ * the text carries), the host path the bridge saved it under, the name the operator picked, and
+ * whether it is drawn as a photo or a file. The preview blob URL is deliberately NOT here — it dies
+ * with the page, so a restored chip draws the icon tile.
+ */
 export interface DraftAttachment {
+  n: number;
   path: string;
   name: string;
-  size: number;
+  kind: "image" | "file";
 }
 
+/** A pane's whole draft: the typed text (markers included), the chips, and the next chip number. */
+export interface Draft {
+  text: string;
+  attachments: DraftAttachment[];
+  /** The number the next chip gets. Numbers are never reused within a draft, so this outlives a
+   *  removed chip and is stored rather than re-derived from the chips that are left. */
+  next: number;
+}
+
+/**
+ * The stored shape. `attachments` and `next` are written only once the draft has spent a chip
+ * number, so a text-only draft is stored byte for byte as it was before chips existed, and an entry
+ * written before them (neither field) still loads as a draft with no chips.
+ */
 interface DraftEntry {
   text: string;
   at: number;
-  attachments: DraftAttachment[];
-}
-
-function isDraftAttachment(value: unknown): value is DraftAttachment {
-  if (typeof value !== "object" || value === null) return false;
-  const attachment = value as Partial<DraftAttachment>;
-  return (
-    typeof attachment.path === "string" &&
-    attachment.path.length > 0 &&
-    typeof attachment.name === "string" &&
-    attachment.name.length > 0 &&
-    typeof attachment.size === "number" &&
-    Number.isFinite(attachment.size) &&
-    attachment.size >= 0
-  );
-}
-
-function normalizeAttachments(attachments: readonly DraftAttachment[]): DraftAttachment[] {
-  return attachments.filter(isDraftAttachment).map(({ path, name, size }) => ({ path, name, size }));
+  attachments?: DraftAttachment[];
+  next?: number;
 }
 
 /**
@@ -140,14 +144,37 @@ function parse(raw: string | null): DraftEntry | null {
     // SAFETY: `value` was just checked to be a non-null object, so reading `text`/`at` off it is
     // defined behaviour; both are validated as the right primitive on the very next line before any
     // of them is used. `Partial` is what makes those two checks mandatory rather than assumed.
-    const entry = value as Partial<DraftEntry> & { attachments?: unknown };
+    const entry = value as Partial<DraftEntry>;
     if (typeof entry.text !== "string" || typeof entry.at !== "number") return null;
-    if (entry.attachments === undefined) return { text: entry.text, at: entry.at, attachments: [] };
-    if (!Array.isArray(entry.attachments) || !entry.attachments.every(isDraftAttachment)) return null;
-    return { text: entry.text, at: entry.at, attachments: entry.attachments.map((attachment) => ({ ...attachment })) };
+    // The chips, keeping only well-formed ones. Absent (an entry from before chips) is an empty
+    // list, never a reason to drop the text beside it.
+    const attachments: DraftAttachment[] = [];
+    // SAFETY: `Partial<DraftAttachment>` is the shape each item is CHECKED against, field by field,
+    // before any of it is copied out; nothing is trusted from the cast alone.
+    const items: Partial<DraftAttachment>[] = Array.isArray(entry.attachments) ? entry.attachments : [];
+    for (const a of items) {
+      if (typeof a !== "object" || a === null) continue;
+      if (typeof a.n !== "number" || !isChipNumber(a.n)) continue;
+      if (typeof a.path !== "string" || a.path === "" || typeof a.name !== "string") continue;
+      if (a.kind !== "image" && a.kind !== "file") continue;
+      attachments.push({ n: a.n, path: a.path, name: a.name, kind: a.kind });
+    }
+    const next = typeof entry.next === "number" && isChipNumber(entry.next) ? entry.next : undefined;
+    if (attachments.length === 0 && next === undefined) return { text: entry.text, at: entry.at };
+    return { text: entry.text, at: entry.at, attachments, next: nextNumber(attachments, next) };
   } catch {
     return null;
   }
+}
+
+function isChipNumber(value: number): boolean {
+  return Number.isInteger(value) && value >= 1;
+}
+
+/** The next free chip number: the stored one, never below one past the highest chip still held. */
+function nextNumber(attachments: readonly DraftAttachment[], stored: number | undefined): number {
+  const floor = attachments.reduce((max, a) => Math.max(max, a.n + 1), 1);
+  return stored === undefined ? floor : Math.max(stored, floor);
 }
 
 /** Whether a draft is small enough for the disk tier — i.e. whether it will survive the app closing.
@@ -172,17 +199,6 @@ function loadStored(scope: Scope | undefined, paneId: string): DraftEntry | null
     return null;
   }
 }
-/**
- * The newer of the memory and disk entries for a pane, or null if neither tier has one.
- */
-function loadEntry(scope: Scope | undefined, paneId: string): DraftEntry | null {
-  prunedOnce();
-  const cached = memory.get(keyFor(scope, paneId)) ?? null;
-  const stored = loadStored(scope, paneId);
-  if (cached === null) return stored;
-  if (stored === null) return cached;
-  return stored.at > cached.at ? stored : cached;
-}
 
 /**
  * The stored draft for a pane, or null if there is none (or it's expired/unreadable).
@@ -192,33 +208,47 @@ function loadEntry(scope: Scope | undefined, paneId: string): DraftEntry | null 
  * because it is written first and holds what the disk tier refused.
  */
 export function loadDraft(scope: Scope | undefined, paneId: string): string | null {
-  return loadEntry(scope, paneId)?.text ?? null;
+  return loadDraftEntry(scope, paneId)?.text ?? null;
 }
 
-/** The uploaded-file metadata stored alongside the pane's draft. */
-export function loadDraftAttachments(scope: Scope | undefined, paneId: string): DraftAttachment[] {
-  return loadEntry(scope, paneId)?.attachments.map((attachment) => ({ ...attachment })) ?? [];
+/** {@link loadDraft} with the chips: the whole draft, or null when the pane has none. */
+export function loadDraftEntry(scope: Scope | undefined, paneId: string): Draft | null {
+  prunedOnce();
+  const cached = memory.get(keyFor(scope, paneId)) ?? null;
+  const stored = loadStored(scope, paneId);
+  const entry = cached === null ? stored : stored === null ? cached : stored.at > cached.at ? stored : cached;
+  if (entry === null) return null;
+  const attachments = entry.attachments ? [...entry.attachments] : [];
+  return { text: entry.text, attachments, next: nextNumber(attachments, entry.next) };
 }
 
 /**
- * Persist a pane's draft. Empty text with no attachments removes the key; attachment-only entries
- * remain persisted so a file can be sent without a textual message.
+ * Persist a pane's draft. Empty/whitespace-only text with no chips REMOVES the key — that's what
+ * "the user deliberately emptied the box" looks like, and it means the clear-on-send path needs no
+ * special case beyond saving the now-empty input. A draft that is only chips is still a draft. An
+ * empty one also forgets its chip numbering: there is no marker left for a new number to clash with.
  */
 export function saveDraft(
   scope: Scope | undefined,
   paneId: string,
   text: string,
   attachments: readonly DraftAttachment[] = [],
+  next = 1,
 ): void {
   prunedOnce();
-  const storedAttachments = normalizeAttachments(attachments);
-  if (text.trim() === "" && storedAttachments.length === 0) {
+  if (text.trim() === "" && attachments.length === 0) {
     clearDraft(scope, paneId);
     return;
   }
   const key = keyFor(scope, paneId);
   const at = Date.now();
-  const entry: DraftEntry = { text, at, attachments: storedAttachments };
+  // Copied field by field, so a caller's richer object (the composer's chips carry a preview URL
+  // and an id) never leaks into storage.
+  const chips = attachments.map(({ n, path, name, kind }) => ({ n, path, name, kind }));
+  const entry: DraftEntry =
+    chips.length > 0 || next > 1
+      ? { text, at, attachments: chips, next: nextNumber(chips, next) }
+      : { text, at };
 
   // Memory first, and unconditionally: it is the tier that has to hold what the disk tier won't, and
   // it must be written even where there is no storage at all (SSR, Safari private mode).
@@ -241,19 +271,18 @@ export function saveDraft(
     // Quota / private mode. The in-memory draft is still on screen; only its persistence is lost.
   }
 }
+
 /** Hold the memory tier under {@link MEMORY_MAX_CHARS}, oldest first, never evicting `keep`. */
 function evictMemory(keep: string): void {
-  const entryChars = (entry: DraftEntry) =>
-    entry.text.length + entry.attachments.reduce((total, attachment) => total + attachment.path.length + attachment.name.length, 0);
   let total = 0;
-  for (const entry of memory.values()) total += entryChars(entry);
+  for (const entry of memory.values()) total += entry.text.length;
   if (total <= MEMORY_MAX_CHARS) return;
   const byAge = [...memory.entries()]
     .filter(([key]) => key !== keep)
     .toSorted((a, b) => a[1].at - b[1].at);
   for (const [key, entry] of byAge) {
     memory.delete(key);
-    total -= entryChars(entry);
+    total -= entry.text.length;
     if (total <= MEMORY_MAX_CHARS) return;
   }
 }

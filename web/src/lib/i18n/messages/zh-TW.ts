@@ -179,6 +179,9 @@ export const zhTW: Dictionary = {
   "settings.display.rawTerminal.label": "原始終端機",
   "settings.display.rawTerminal.hint":
     "僅顯示純終端機鏡像，隱藏提示按鈕與狀態列。適用於對話框呈現異常時透過按鍵手動操作。",
+  "settings.display.noInvert.label": "以原始配色顯示此窗格",
+  "settings.display.noInvert.hint":
+    "僅對此窗格略過淺色主題的反色。當代理使用淺色主題而鏡像顯示為深色時開啟；顯示正常時保持關閉。",
   "settings.display.textSize.label": "字級大小",
   "settings.display.textSize.decrease": "縮小字級",
   "settings.display.textSize.increase": "放大字級",
@@ -217,12 +220,16 @@ export const zhTW: Dictionary = {
   "composer.attach.title": "附加",
   "composer.attach.photos": "照片",
   "composer.attach.files": "檔案",
+  "composer.attach.listAria": "附件",
+  "composer.attach.removeAria": "移除 {name}",
   "composer.send.typeAnyway": "仍要輸入？",
   "composer.send.reallySend": "確認傳送？",
   "composer.send.stopTypingAria": "停止向終端機輸入",
   "composer.send.sendAria": "傳送",
   "composer.draft.tooLong": "內容過長，無法持久儲存為草稿。切換窗格時會保留，但離開應用程式後將遺失。",
   "composer.status.dialogWaiting": "有等待回應的對話框，請先處理後再傳送。",
+  "composer.status.unreadDialog":
+    "Collie 無法讀取此對話框。卡片上是 {key}。要繼續輸入，請再次點擊「傳送」。", // wordsmith
   "composer.status.paneNotWritable": "窗格已不可寫入，未傳送任何內容",
   "composer.status.inputChanged": "清空輸入框時內容發生變動，未寫入任何內容。請檢查窗格狀態。",
   "composer.status.clearFailed": "無法清空終端機目前輸入",
@@ -247,6 +254,7 @@ export const zhTW: Dictionary = {
   "composer.noEcho.dismissAria": "關閉密碼提示通知",
   "composer.draftPreview.title": "終端機中的草稿",
   "composer.draftPreview.takeOver": "接管",
+  "composer.draftPreview.dismissAria": "關閉終端機草稿提示",
 
   // --- sendMode (the armed "typing straight through" indicator) ---
   "sendMode.armed.title": "終端機直接輸入",
@@ -643,6 +651,18 @@ export const zhTW: Dictionary = {
 
   // --- dialog (menu / multi-select / wizard / preview-select block renderers) ---
   "dialog.sendingAria": "正在傳送",
+  // TODO wordsmith
+  "dialog.terminalControl": "Terminal",
+  // TODO wordsmith
+  "dialog.terminalControlAria": "Show the terminal instead of this card",
+  // TODO wordsmith
+  "dialog.backToCard": "Back to the card",
+  // TODO wordsmith
+  "dialog.putAwayControl": "Put away",
+  // TODO wordsmith
+  "dialog.putAwayControlAria": "Hide this card's buttons, keep the terminal",
+  // TODO wordsmith
+  "dialog.showButtons": "Show the buttons",
   "dialog.previousStepAria": "上一步",
   "dialog.nextStepAria": "下一步",
   "dialog.answeredAria": "已完成",
@@ -662,6 +682,11 @@ export const zhTW: Dictionary = {
   "dialog.menu.moveDown": "下移",
   "dialog.menu.leftAria": "向左：{verb}（{label}）",
   "dialog.menu.rightAria": "向右：{verb}（{label}）",
+  // TODO wordsmith
+  "dialog.menu.levelAria": "{verb} to {label}",
+  // TODO wordsmith
+  "dialog.menu.levelCurrentAria": "{label}, current",
+  "unreadDialog.caption": "Collie 無法讀取此對話框", // wordsmith
   "dialog.preview.currentAnswerAria": "目前回答",
   "dialog.preview.previewedBelowAria": "下方顯示預覽",
   "dialog.preview.previewLabel": "預覽 · {label}",
@@ -795,6 +820,7 @@ export const zhTW: Dictionary = {
   "apiError.update.major_confirm_required": "{version} 跨越主要版本，需要另外確認。",
   "apiError.update.target_mismatch": "目前介面顯示的是 {asked}，但此 collie 將安裝 {would}。請重新載入查看。",
   "apiError.update.none_available": "沒有可更新的版本。",
+  "apiError.update.peers_packaged": "{name} 是套件管理員安裝的。它的更新來自它自己的套件管理員。",
   "apiError.update.packaged": "更新由系統的套件管理工具提供。Collie 不會取代目前安裝的檔案。",
   "apiError.update.start_failed": "無法啟動更新：{reason}",
   // --- settings.updateCard (the update card, M15/05) ---
@@ -934,6 +960,8 @@ export const zhTW: Dictionary = {
   "cache.sheet.overridden": "Moved by cache-rules.toml",
   "cache.sheet.thisMachine": "This machine",
   "cache.sheet.onPeer": "Read on {host}. Its rule catalog is not forwarded, so the source is not quoted here.",
+  "cache.sheet.reset.pending": "上一輪之後：{action}。下一輪將重建快取。",
+  "cache.sheet.reset.cause": "上一輪之前：{action}。那一輪重建了快取。",
   "cache.sheet.state": "State",
   "cache.sheet.state.warm": "Warm",
   "cache.sheet.state.expiring": "Expiring",
@@ -1031,12 +1059,14 @@ export const zhTW: Dictionary = {
   "updateScreen.state.updating": "updating",
   "updateScreen.state.unreachable": "no answer",
   "updateScreen.state.packageManaged": "package-managed",
+  "updateScreen.state.current": "已是最新版本",
   "updateScreen.peer.lastSeen": "last seen {ago} ago",
   "updateScreen.peer.packageManagedNote": "Its package manager owns this machine, so the run leaves it alone.",
   "updateScreen.failed.rolledBack": "The update rolled back. This machine is still on {version}: {reason}",
   "updateScreen.failed.stuck": "The update is stuck: {reason}",
   "updateScreen.failed.interrupted": "The update was interrupted: {reason}",
   "updateScreen.lead.stalled": "Still working. Nothing is wrong yet, and waiting is the whole job.",
+  "updateScreen.lead.crewOnly": "本次執行只更新成員節點。本機維持不變，也不會重新啟動。",
   "updateScreen.device.title": "This device",
   "updateScreen.device.downloading": "Downloading the new app, {done} of {total} files",
   "updateScreen.device.downloadingUnknown": "Downloading the new app",
@@ -1046,4 +1076,5 @@ export const zhTW: Dictionary = {
   "updateScreen.device.keepUsing": "Keep using the app",
   "updateScreen.done.crew": "Crew updated to {version}",
   "updateScreen.done.solo": "{machine} updated to {version}",
+  "updateScreen.done.members": "成員節點已更新至 {version}",
 };

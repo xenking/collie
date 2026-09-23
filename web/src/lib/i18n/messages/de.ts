@@ -194,6 +194,9 @@ export const de: Dictionary = {
   "settings.display.rawTerminal.label": "Rohes Terminal",
   "settings.display.rawTerminal.hint":
     "Zeigt den reinen Terminal-Puffer ohne Buttons, Rahmen oder Statusleisten. Gedacht für falsch dargestellte TUI-Dialoge zur manuellen Tastensteuerung.",
+  "settings.display.noInvert.label": "Dieses Pane nativ darstellen",
+  "settings.display.noInvert.hint":
+    "Überspringt die Invertierung im hellen Theme nur für dieses Pane. Aktiviere es, wenn ein Agent ein HELLES Theme nutzt und der Spiegel ihn dunkel darstellt; lass es aus, wenn das Pane richtig aussieht.",
   "settings.display.textSize.label": "Textgröße",
   "settings.display.textSize.decrease": "Schriftgröße verringern",
   "settings.display.textSize.increase": "Schriftgröße erhöhen",
@@ -232,6 +235,8 @@ export const de: Dictionary = {
   "composer.attach.title": "Anhängen",
   "composer.attach.photos": "Fotos",
   "composer.attach.files": "Dateien",
+  "composer.attach.listAria": "Anhänge",
+  "composer.attach.removeAria": "{name} entfernen",
   "composer.send.typeAnyway": "Trotzdem tippen",
   "composer.send.reallySend": "Senden bestätigen",
   "composer.send.stopTypingAria": "Eingabe ins Terminal abbrechen",
@@ -239,6 +244,8 @@ export const de: Dictionary = {
   "composer.draft.tooLong":
     "Zu lang für einen dauerhaften Entwurf. Bleibt beim Pane-Wechsel erhalten, geht aber beim Beenden der App verloren.",
   "composer.status.dialogWaiting": "Ein Dialog ist geöffnet. Erst antworten, dann senden.",
+  "composer.status.unreadDialog":
+    "Collie kann diesen Dialog nicht lesen. {key} steht auf der Karte. Zum Tippen erneut auf Senden tippen.", // wordsmith
   "composer.status.paneNotWritable": "Pane ist nicht mehr beschreibbar. Nichts gesendet.",
   "composer.status.inputChanged":
     "Eingabefeld hat sich beim Leeren geändert. Es wurde nichts getippt. Pane prüfen.",
@@ -266,6 +273,7 @@ export const de: Dictionary = {
   "composer.noEcho.dismissAria": "Passworthinweis verwerfen",
   "composer.draftPreview.title": "Entwurf im Terminal",
   "composer.draftPreview.takeOver": "Übernehmen",
+  "composer.draftPreview.dismissAria": "Hinweis zum Terminal-Entwurf schließen",
 
   // --- sendMode (the armed "typing straight through" indicator) ---
   "sendMode.armed.title": "Eingabe ins Terminal",
@@ -668,6 +676,18 @@ export const de: Dictionary = {
 
   // --- dialog (menu / multi-select / wizard / preview-select block renderers) ---
   "dialog.sendingAria": "Wird gesendet",
+  // TODO wordsmith
+  "dialog.terminalControl": "Terminal",
+  // TODO wordsmith
+  "dialog.terminalControlAria": "Show the terminal instead of this card",
+  // TODO wordsmith
+  "dialog.backToCard": "Back to the card",
+  // TODO wordsmith
+  "dialog.putAwayControl": "Put away",
+  // TODO wordsmith
+  "dialog.putAwayControlAria": "Hide this card's buttons, keep the terminal",
+  // TODO wordsmith
+  "dialog.showButtons": "Show the buttons",
   "dialog.previousStepAria": "Vorheriger Schritt",
   "dialog.nextStepAria": "Nächster Schritt",
   "dialog.answeredAria": "Beantwortet",
@@ -687,6 +707,11 @@ export const de: Dictionary = {
   "dialog.menu.moveDown": "Nach unten",
   "dialog.menu.leftAria": "Links: {verb} ({label})",
   "dialog.menu.rightAria": "Rechts: {verb} ({label})",
+  // TODO wordsmith
+  "dialog.menu.levelAria": "{verb} to {label}",
+  // TODO wordsmith
+  "dialog.menu.levelCurrentAria": "{label}, current",
+  "unreadDialog.caption": "Collie kann diesen Dialog nicht lesen", // wordsmith
   "dialog.preview.currentAnswerAria": "Aktuelle Antwort",
   "dialog.preview.previewedBelowAria": "Vorschau unten",
   "dialog.preview.previewLabel": "Vorschau: {label}",
@@ -834,6 +859,7 @@ export const de: Dictionary = {
   "apiError.update.major_confirm_required": "{version} ist ein Major-Update und erfordert eine eigene Bestätigung.",
   "apiError.update.target_mismatch": "Angezeigt wurde {asked}, aber dieses Collie würde {would} installieren. Bitte neu laden und prüfen.",
   "apiError.update.none_available": "Keine neuere Version verfügbar.",
+  "apiError.update.peers_packaged": "{name} ist eine Paket-Installation. Ihre Updates kommen vom eigenen Paketmanager.",
   "apiError.update.packaged": "Updates erfolgen über deine Paketverwaltung. Collie ersetzt keine Dateien dieser Installation.",
   "apiError.update.start_failed": "Update konnte nicht gestartet werden: {reason}",
   // --- settings.updateCard (the update card, M15/05) ---
@@ -975,6 +1001,8 @@ export const de: Dictionary = {
   "cache.sheet.overridden": "Moved by cache-rules.toml",
   "cache.sheet.thisMachine": "This machine",
   "cache.sheet.onPeer": "Read on {host}. Its rule catalog is not forwarded, so the source is not quoted here.",
+  "cache.sheet.reset.pending": "Nach dem letzten Durchgang: {action}. Der nächste Durchgang baut den Cache neu auf.",
+  "cache.sheet.reset.cause": "Vor dem letzten Durchgang: {action}. Dieser Durchgang hat den Cache neu aufgebaut.",
   "cache.sheet.state": "State",
   "cache.sheet.state.warm": "Warm",
   "cache.sheet.state.expiring": "Expiring",
@@ -1072,12 +1100,14 @@ export const de: Dictionary = {
   "updateScreen.state.updating": "updating",
   "updateScreen.state.unreachable": "no answer",
   "updateScreen.state.packageManaged": "package-managed",
+  "updateScreen.state.current": "bereits aktuell",
   "updateScreen.peer.lastSeen": "last seen {ago} ago",
   "updateScreen.peer.packageManagedNote": "Its package manager owns this machine, so the run leaves it alone.",
   "updateScreen.failed.rolledBack": "The update rolled back. This machine is still on {version}: {reason}",
   "updateScreen.failed.stuck": "The update is stuck: {reason}",
   "updateScreen.failed.interrupted": "The update was interrupted: {reason}",
   "updateScreen.lead.stalled": "Still working. Nothing is wrong yet, and waiting is the whole job.",
+  "updateScreen.lead.crewOnly": "Dieser Lauf aktualisiert nur die Crew-Mitglieder. Diese Maschine bleibt, wie sie ist, und startet nicht neu.",
   "updateScreen.device.title": "This device",
   "updateScreen.device.downloading": "Downloading the new app, {done} of {total} files",
   "updateScreen.device.downloadingUnknown": "Downloading the new app",
@@ -1087,4 +1117,5 @@ export const de: Dictionary = {
   "updateScreen.device.keepUsing": "Keep using the app",
   "updateScreen.done.crew": "Crew updated to {version}",
   "updateScreen.done.solo": "{machine} updated to {version}",
+  "updateScreen.done.members": "Crew-Mitglieder auf {version} aktualisiert",
 };

@@ -7,7 +7,7 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 
 import { clearStatus, useStatus } from "@/lib/status";
 import { isReloadHeld, __resetReloadGuard } from "@/lib/reload-guard";
-import { loadDraft } from "@/lib/drafts";
+import { loadDraft, loadDraftEntry, saveDraft } from "@/lib/drafts";
 import { __resetOperatorCommands } from "@/lib/operator-config";
 import { server } from "@/test/setup";
 import { fixtureServers, recordReply } from "@/test/handlers";
@@ -73,6 +73,8 @@ function renderComposer(overrides: Partial<ComponentProps<typeof Composer>> = {}
     stepFontSize: vi.fn(),
     setRawTerminal: vi.fn(),
     setTapToFocus: vi.fn(),
+    mirrorNative: false,
+    setMirrorNative: vi.fn(),
     setExpandClippedReply: vi.fn(),
     onSent: vi.fn(),
     ...overrides,
@@ -125,6 +127,8 @@ function renderComposerWithStatus(
     stepFontSize: vi.fn(),
     setRawTerminal: vi.fn(),
     setTapToFocus: vi.fn(),
+    mirrorNative: false,
+    setMirrorNative: vi.fn(),
     setExpandClippedReply: vi.fn(),
     onSent: vi.fn(),
     ...overrides,
@@ -169,6 +173,72 @@ describe("Composer — send", () => {
     expect(calls).toEqual([]); // no keys, no reply — nothing reached the pane at all
     expect(box).toHaveValue("please do not approve anything"); // the message survives
     expect(props.onSent).not.toHaveBeenCalled();
+  });
+
+  // .adr/0053: the unread-dialog card. The screen is a dialog nobody could READ, so the refusal is a
+  // guess — it still refuses, but it arms the deliberate second tap and names the key on the card.
+  it("refuses an unread dialog, names its key, and arms the type-anyway override", async () => {
+    const user = userEvent.setup();
+    const calls: string[] = [];
+    server.use(
+      http.post(/\/api\/pane\/[^/]+\/keys$/, () => {
+        calls.push("keys");
+        return HttpResponse.json({ ok: true });
+      }),
+      replyHandler(() => calls.push("reply")),
+    );
+    const props = renderComposerWithStatus({ dialogPresent: true, dialogUnread: true });
+    const box = screen.getByPlaceholderText(/type a reply/i);
+
+    await user.type(box, "carry on");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    // The status names the key the way the Keys keypad names it, and the card is where it is.
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent(/Collie cannot read this dialog/i),
+    );
+    expect(screen.getByTestId("status")).toHaveTextContent(/Esc is on the card/);
+    expect(calls).toEqual([]);
+    expect(box).toHaveValue("carry on");
+    // Armed: the Send button now asks for the deliberate second tap.
+    expect(screen.getByRole("button", { name: /type anyway/i })).toBeInTheDocument();
+    expect(props.onSent).not.toHaveBeenCalled();
+  });
+
+  it("lets the second Send through on an unread dialog", async () => {
+    const user = userEvent.setup();
+    let submitted = false;
+    server.use(replyHandler(() => {}, () => (submitted = true)));
+    renderComposerWithStatus({ dialogPresent: true, dialogUnread: true });
+    const box = screen.getByPlaceholderText(/type a reply/i);
+
+    await user.type(box, "carry on");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent(/Collie cannot read this dialog/i),
+    );
+
+    await user.click(screen.getByRole("button", { name: /type anyway/i }));
+    await waitFor(() => expect(submitted).toBe(true), { timeout: 5000 });
+    await waitFor(() => expect(box).toHaveValue(""));
+  });
+
+  it("keeps the flat refusal for a dialog a grammar READ: no unread override", async () => {
+    const user = userEvent.setup();
+    const calls: string[] = [];
+    server.use(replyHandler(() => calls.push("reply")));
+    renderComposerWithStatus({ dialogPresent: true, dialogUnread: false });
+    const box = screen.getByPlaceholderText(/type a reply/i);
+
+    await user.type(box, "please do not approve anything");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent(/dialog is waiting/i));
+    // Flat: no override is armed, so a second tap refuses exactly the same way.
+    expect(screen.queryByRole("button", { name: /type anyway/i })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(calls).toEqual([]);
+    expect(box).toHaveValue("please do not approve anything");
   });
 
   // The same #34 failure one step upstream. `dialogPresent` and the stranded draft are both derived
@@ -501,6 +571,8 @@ describe("Composer — send", () => {
               stepFontSize={vi.fn()}
               setRawTerminal={vi.fn()}
               setTapToFocus={vi.fn()}
+              mirrorNative={false}
+              setMirrorNative={vi.fn()}
               setExpandClippedReply={vi.fn()}
               onSent={vi.fn()}
             />
@@ -595,6 +667,8 @@ describe("Composer — send", () => {
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
       setTapToFocus: vi.fn(),
+    mirrorNative: false,
+    setMirrorNative: vi.fn(),
       setExpandClippedReply: vi.fn(),
       onSent: vi.fn(),
     };
@@ -692,6 +766,8 @@ describe("Composer — typing into the terminal", () => {
             stepFontSize={vi.fn()}
             setRawTerminal={vi.fn()}
             setTapToFocus={vi.fn()}
+              mirrorNative={false}
+              setMirrorNative={vi.fn()}
             setExpandClippedReply={vi.fn()}
             onSent={vi.fn()}
           />
@@ -825,6 +901,8 @@ describe("Composer — typing into the terminal", () => {
             stepFontSize={vi.fn()}
             setRawTerminal={vi.fn()}
             setTapToFocus={vi.fn()}
+              mirrorNative={false}
+              setMirrorNative={vi.fn()}
             setExpandClippedReply={vi.fn()}
             onSent={vi.fn()}
           />
@@ -1017,6 +1095,8 @@ describe("Composer — typing into the terminal", () => {
             stepFontSize={vi.fn()}
             setRawTerminal={vi.fn()}
             setTapToFocus={vi.fn()}
+              mirrorNative={false}
+              setMirrorNative={vi.fn()}
             setExpandClippedReply={vi.fn()}
             onSent={vi.fn()}
           />
@@ -1141,14 +1221,15 @@ describe("Composer — the draft field wears its own size", () => {
     expect(box.className).toMatch(/(?:^|\s)font-mono(?=\s|$)/);
   });
 
-  // The three things the field's class list already promises, unchanged by the size landing on it:
-  // the attach button's reserved strip, the wrap rule, and the fact that only ONE pr-* may exist
-  // (tailwind-merge keeps the last, DESIGN.md §7).
-  it("leaves the attach-button gutter and the wrap rule exactly where they were", () => {
+  // What the field's class list promises, unchanged by the size landing on it: no horizontal
+  // strip reserved for anything, and the wrap rule. The strip was `pr-11`, for the attach button
+  // in the field's bottom-right corner; the button is the field's sibling in the box now (ADR 0057),
+  // so the 44px is typing area again and NOTHING may reserve it back by adding a padding here.
+  it("reserves no gutter in the field, and keeps the wrap rule where it was", () => {
     renderComposerWithStatus();
     const box = screen.getByPlaceholderText(/type a reply/i);
-    expect(box.className.match(/(?:^|\s)pr-\S+/g)).toHaveLength(1);
-    expect(box.className).toMatch(/(?:^|\s)pr-11(?=\s|$)/);
+    expect(box.className).not.toMatch(/(?:^|\s)pr-/);
+    expect(box.className).toMatch(/(?:^|\s)wrap-anywhere(?=\s|$)/);
   });
 });
 
@@ -1398,7 +1479,7 @@ describe("Composer — the machine opens the actions belt, and no band stands ab
   const row = () => document.querySelector<HTMLElement>('[data-slot="composer-controls"]')!;
   /** The belt: the scrolling row, which carries the ground, the rules and the row's own margins. */
   const actions = () => document.querySelector<HTMLElement>('[data-slot="composer-actions"]')!;
-  /** The field's own reserved strip. Read off the class, because the jsdom render has no layout. */
+  /** Any strip the field reserves. Read off the class, because the jsdom render has no layout. */
   const reserved = (el: HTMLElement) => /(?:^|\s)pr-(\d+)(?=\s|$)/.exec(el.className)?.[1];
 
   it("has no status band at all any more, and adds no visible word in its place", () => {
@@ -1412,16 +1493,18 @@ describe("Composer — the machine opens the actions belt, and no band stands ab
     }
   });
 
-  it("is NOT in the composer field: no chip in the box, and the typing width is the attach strip alone", async () => {
-    // The revision this round is. `pr-11` and only `pr-11` — MEASURED at 254px of typing width at a
-    // true 390px content width and 184px at 320px, on a crew exactly as on a solo install; docked,
-    // the crew figures were 194px and 124px. A second conditional `pr-*` would not stack
-    // (tailwind-merge keeps the last padding-right), which is why the number is read off the class.
+  it("is NOT in the composer field: no chip in the box, and the field reserves no strip at all", async () => {
+    // The revision this round is. NO `pr-*`, because there is nothing inside the field to keep a
+    // line clear of any more: the attach button is the field's sibling in the box (ADR 0057).
+    // It was `pr-11`, measured at 254px of typing width at a true 390px content width and 184px at
+    // 320px, on a crew exactly as on a solo install; docked, the crew figures were 194px and 124px.
+    // Read off the class, because a conditional `pr-*` would not stack with another (tailwind-merge
+    // keeps the last padding-right) and this is where such a one would land.
     const user = userEvent.setup();
     renderComposerWithStatus({ scope: { host: "workshop" } }, fixtureServers);
-    expect(reserved(box())).toBe("11");
-    // …and nothing in the field's own relative box carries the host, by either route: no chip node
-    // inside it, and no `aria-describedby` pointing the textarea at one.
+    expect(reserved(box())).toBeUndefined();
+    // …and nothing in the box carries the host, by either route: no chip node inside it, and no
+    // `aria-describedby` pointing the textarea at one.
     const field = box().parentElement!;
     expect(field.querySelector('[aria-label*="host" i]')).toBeNull();
     expect(box().getAttribute("aria-describedby")).toBeNull();
@@ -1533,6 +1616,8 @@ function renderDraftHarness(overrides: Partial<ComponentProps<typeof Composer>> 
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
       setTapToFocus: vi.fn(),
+    mirrorNative: false,
+    setMirrorNative: vi.fn(),
       setExpandClippedReply: vi.fn(),
       onSent: vi.fn(),
       ...rest,
@@ -1656,12 +1741,75 @@ describe("Composer — terminal-draft preview", () => {
     await waitFor(() => expect(screen.queryByText(/draft in terminal/i)).not.toBeInTheDocument());
   });
 
-  it("renders no dismiss button — the preview has no user-facing dismiss", async () => {
+  // ADR 0061: the notice floats, and its x hides it until the draft is gone.
+  it("floats out of the flow: absolutely positioned, never a row of the composer", async () => {
     renderDraftHarness();
-    strandDraft("no dismiss here");
+    strandDraft("floating");
     await screen.findByText(/draft in terminal/i);
 
-    expect(screen.queryByLabelText(/dismiss terminal draft/i)).not.toBeInTheDocument();
+    const wrapper = screen.getByText("floating").closest('[data-slot="terminal-draft-notice"]')!;
+    expect(wrapper.className).toMatch(/(?:^|\s)absolute(?=\s|$)/);
+    expect(wrapper.className).toMatch(/(?:^|\s)pointer-events-none(?=\s|$)/);
+    // No Collapse around it: nothing in the composer's flow grows when it arrives.
+    expect(wrapper.closest('[data-slot="collapse"]')).toBeNull();
+    // The notice itself takes touches back from the pass-through wrapper.
+    expect(wrapper.firstElementChild!.className).toMatch(/(?:^|\s)pointer-events-auto(?=\s|$)/);
+  });
+
+  it("portals into the slot it is handed, and nowhere inside the composer", async () => {
+    const slot = document.createElement("div");
+    document.body.append(slot);
+    renderDraftHarness({ draftNoticeSlot: slot });
+    strandDraft("in the slot");
+    await screen.findByText(/draft in terminal/i);
+
+    expect(slot).toHaveTextContent("in the slot");
+    const wrapper = slot.querySelector('[data-slot="terminal-draft-notice"]')!;
+    // In the slot the wrapper is only the pass-through: the slot does the positioning.
+    expect(wrapper.className).not.toMatch(/(?:^|\s)absolute(?=\s|$)/);
+    slot.remove();
+  });
+
+  it("the x hides it, and editing the host draft keeps it hidden", async () => {
+    const user = userEvent.setup();
+    renderDraftHarness();
+    strandDraft("dismiss me");
+    await screen.findByText(/draft in terminal/i);
+
+    await user.click(screen.getByRole("button", { name: "Dismiss the terminal draft notice" }));
+    expect(screen.queryByText(/draft in terminal/i)).toBeNull();
+
+    // The host keeps typing into the same line: still hidden, however it changes.
+    setRawDraft("dismiss me now");
+    strandDraft("something else entirely");
+    expect(screen.queryByText(/draft in terminal/i)).toBeNull();
+  });
+
+  it("comes back for the next draft once the dismissed one is gone", async () => {
+    const user = userEvent.setup();
+    renderDraftHarness();
+    strandDraft("first");
+    await screen.findByText(/draft in terminal/i);
+    await user.click(screen.getByRole("button", { name: "Dismiss the terminal draft notice" }));
+
+    // The host line clears (sent or wiped on the host)…
+    setRawDraft("");
+    setStableDraft("");
+    // …and a later draft shows the notice again.
+    strandDraft("second");
+    expect(await screen.findByText("second")).toBeInTheDocument();
+    expect(screen.getByText(/draft in terminal/i)).toBeInTheDocument();
+  });
+
+  it("Take over still works from the floating notice", async () => {
+    const user = userEvent.setup();
+    renderDraftHarness();
+    strandDraft("carry this");
+    await screen.findByText(/draft in terminal/i);
+
+    await user.click(screen.getByRole("button", { name: /take over/i }));
+    expect(screen.getByPlaceholderText(/type a reply/i)).toHaveValue("carry this");
+    expect(screen.queryByText(/draft in terminal/i)).toBeNull();
   });
 
   it("persists across subsequent polls of the same text with no user action", async () => {
@@ -1805,6 +1953,8 @@ describe("Composer — in-flight echo suppression (match-last-sent)", () => {
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
       setTapToFocus: vi.fn(),
+    mirrorNative: false,
+    setMirrorNative: vi.fn(),
       setExpandClippedReply: vi.fn(),
       onSent: vi.fn(),
     };
@@ -1919,8 +2069,8 @@ describe("Composer — reload-guard hold (no-SW self-update safety gate)", () =>
   });
 
   it("holds while an image upload is in flight, releases once it settles", async () => {
-    // Failing upload keeps the input empty (a successful one appends the returned path, which then
-    // legitimately holds as real unsent text) — so the release is observable in isolation.
+    // Failing upload keeps the draft empty (a successful one adds a chip, which then legitimately
+    // holds as real unsent work) — so the release is observable in isolation.
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     server.use(
@@ -1964,6 +2114,27 @@ describe("Composer — quick keys / image attach", () => {
     for (const d of ["1", "2", "3", "4", "5"]) {
       expect(screen.queryByRole("button", { name: d })).not.toBeInTheDocument();
     }
+  });
+
+  // The photos input carries `multiple`, so the picker can return several files in one change;
+  // onPickFile must upload every one, not just the first.
+  it("uploads every photo when several are selected at once", async () => {
+    let uploadCalls = 0;
+    server.use(
+      http.post(/\/api\/pane\/[^/]+\/upload$/, () => {
+        uploadCalls++;
+        return HttpResponse.json({ ok: true, path: `/tmp/shot-${uploadCalls}.png` });
+      }),
+    );
+    renderComposer();
+
+    const a = new File(["a"], "a.png", { type: "image/png" });
+    const b = new File(["b"], "b.png", { type: "image/png" });
+    // SAFETY: `getByTestId` throws when the element is absent, and this id is on an `<input>`.
+    const photos = screen.getByTestId("attach-photos") as HTMLInputElement;
+    fireEvent.change(photos, { target: { files: [a, b] } });
+
+    await waitFor(() => expect(uploadCalls).toBe(2));
   });
 });
 
@@ -2024,8 +2195,10 @@ describe("Composer — attachment limits published by this bridge", () => {
     const fileInput = screen.getByTestId("attach-files") as HTMLInputElement;
     fireEvent.change(fileInput, { target: { files: [file] } });
 
+    // A chip, not a path (ADR 0060): the field holds the marker, the chip holds the name.
     const box = screen.getByPlaceholderText(/type a reply/i);
-    await waitFor(() => expect(box).toHaveValue("/tmp/notes.md"));
+    await waitFor(() => expect(box).toHaveValue("[File #1] "));
+    expect(screen.getByRole("button", { name: "Remove notes.md" })).toBeInTheDocument();
   });
 
   it("refuses a .rb file the bridge did not publish and never calls the upload API", async () => {
@@ -2051,7 +2224,7 @@ describe("Composer — attachment limits published by this bridge", () => {
 });
 
 describe("Composer — clipboard image paste", () => {
-  it("uploads a pasted image the same way the picker does and appends its path", async () => {
+  it("uploads a pasted image the same way the picker does and adds its chip and marker", async () => {
     server.use(
       http.post(/\/api\/pane\/[^/]+\/upload$/, () => HttpResponse.json({ ok: true, path: "/tmp/shot.png" })),
     );
@@ -2062,7 +2235,8 @@ describe("Composer — clipboard image paste", () => {
 
     fireEvent.paste(box, { clipboardData: { items: [item] } });
 
-    await waitFor(() => expect(box).toHaveValue("/tmp/shot.png"));
+    await waitFor(() => expect(box).toHaveValue("[Image #1] "));
+    expect(screen.getByRole("button", { name: "Remove shot.png" })).toBeInTheDocument();
   });
 
   it("leaves a plain-text paste alone — no upload, nothing written by the paste handler", () => {
@@ -2444,6 +2618,8 @@ describe("Composer — draft persistence", () => {
       stepFontSize: vi.fn(),
       setRawTerminal: vi.fn(),
       setTapToFocus: vi.fn(),
+    mirrorNative: false,
+    setMirrorNative: vi.fn(),
       setExpandClippedReply: vi.fn(),
       onSent: vi.fn(),
       ...overrides,
@@ -2573,7 +2749,9 @@ describe("Composer — a long upload path cannot widen the field", () => {
     expect(box.className).toMatch(/placeholder:whitespace-nowrap/);
   });
 
-  it("still takes the appended path verbatim — the fix is layout, not the text", async () => {
+  // The path no longer reaches the field at all (ADR 0060): the chip holds it and the marker
+  // holds its place. The two classes above still matter for a path the operator types or pastes.
+  it("keeps an uploaded path out of the field: the marker stands in for it", async () => {
     const path = "/home/operator/.local/share/collie/uploads/2026-08-31T09-14-22-a1b2c3d4e5f6.png";
     server.use(http.post(/\/api\/pane\/[^/]+\/upload$/, () => HttpResponse.json({ ok: true, path })));
     renderComposer();
@@ -2584,7 +2762,8 @@ describe("Composer — a long upload path cannot widen the field", () => {
       clipboardData: { items: [{ kind: "file", type: "image/png", getAsFile: () => file }] },
     });
 
-    await waitFor(() => expect(box).toHaveValue(path));
+    await waitFor(() => expect(box).toHaveValue("[Image #1] "));
+    expect(box).not.toHaveValue(expect.stringContaining(path));
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
   });
 });
@@ -2707,5 +2886,499 @@ describe("Composer — the attach picker offers photos as well as files", () => 
     await user.click(screen.getByRole("button", { name: "Attach file" }));
     await user.click(await screen.findByRole("button", { name: "Files" }));
     expect(opened).toEqual(["attach-photos", "attach-files"]);
+  });
+});
+
+// ── THE COMPOSER IS ONE BOX, ONE ROW (.adr/0057, amended twice on 2026-09-22) ───────────────────
+//
+// The field, the attach control and Send used to be three shapes on one line. They are one bordered
+// container now, the prompt-input pattern the shadcn-registry chat kits settled on, ported by hand.
+// For one round the box put a toolbar row under the field; on a phone that was a second row of
+// height on an empty composer, so the box is ONE row: the field, attach, the primary action — attach
+// stood at the left for one round, then moved back beside Send, where it was before this ADR.
+//
+// These are STRUCTURAL and COUPLING assertions, in the house style of the two blocks above: jsdom
+// measures no layout, so what a class carries into this file is a fact about a real browser. What
+// each one stops is named at the assertion.
+describe("Composer — the composer is one box", () => {
+  const field = () => screen.getByPlaceholderText(/type a reply/i);
+  /** The bordered container: the field's own parent, which is where the frame is drawn. */
+  const boxOf = (el: HTMLElement) => el.parentElement!;
+  const attach = () => screen.getByRole("button", { name: "Attach file" });
+
+  // THE SEND KEY IS UNCHANGED BY THE NEW SHAPE, and it is the first thing a ported pattern gets
+  // wrong: every kit this was read from sends on a bare Enter. Enter is a shell character here, so
+  // it must stay a newline, and Cmd/Ctrl+Enter is the submit. Nothing pinned this before.
+  it("still sends on Ctrl+Enter, and still leaves a bare Enter to the textarea", async () => {
+    const user = userEvent.setup();
+    const props = renderComposer();
+
+    await user.type(field(), "looks good");
+    // `fireEvent` returns false when the handler called preventDefault, so this reads the two
+    // decisions directly: the plain key is handed to the textarea, the modified one is taken.
+    expect(fireEvent.keyDown(field(), { key: "Enter" })).toBe(true);
+    expect(props.onSent).not.toHaveBeenCalled();
+    expect(field()).toHaveValue("looks good");
+
+    expect(fireEvent.keyDown(field(), { key: "Enter", ctrlKey: true })).toBe(false);
+    await waitFor(() => expect(field()).toHaveValue(""));
+    expect(props.onSent).toHaveBeenCalled();
+  });
+
+  it("sends on Cmd+Enter too, for a keyboard-attached phone and a Mac", async () => {
+    const user = userEvent.setup();
+    const props = renderComposer();
+
+    await user.type(field(), "ship it");
+    expect(fireEvent.keyDown(field(), { key: "Enter", metaKey: true })).toBe(false);
+    await waitFor(() => expect(field()).toHaveValue(""));
+    expect(props.onSent).toHaveBeenCalled();
+  });
+
+  it("holds the field, attach and the primary action as siblings on ONE row of the box", async () => {
+    renderComposer();
+    const box = boxOf(field());
+    const send = screen.getByRole("button", { name: "Send" });
+
+    // One row, no toolbar row under the field: the three are direct children of the box, in
+    // reading order field, attach, action — attach next to the primary action, as it stood
+    // before the one-box change.
+    expect(attach().parentElement).toBe(box);
+    expect(send.parentElement).toBe(box);
+    const order = [...box.children].filter((el) => el === attach() || el === field() || el === send);
+    expect(order).toEqual([field(), attach(), send]);
+    // The box IS the flex row, and `items-end` pins both buttons to the bottom edge while a long
+    // draft grows the field upward.
+    expect(box.className).toMatch(/(?:^|\s)flex(?=\s|$)/);
+    expect(box.className).toMatch(/(?:^|\s)items-end(?=\s|$)/);
+    expect(box.className).not.toMatch(/(?:^|\s)flex-col(?=\s|$)/);
+    // The field takes the width the buttons leave, and the buttons never give theirs up.
+    expect(field().className).toMatch(/(?:^|\s)flex-1(?=\s|$)/);
+    expect(attach().className).toMatch(/(?:^|\s)shrink-0(?=\s|$)/);
+    expect(send.className).toMatch(/(?:^|\s)shrink-0(?=\s|$)/);
+  });
+
+  // AN EMPTY COMPOSER IS ONE BUTTON ROW TALL. The buttons are 36px; the box's `p-1` is their 4px
+  // hit-area reach, so the inside of the box is 44px. The field claims one line against the 36px
+  // face and no more: `min-h-9` with `py-1.5`, and nothing taller left over from the primitive.
+  it("claims one button row of height for an empty field, and no second row", () => {
+    renderComposer();
+    const box = boxOf(field());
+    expect(box.className).toMatch(/(?:^|\s)p-1(?=\s|$)/);
+    expect(field().className).toMatch(/(?:^|\s)min-h-9(?=\s|$)/);
+    expect(field().className).toMatch(/(?:^|\s)py-1\.5(?=\s|$)/);
+    expect(field().className).not.toMatch(/(?:^|\s)min-h-(?:1[0-9]|[2-9][0-9])(?=\s|$)/);
+    expect(field()).toHaveAttribute("rows", "1");
+  });
+
+  it("draws ONE frame and ONE focus mark on the box, and none of it on the textarea", () => {
+    renderComposer();
+    const box = boxOf(field());
+
+    // The frame. `focus-within`, so a caret in the textarea marks the whole shape: the border takes
+    // the ring colour and a 1px ring (a box-shadow) thickens it, which costs no layout (DESIGN.md
+    // §2). That is the visible focus indicator, and it is the only one.
+    expect(box.className).toMatch(/(?:^|\s)rounded-xl(?=\s|$)/);
+    expect(box.className).toMatch(/(?:^|\s)border-input(?=\s|$)/);
+    expect(box.className).toMatch(/(?:^|\s)focus-within:border-ring(?=\s|$)/);
+    expect(box.className).toMatch(/(?:^|\s)focus-within:ring-1(?=\s|$)/);
+    expect(box.className).toMatch(/(?:^|\s)focus-within:ring-ring(?=\s|$)/);
+    // …and NO second frame outside it. An offset outline on top of the ring-coloured border drew
+    // two frames around one field, which is the defect this amendment fixed.
+    expect(box.className).not.toMatch(/outline-offset/);
+    expect(box.className).not.toMatch(/focus-within:outline-(?:1|2|4|8|ring)/);
+
+    // The inner control draws no frame of its own either.
+    expect(field().className).toMatch(/(?:^|\s)border-0(?=\s|$)/);
+    expect(field().className).not.toMatch(/(?:^|\s)rounded-/);
+    expect(field().className).not.toMatch(/focus-visible:outline-2/);
+    expect(field().className).not.toMatch(/focus-visible:border-ring/);
+    expect(field().className).not.toMatch(/focus-visible:ring/);
+  });
+
+  // A 200-CHARACTER UNBROKEN PATH MAY NOT PUSH THE PRIMARY ACTION OFF THE SCREEN.
+  //
+  // `uploadFile()` appends the bridge's host path for an attached image, one run of `/`-joined
+  // characters with no break opportunity. The field is `field-sizing-content`, so under the
+  // textarea's UA `break-word` that token would become the field's laid-out width, and Send, beside
+  // it on the same row, would go off the right edge: the "the Send button disappeared after I
+  // uploaded a picture" report. Two independent things stop it and this pins both: the value wraps
+  // ANYWHERE, and the field is `min-w-0`, so as a flex item it may be narrower than its content.
+  it("keeps the primary action in the row under a 200-character unbroken path", async () => {
+    const path = `/home/operator/${"a".repeat(181)}.png`;
+    expect(path.length).toBeGreaterThanOrEqual(200);
+    renderComposer();
+
+    fireEvent.change(field(), { target: { value: path } });
+    await waitFor(() => expect(field()).toHaveValue(path));
+
+    expect(field().className).toMatch(/(?:^|\s)wrap-anywhere(?=\s|$)/);
+    expect(field().className).toMatch(/(?:^|\s)min-w-0(?=\s|$)/);
+    const send = screen.getByRole("button", { name: "Send" });
+    // Still in the box's one row, beside the field, after the field.
+    expect(send.parentElement).toBe(field().parentElement);
+    expect(field().compareDocumentPosition(send) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Nothing in the field reserves a horizontal strip for a control, so the path has the field's
+    // whole width to wrap into.
+    expect(field().className).not.toMatch(/(?:^|\s)pr-/);
+  });
+
+  // DESIGN.md §6: 44px is the floor for anything tappable, and both buttons in the box are drawn at
+  // 36px. They buy the floor back as HIT AREA, the trade that section sanctions, and the reach is
+  // the arithmetic at `TOOLBAR_TAP_TARGET`: 36 + 4 + 4 = 44 in both axes. Drawn size and hit area
+  // are one decision here; a `size-9` that loses the `::before` is a 36px target.
+  it("buys the 44px tap floor back on both buttons in the box", () => {
+    renderComposer();
+    for (const button of [attach(), screen.getByRole("button", { name: "Send" })]) {
+      expect(button.className).toMatch(/(?:^|\s)size-9(?=\s|$)/);
+      expect(button.className).toMatch(/(?:^|\s)relative(?=\s|$)/);
+      expect(button.className).toMatch(/before:-inset-1/);
+    }
+  });
+
+  it("recedes the whole box when nothing may be written to it, and disables both buttons", () => {
+    renderComposer({ readOnly: true });
+    const box = screen.getByPlaceholderText(/read-only/i).parentElement!;
+
+    // The surface says it, not just the placeholder. `bg-muted/40` is last in the cn(), so
+    // tailwind-merge drops the `bg-background` it replaces.
+    expect(box.className).toMatch(/(?:^|\s)bg-muted\/40(?=\s|$)/);
+    expect(box.className).not.toMatch(/(?:^|\s)bg-background(?=\s|$)/);
+    expect(attach()).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  });
+});
+
+// ── AN ATTACHMENT IS A CHIP, AND ITS MARKER HOLDS ITS PLACE (ADR 0060) ──────────────────────────
+//
+// An upload used to write the bridge's host path into the draft. Now it adds a chip above the field
+// and a `[Image #N]` / `[File #N]` marker where the caret stood; Send swaps each marker for its
+// path, and a chip whose marker was edited away sends its path in front. Asserted at the network
+// (the guard's typed text), because the line the terminal gets is the whole point.
+describe("Composer — an attachment is a chip (ADR 0060)", () => {
+  /** The upload route, answering each upload with the next path in order (the picker uploads one
+   *  by one, in pick order), then `/tmp/upload-N` once the list runs out. */
+  function uploadAnswers(...paths: string[]) {
+    let calls = 0;
+    server.use(
+      http.post(/\/api\/pane\/[^/]+\/upload$/, () => {
+        calls += 1;
+        return HttpResponse.json({ ok: true, path: paths[calls - 1] ?? `/tmp/upload-${calls}` });
+      }),
+    );
+  }
+
+  function pick(...files: File[]) {
+    // SAFETY: `getByTestId` throws when the element is absent, and this id is on an `<input>`.
+    const photos = screen.getByTestId("attach-photos") as HTMLInputElement;
+    fireEvent.change(photos, { target: { files } });
+  }
+
+  const png = (name: string) => new File(["x"], name, { type: "image/png" });
+  // SAFETY: the composer's only placeholder-bearing control is its ChatInput, a `<textarea>`, and
+  // `getByPlaceholderText` throws when it is absent.
+  const field = () => screen.getByPlaceholderText(/type a reply/i) as HTMLTextAreaElement;
+
+  it("adds a chip, and puts its marker at the caret without touching the text around it", async () => {
+    uploadAnswers("/a.png");
+    renderComposer();
+    fireEvent.change(field(), { target: { value: "see this" } });
+    act(() => {
+      field().focus();
+      field().setSelectionRange(3, 3);
+    });
+
+    pick(png("a.png"));
+
+    await waitFor(() => expect(field()).toHaveValue("see [Image #1] this"));
+    const list = screen.getByRole("list", { name: "Attachments" });
+    expect(list).toHaveTextContent("#1");
+    expect(screen.getByRole("button", { name: "Remove a.png" })).toBeInTheDocument();
+  });
+
+  it("puts the marker at the end when the field never had a caret", async () => {
+    uploadAnswers();
+    renderComposer();
+    fireEvent.change(field(), { target: { value: "hello" } });
+    act(() => field().blur());
+    // A change with no caret report of its own: jsdom leaves selectionStart at the end.
+    pick(png("a.png"));
+    await waitFor(() => expect(field()).toHaveValue("hello [Image #1] "));
+  });
+
+  it("marks a multi-photo pick in pick order, one chip each (PR #259)", async () => {
+    uploadAnswers();
+    renderComposer();
+
+    pick(png("first.png"), png("second.png"), png("third.png"));
+
+    await waitFor(() => expect(field()).toHaveValue("[Image #1] [Image #2] [Image #3] "));
+    const removes = screen.getAllByRole("button", { name: /^Remove / });
+    expect(removes.map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Remove first.png",
+      "Remove second.png",
+      "Remove third.png",
+    ]);
+  });
+
+  it("the x removes the chip and its marker, with the space beside it", async () => {
+    const user = userEvent.setup();
+    uploadAnswers();
+    renderComposer();
+    fireEvent.change(field(), { target: { value: "see this" } });
+    act(() => {
+      field().focus();
+      field().setSelectionRange(3, 3);
+    });
+    pick(png("a.png"));
+    await waitFor(() => expect(field()).toHaveValue("see [Image #1] this"));
+
+    await user.click(screen.getByRole("button", { name: "Remove a.png" }));
+
+    expect(field()).toHaveValue("see this");
+    expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull();
+    expect(loadDraftEntry(undefined, "w1:p1")?.attachments).toEqual([]);
+  });
+
+  it("Send swaps each marker for its path, where it stands", async () => {
+    const user = userEvent.setup();
+    const typed: string[] = [];
+    uploadAnswers("/a.png", "/b.png");
+    server.use(replyHandler((t) => typed.push(t)));
+    const props = renderComposer();
+
+    fireEvent.change(field(), { target: { value: "look at " } });
+    pick(png("a.png"));
+    await waitFor(() => expect(field()).toHaveValue("look at [Image #1] "));
+    fireEvent.change(field(), { target: { value: `${field().value}and ` } });
+    act(() => field().setSelectionRange(field().value.length, field().value.length));
+    pick(png("b.png"));
+    await waitFor(() => expect(field()).toHaveValue("look at [Image #1] and [Image #2] "));
+
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(props.onSent).toHaveBeenCalled());
+    expect(typed).toEqual(["look at /a.png and /b.png"]);
+    // Text and chips leave together, and the next draft numbers from #1 again.
+    expect(field()).toHaveValue("");
+    expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull();
+    expect(loadDraftEntry(undefined, "w1:p1")).toBeNull();
+  });
+
+  it("a chip whose marker was edited away sends its path in front, and is never dropped", async () => {
+    const user = userEvent.setup();
+    const typed: string[] = [];
+    uploadAnswers("/a.png");
+    server.use(replyHandler((t) => typed.push(t)));
+    const props = renderComposer();
+    pick(png("a.png"));
+    await waitFor(() => expect(field()).toHaveValue("[Image #1] "));
+
+    // Deleting the marker by hand keeps the chip.
+    fireEvent.change(field(), { target: { value: "hello" } });
+    expect(screen.getByRole("button", { name: "Remove a.png" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(props.onSent).toHaveBeenCalled());
+    expect(typed).toEqual(["/a.png hello"]);
+  });
+
+  it("leaves a marker-looking string with no chip behind it exactly as typed", async () => {
+    const user = userEvent.setup();
+    const typed: string[] = [];
+    server.use(replyHandler((t) => typed.push(t)));
+    const props = renderComposer();
+    fireEvent.change(field(), { target: { value: "[Image #7] is a label" } });
+
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(props.onSent).toHaveBeenCalled());
+    expect(typed).toEqual(["[Image #7] is a label"]);
+  });
+
+  it("chips alone are something to send: Send is enabled and sends the paths", async () => {
+    const user = userEvent.setup();
+    const typed: string[] = [];
+    uploadAnswers("/a.png");
+    server.use(replyHandler((t) => typed.push(t)));
+    const props = renderComposer();
+    pick(png("a.png"));
+    await waitFor(() => expect(field()).toHaveValue("[Image #1] "));
+    fireEvent.change(field(), { target: { value: "" } });
+
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeEnabled();
+    await user.click(send);
+    await waitFor(() => expect(props.onSent).toHaveBeenCalled());
+    expect(typed).toEqual(["/a.png"]);
+  });
+
+  it("the destructive confirm reads the composed line, paths included", async () => {
+    const user = userEvent.setup();
+    const typed: string[] = [];
+    uploadAnswers("/a.png");
+    server.use(replyHandler((t) => typed.push(t)));
+    renderComposerWithStatus();
+    fireEvent.change(field(), { target: { value: "rm -rf " } });
+    act(() => field().setSelectionRange(7, 7));
+    pick(png("a.png"));
+    await waitFor(() => expect(field()).toHaveValue("rm -rf [Image #1] "));
+
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByRole("button", { name: /really send/i })).toBeInTheDocument();
+    expect(typed).toEqual([]);
+  });
+
+  it("a failed send keeps the chips and the text", async () => {
+    const user = userEvent.setup();
+    uploadAnswers("/a.png");
+    server.use(
+      http.post(/\/api\/pane\/[^/]+\/reply$/, () =>
+        HttpResponse.json({ ok: false, error: "pane unavailable" }, { status: 500 }),
+      ),
+    );
+    const props = renderComposerWithStatus();
+    pick(png("a.png"));
+    await waitFor(() => expect(field()).toHaveValue("[Image #1] "));
+    fireEvent.change(field(), { target: { value: "[Image #1] look" } });
+
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(screen.getByTestId("status")).not.toHaveTextContent(/^$/));
+
+    expect(props.onSent).not.toHaveBeenCalled();
+    expect(field()).toHaveValue("[Image #1] look");
+    expect(screen.getByRole("button", { name: "Remove a.png" })).toBeInTheDocument();
+  });
+
+  it("stores the chips with the draft, and a reload keeps the numbering going", async () => {
+    uploadAnswers("/a.png", "/b.png");
+    renderComposer();
+    pick(png("a.png"));
+    await waitFor(() => expect(field()).toHaveValue("[Image #1] "));
+    expect(loadDraftEntry(undefined, "w1:p1")).toEqual({
+      text: "[Image #1] ",
+      attachments: [{ n: 1, path: "/a.png", name: "a.png", kind: "image" }],
+      next: 2,
+    });
+
+    // A fresh mount reads it back: the chip returns as an icon tile (no preview survives a reload).
+    cleanup();
+    renderComposer();
+    expect(field()).toHaveValue("[Image #1] ");
+    expect(screen.getByRole("button", { name: "Remove a.png" })).toBeInTheDocument();
+    expect(screen.queryByRole("img")).toBeNull();
+
+    act(() => field().setSelectionRange(field().value.length, field().value.length));
+    pick(png("b.png"));
+    await waitFor(() => expect(field()).toHaveValue("[Image #1] [Image #2] "));
+  });
+
+  it("never reuses a removed chip's number within the draft", async () => {
+    const user = userEvent.setup();
+    uploadAnswers();
+    renderComposer();
+    fireEvent.change(field(), { target: { value: "keep " } });
+    pick(png("a.png"), png("b.png"));
+    await waitFor(() => expect(field()).toHaveValue("keep [Image #1] [Image #2] "));
+    await user.click(screen.getByRole("button", { name: "Remove b.png" }));
+    expect(field()).toHaveValue("keep [Image #1] ");
+
+    act(() => field().setSelectionRange(field().value.length, field().value.length));
+    pick(png("c.png"));
+    await waitFor(() => expect(field()).toHaveValue("keep [Image #1] [Image #3] "));
+  });
+
+  it("an old text-only draft still loads, with no chips", () => {
+    localStorage.setItem("collie:draft:default:w1:p1", JSON.stringify({ text: "from before", at: Date.now() }));
+    renderComposer();
+    expect(field()).toHaveValue("from before");
+    expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull();
+  });
+
+  it("a restored draft that is only chips still offers Send", () => {
+    saveDraft(undefined, "w1:p1", "", [{ n: 1, path: "/a.png", name: "a.png", kind: "image" }], 2);
+    renderComposer();
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Remove a.png" })).toBeInTheDocument();
+  });
+
+  describe("with object URLs", () => {
+    const created: string[] = [];
+    const revoked: string[] = [];
+    // jsdom has no object URLs at all, so each case defines the two statics and removes them again.
+    function defineStatic(name: "createObjectURL" | "revokeObjectURL", value: ((file: Blob) => string) | ((url: string) => void)) {
+      Object.defineProperty(URL, name, { value, configurable: true, writable: true });
+    }
+    beforeEach(() => {
+      created.length = 0;
+      revoked.length = 0;
+      defineStatic("createObjectURL", () => {
+        const url = `blob:test/${created.length + 1}`;
+        created.push(url);
+        return url;
+      });
+      defineStatic("revokeObjectURL", (url: string) => {
+        revoked.push(url);
+      });
+    });
+    afterEach(() => {
+      __resetOperatorCommands();
+      Reflect.deleteProperty(URL, "createObjectURL");
+      Reflect.deleteProperty(URL, "revokeObjectURL");
+    });
+
+    it("draws a photo as a thumbnail, and releases it when its chip is removed", async () => {
+      const user = userEvent.setup();
+      uploadAnswers();
+      renderComposer();
+      pick(png("a.png"));
+      const thumb = await screen.findByRole("img", { name: "a.png" });
+      expect(thumb).toHaveAttribute("src", "blob:test/1");
+
+      await user.click(screen.getByRole("button", { name: "Remove a.png" }));
+      expect(revoked).toEqual(["blob:test/1"]);
+    });
+
+    it("releases every thumbnail on send and on unmount", async () => {
+      const user = userEvent.setup();
+      uploadAnswers();
+      server.use(replyHandler(() => {}));
+      const props = renderComposer();
+      pick(png("a.png"));
+      await screen.findByRole("img", { name: "a.png" });
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(props.onSent).toHaveBeenCalled());
+      expect(revoked).toEqual(["blob:test/1"]);
+
+      pick(png("b.png"));
+      await screen.findByRole("img", { name: "b.png" });
+      cleanup();
+      expect(revoked).toEqual(["blob:test/1", "blob:test/2"]);
+    });
+
+    it("draws a non-image file as a named tile, never a thumbnail", async () => {
+      __resetOperatorCommands();
+      server.use(
+        http.get("/api/config", () =>
+          HttpResponse.json({
+            push: false,
+            vapidPublicKey: "",
+            upload: { maxBytes: 10 * 1024 * 1024, imageTypes: ["png"], textTypes: ["md"] },
+          }),
+        ),
+      );
+      uploadAnswers();
+      renderComposer();
+      await waitFor(() => expect(screen.getByTestId("attach-files")).toHaveAttribute("accept", "image/*,.png,.md"));
+      // SAFETY: `getByTestId` throws when the element is absent, and this id is on an `<input>`.
+      const files = screen.getByTestId("attach-files") as HTMLInputElement;
+      fireEvent.change(files, {
+        target: { files: [new File(["# hi"], "a-rather-long-notes-file.md", { type: "text/markdown" })] },
+      });
+      await waitFor(() => expect(field()).toHaveValue("[File #1] "));
+      expect(screen.queryByRole("img")).toBeNull();
+      expect(created).toEqual([]);
+      expect(screen.getByRole("list", { name: "Attachments" })).toHaveTextContent("a-rather-long…");
+    });
+
   });
 });

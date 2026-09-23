@@ -45,6 +45,8 @@ import {
   healthBody,
   withBuildHeader,
   type ReplySender,
+  stripMount,
+  mountIndexHtml,
 } from "./server.ts";
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
@@ -172,6 +174,7 @@ function cfg(overrides: Partial<Config> = {}): Config {
     stateDir: "/tmp/state",
     multiSession: true,
     skipServe: false,
+    basePath: "/",
     maxUploadBytes: DEFAULT_MAX_UPLOAD_BYTES,
     uploadExtraTypes: [],
     ...overrides,
@@ -1477,6 +1480,88 @@ describe("serveStatic — a text file ships gzipped", () => {
     expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
 
     await rm(dir, { recursive: true, force: true });
+  });
+
+  // ADR 0052: one build serves any mount. The shell on disk is root-absolute; at the root it goes
+  // out as built, under a mount it is resolved to the mount the bridge was started with, raw and
+  // gzipped alike, and two mounts served from one tree in one process never read each other's body
+  // out of the gzip cache.
+  const SHELL =
+    '<!doctype html><html><head><meta name="collie-base" content="/" />' +
+    '<script src="/theme-init.js"></script><style>@font-face{src:url("/fonts/a.woff2")}' +
+    ".dog{background:url(/dog-gallop.png)}</style>" +
+    '<script type="module" src="/assets/app.js"></script></head><body></body></html>';
+
+  test("index.html goes out as built at the root, and resolved to the mount under a path", async () => {
+    resetStaticGzipCache();
+    const { dir } = await distTree();
+    await writeFile(join(dir, "index.html"), SHELL);
+
+    expect(await (await serveStatic("/", null, dir)).text()).toBe(SHELL);
+
+    const mounted = await (await serveStatic("/space/w1", null, dir, "/collie/")).text();
+    expect(mounted).toContain('<meta name="collie-base" content="/collie/" />');
+    expect(mounted).toContain('src="/collie/theme-init.js"');
+    expect(mounted).toContain('src="/collie/assets/app.js"');
+    expect(mounted).toContain('url("/collie/fonts/a.woff2")');
+    expect(mounted).toContain("url(/collie/dog-gallop.png)");
+    expect(mounted).not.toContain('="/theme');
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("a gzipped shell is the mounted one, and the cache keeps the two mounts apart", async () => {
+    resetStaticGzipCache();
+    const { dir } = await distTree();
+    // Past the gzip floor, so the compressed path is the one taken.
+    await writeFile(join(dir, "index.html"), SHELL + "<!-- " + "pad ".repeat(400) + " -->");
+
+    const read = async (base: string) => {
+      const res = await serveStatic("/", "gzip", dir, base);
+      expect(res.headers.get("content-encoding")).toBe("gzip");
+      return new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await res.arrayBuffer())));
+    };
+    expect(await read("/collie/")).toContain('content="/collie/"');
+    expect(await read("/")).toContain('content="/" ');
+    expect(await read("/collie/")).toContain('src="/collie/assets/app.js"');
+    expect(staticGzipStats().entries).toBe(2);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("stripMount — a proxy that forwards the mount instead of stripping it", () => {
+  test("takes the mount off a path that carries it, and only then", () => {
+    expect(stripMount("/collie/api/health", "/collie/")).toBe("/api/health");
+    expect(stripMount("/collie/", "/collie/")).toBe("/");
+    expect(stripMount("/collie", "/collie/")).toBe("/");
+    expect(stripMount("/collie/space/w1", "/collie/")).toBe("/space/w1");
+  });
+
+  test("leaves a path outside the mount alone, including a mere prefix match", () => {
+    expect(stripMount("/api/health", "/collie/")).toBe("/api/health");
+    expect(stripMount("/collieX/api", "/collie/")).toBe("/collieX/api");
+    expect(stripMount("/collie/api", "/")).toBe("/collie/api");
+  });
+});
+
+describe("mountIndexHtml — the app shell resolved to its mount", () => {
+  const shell =
+    '<meta name="collie-base" content="/" /><script src="/t.js"></script>' +
+    '<link href="/f.woff2" /><style>url("/a.png") url(\'/b.png\') url(/c.png)</style>' +
+    '<a href="https://example.com/x">out</a><a href="//cdn.example/y">pr</a>';
+
+  test("puts the mount in front of every root-absolute reference and the meta tag, nothing else", () => {
+    const out = mountIndexHtml(shell, "/collie/");
+    expect(out).toBe(
+      '<meta name="collie-base" content="/collie/" /><script src="/collie/t.js"></script>' +
+        '<link href="/collie/f.woff2" /><style>url("/collie/a.png") url(\'/collie/b.png\') url(/collie/c.png)</style>' +
+        '<a href="https://example.com/x">out</a><a href="//cdn.example/y">pr</a>',
+    );
+  });
+
+  test("at the root it is the identity", () => {
+    expect(mountIndexHtml(shell, "/")).toBe(shell);
   });
 });
 
@@ -2921,7 +3006,7 @@ describe("update status peers — the legs of a crew-wide run", () => {
     expect(composer).toContain("opts.crewLead?.updateSettledAt() ?? null");
     // M20/09: a peers-only run has no local record, so the legs ride the STATUS instead of being
     // dropped. The guard that dropped them is gone, and nothing has taken its place.
-    expect(composer).toContain("return { ...status, ...crewState };");
+    expect(composer).toContain("return { ...status, ...statusState };");
     expect(composer).not.toContain("status.run === null || legs.length === 0");
     expect(composer).not.toContain("sweep(");
     // M20/01, after review: the legs outlive their run, so the composer names the run they describe
@@ -2931,8 +3016,14 @@ describe("update status peers — the legs of a crew-wide run", () => {
     // update leaves a `done` record behind, so the commonest peers-only run there is — "Retry crew
     // update" after an update — has a different run id and would otherwise be invisible for its whole
     // life, which is spec 09's bug wearing spec 01's guard.
-    expect(composer).toContain("!== status.run.runId) return { ...status, ...crewState };");
+    expect(composer).toContain("!== status.run.runId) return { ...status, ...statusState };");
     expect(composer).not.toContain("!== status.run.runId) return status;");
+    // M32: legs that ride the STATUS carry their run's target, so the phone can tell a peers-only
+    // run (target = this lead's version) from a full run whose record has not landed yet. Never on
+    // the run record, whose own `to` says it.
+    expect(composer).toContain("opts.crewLead?.updateLegsTo() ?? null");
+    expect(composer).toContain("{ ...crewState, peersTo: legsTo }");
+    expect(composer).toContain("return { ...status, run: { ...status.run, ...crewState } };");
     // And there is still no fourth endpoint with a fifth shape.
     expect(src).not.toContain('"/api/update/status"');
   });
@@ -2960,13 +3051,24 @@ describe("update status peers — the legs of a crew-wide run", () => {
       updateStartVerdict({ confirm: true, target: null, major: false, peersOnly: true }, { ...state, crew: [levelled] }),
     ).toMatchObject({ kind: "refuse", status: 409 });
 
-    // A member that rolled back is the other half of the case, read off the legs.
+    // A member that rolled back is the other half of the case, read off the legs, for as long as the
+    // census does not show it level. `attic` has no census row, so nobody knows its version.
+    expect(
+      updateStartVerdict(
+        { confirm: true, target: null, major: false, peersOnly: true },
+        { ...state, crew: [levelled], peers: [{ name: "attic", state: "rolled-back" }] },
+      ),
+    ).toEqual({ kind: "peers", to: current });
+
+    // And once the census shows the member that rolled back at the lead's version, its old leg is
+    // no longer something to retry: the legs outlive their run, and a member that levelled itself
+    // afterwards must not keep a retry alive.
     expect(
       updateStartVerdict(
         { confirm: true, target: null, major: false, peersOnly: true },
         { ...state, crew: [levelled], peers: [{ name: "minibuch", state: "rolled-back" }] },
       ),
-    ).toEqual({ kind: "peers", to: current });
+    ).toMatchObject({ kind: "refuse", status: 409 });
   });
 
   test("retry crew update: one confirm still covers the crew, so a red member refuses it", () => {

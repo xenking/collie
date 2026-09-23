@@ -558,6 +558,14 @@ lint guard, the crew-wire guard or the `flake.lock` guard.
   Feedback is sent as a verified sequence, never a keystroke — the ground truth for every state is
   [`PLAN_FEEDBACK_NOTES.md`](./web/src/lib/grammar/PLAN_FEEDBACK_NOTES.md); re-walk it before touching
   `harness/claude/prompt-select.ts` or `lib/prompt-action.ts`.
+- **The phone parses what the phone draws; the bridge parses only what it must act on alone.** Every
+  pane grammar is client-side, under `web/src/lib/harness/`. The bridge holds one,
+  `extractClaudeSessionName`, and only because the bridge itself consumes it, for a label that must
+  exist when no app is open. Do not move a grammar into the bridge and do not add a parsed field to
+  `/api/snapshot` to save the client a walk: a styled row has no wire form, a peer one release behind
+  sends nothing so the client needs the parse regardless, and the client already walks that tail once
+  per poll. Need something new off the screen? Add a probe to `HarnessAdapter`
+  ([HARNESS_CONTRIBUTING.md](./HARNESS_CONTRIBUTING.md) → *Which side parses a pane*).
 - **A generically-detected menu emits only the keys the screen printed** — the footer's
   `<key> to <verb>` hints plus the arrows it advertised. Never synthesise a digit from a numbered row:
   in the `/model` picker a digit confirms *and* persists the user's default. The generic grammar
@@ -659,7 +667,9 @@ the pre-commit hook; a pure refactor takes the `SKIP_CREW_WIRE_CHECK=1` hatch
 ([ADR 0025](./.adr/0025-the-wire-guard-forces-a-decision-never-a-bump.md)).
 
 **Code reaches a peer over the operator's own SSH, never over the crew link** — `crew add` installs
-it and `crew update` levels it, both pushing the lead's own commit as a `git bundle`; the link
+it and `crew update` levels it, both pushing the lead's own commit as a `git bundle` from a checkout
+lead, while a lead with no commit sends Collie's own installer over the same ssh and the member
+installs the lead's release tag; the link
 carries runtime data and never becomes a distribution channel
 ([ADR 0016](./.adr/0016-updates-ride-the-operators-ssh.md), addendum 2026-09-04: a peer may also
 level ITSELF to the release its lead is running, fetching that public tag from GitHub over anonymous

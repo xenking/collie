@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { githubHeaders, type GithubCredential } from "../bridge/update.ts";
 import {
   accessSync,
   closeSync,
@@ -258,57 +259,64 @@ const NET_TIMEOUT_MS = 20_000;
  */
 const netFailure = (message: string): NetFailure => ({ status: null, message });
 
-export const realNet: Net = {
-  async getJson(url) {
-    try {
-      const res = await fetch(url, {
-        headers: { accept: "application/json", "user-agent": "collie-update" },
-        signal: AbortSignal.timeout(NET_TIMEOUT_MS),
-      });
-      if (!res.ok) return { ok: false, failure: { status: res.status, message: `HTTP ${res.status}` } };
-      return { ok: true, value: await res.json() };
-    } catch (err) {
-      return { ok: false, failure: netFailure(err instanceof Error ? err.message : String(err)) };
-    }
-  },
-  async probe(url, header) {
-    try {
-      const res = await fetch(url, {
-        headers: { accept: "application/json", "user-agent": "collie-update" },
-        signal: AbortSignal.timeout(NET_TIMEOUT_MS),
-      });
-      // The body is best effort and the status is not: a door that answered at all is a door that is
-      // up, and an unreadable body is one field missing from an answer that already arrived.
-      const body = await res.json().catch(() => null);
-      return { ok: true, status: res.status, header: res.headers.get(header), body };
-    } catch (err) {
-      return { ok: false, failure: netFailure(err instanceof Error ? err.message : String(err)) };
-    }
-  },
-  async download(url, dest) {
-    try {
-      const res = await fetch(url, {
-        headers: { "user-agent": "collie-update" },
-        signal: AbortSignal.timeout(NET_TIMEOUT_MS),
-      });
-      if (!res.ok) return { ok: false, failure: { status: res.status, message: `HTTP ${res.status}` } };
-      if (res.body === null) return { ok: false, failure: { status: res.status, message: "empty response" } };
-      mkdirSync(dirname(dest), { recursive: true });
-      const hasher = new Bun.CryptoHasher("sha256");
-      const sink = Bun.file(dest).writer();
-      let size = 0;
-      for await (const chunk of res.body) {
-        hasher.update(chunk);
-        size += chunk.byteLength;
-        sink.write(chunk);
+/**
+ * The real {@link Net}. `credential` is the operator's GitHub token when the env holds one (#254),
+ * and `githubHeaders` sends it to `api.github.com` alone: `download` and `probe` never carry it,
+ * because neither ever addresses the API.
+ */
+export function realNet(credential: GithubCredential | null = null): Net {
+  return {
+    async getJson(url) {
+      try {
+        const res = await fetch(url, {
+          headers: githubHeaders(url, credential, { accept: "application/json", "user-agent": "collie-update" }),
+          signal: AbortSignal.timeout(NET_TIMEOUT_MS),
+        });
+        if (!res.ok) return { ok: false, failure: { status: res.status, message: `HTTP ${res.status}` } };
+        return { ok: true, value: await res.json() };
+      } catch (err) {
+        return { ok: false, failure: netFailure(err instanceof Error ? err.message : String(err)) };
       }
-      await sink.end();
-      return { ok: true, sha256: hasher.digest("hex"), size };
-    } catch (err) {
-      return { ok: false, failure: netFailure(err instanceof Error ? err.message : String(err)) };
-    }
-  },
-};
+    },
+    async probe(url, header) {
+      try {
+        const res = await fetch(url, {
+          headers: { accept: "application/json", "user-agent": "collie-update" },
+          signal: AbortSignal.timeout(NET_TIMEOUT_MS),
+        });
+        // The body is best effort and the status is not: a door that answered at all is a door that is
+        // up, and an unreadable body is one field missing from an answer that already arrived.
+        const body = await res.json().catch(() => null);
+        return { ok: true, status: res.status, header: res.headers.get(header), body };
+      } catch (err) {
+        return { ok: false, failure: netFailure(err instanceof Error ? err.message : String(err)) };
+      }
+    },
+    async download(url, dest) {
+      try {
+        const res = await fetch(url, {
+          headers: { "user-agent": "collie-update" },
+          signal: AbortSignal.timeout(NET_TIMEOUT_MS),
+        });
+        if (!res.ok) return { ok: false, failure: { status: res.status, message: `HTTP ${res.status}` } };
+        if (res.body === null) return { ok: false, failure: { status: res.status, message: "empty response" } };
+        mkdirSync(dirname(dest), { recursive: true });
+        const hasher = new Bun.CryptoHasher("sha256");
+        const sink = Bun.file(dest).writer();
+        let size = 0;
+        for await (const chunk of res.body) {
+          hasher.update(chunk);
+          size += chunk.byteLength;
+          sink.write(chunk);
+        }
+        await sink.end();
+        return { ok: true, sha256: hasher.digest("hex"), size };
+      } catch (err) {
+        return { ok: false, failure: netFailure(err instanceof Error ? err.message : String(err)) };
+      }
+    },
+  };
+}
 
 /**
  * `env` with `dir` at the FRONT of `PATH`, or `env` unchanged when there is nothing to add.
@@ -329,7 +337,57 @@ export function withPathPrefix(env: Environment, dir: string | undefined): Envir
   return { ...env, PATH: path === "" ? dir : `${dir}:${path}` };
 }
 
-export function realExec(env: Environment, home: string): Exec {
+/**
+ * The git variables that RELOCATE a repository, and which no child of Collie's may inherit.
+ *
+ * Each of these tells git where the repository, its index or its object store actually is, and git
+ * obeys them from any working directory — they defeat discovery outright rather than adjust it. So
+ * a `collie` run with `GIT_DIR` in its environment asks every question about SOMEBODY ELSE'S
+ * repository: `isGitCheckout` reports a checkout where there is no `.git` at all, `originOf` reads
+ * that repository's remote, and `update` would advance it. There is no path prefix and no `-C` that
+ * overrides them, which is why this is the seam and not a flag on one call.
+ *
+ * Two ways in, both ordinary. A shell profile that exports them for a dotfiles manager — the same
+ * population issue #243 came from. And a git HOOK: git sets `GIT_DIR` and `GIT_PREFIX` for every
+ * hook it runs, so a hook that calls `collie` hands them over without anyone writing them down.
+ *
+ * NOT stripped: `GIT_CEILING_DIRECTORIES`, which only stops discovery walking UP. That can make
+ * Collie answer "not a checkout" where it would otherwise answer "checkout", and that direction is
+ * refusal, never deletion. Also not stripped: credential, ssh and config-file variables, which
+ * decide how git AUTHENTICATES rather than which repository it is looking at. Removing those would
+ * break ordinary setups to fix nothing here.
+ */
+const GIT_RELOCATORS = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_PREFIX",
+] as const;
+
+/**
+ * `env` without the variables in {@link GIT_RELOCATORS}, or `env` itself when it carries none —
+ * the common case, so the usual call allocates nothing.
+ *
+ * Applied to EVERY child, not only to git. A child that is itself a launcher (the detached update
+ * runner, the bridge) would otherwise pass them on, and the git call that misreads them happens one
+ * process further down where nothing is looking.
+ *
+ * Exported for `cli/sys.test.ts`.
+ */
+export function withoutGitRelocators(env: Environment): Environment {
+  if (!GIT_RELOCATORS.some((name) => env[name] !== undefined)) return env;
+  const clean: Environment = { ...env };
+  for (const name of GIT_RELOCATORS) delete clean[name];
+  return clean;
+}
+
+export function realExec(rawEnv: Environment, home: string): Exec {
+  // ONCE, here: every seam below reads this `env`, so no path can forget it.
+  const env = withoutGitRelocators(rawEnv);
   const resolve = (tool: string): string | null => findTool(tool, env, home);
   return {
     which: resolve,
@@ -337,8 +395,10 @@ export function realExec(env: Environment, home: string): Exec {
       const bin = resolve(tool);
       if (bin === null) return NOT_FOUND;
       // `env` (this Exec's own) is spread LAST so a name it already carries always wins over the
-      // caller-supplied default — see the seam's doc comment.
-      const spawnEnv = envAdd === undefined ? env : { ...envAdd, ...env };
+      // caller-supplied default — see the seam's doc comment. Filtered AFTER the merge, not only in
+      // the closure: `env` no longer carries a relocator, so `envAdd` is the one way one could come
+      // back, and "every child starts without them" has to hold without trusting a caller.
+      const spawnEnv = withoutGitRelocators(envAdd === undefined ? env : { ...envAdd, ...env });
       const r = Bun.spawnSync([bin, ...args], {
         env: spawnEnv,
         timeout: timeoutMs,
@@ -381,7 +441,7 @@ export function realExec(env: Environment, home: string): Exec {
       if (bin === null) return { code: 127, timedOut: false, stderr: "" };
       const r = Bun.spawnSync([bin, ...args], {
         cwd: opts.cwd,
-        env: opts.env,
+        env: withoutGitRelocators(opts.env),
         timeout: opts.timeoutMs,
       });
       const stderr = r.stderr.toString();
@@ -408,7 +468,7 @@ export function realExec(env: Environment, home: string): Exec {
       try {
         const child = spawn(program, args, {
           cwd: opts.cwd,
-          env: opts.env,
+          env: withoutGitRelocators(opts.env),
           detached: true,
           stdio: ["ignore", fd, fd],
         });

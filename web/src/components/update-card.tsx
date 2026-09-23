@@ -13,7 +13,14 @@ import { snoozeUpdate, startUpdate } from "@/lib/api";
 import { describeThrownError } from "@/lib/api-error-message";
 import { timeAgoShort } from "@/lib/format";
 import { useOptionalRootData } from "@/lib/route-data";
-import { noteSnapshotRun, noteStartedRun, readUpdateState, useUpdateRun } from "@/lib/update-run-store";
+import {
+  noteCrewRunBegun,
+  noteSnapshotCrew,
+  noteSnapshotRun,
+  noteStartedRun,
+  readUpdateState,
+  useUpdateRun,
+} from "@/lib/update-run-store";
 import { noteUpdateRun } from "@/lib/self-update";
 import {
   crewAction,
@@ -196,12 +203,15 @@ export function UpdateCard() {
   // still list a moving peer?" while the band asked "did the run finish under ten minutes ago?", so
   // on 2026-09-07 the band went quiet while this card kept the same peer moving for five more
   // minutes. Neither surface interprets a record any more.
-  const reading = readRun({ update: snapshot ?? check, run, now: Date.now() });
+  //
+  // The census rides along for one rule (`lib/crew-level.ts`): a failed leg whose member the census
+  // now shows level is not a failure any more, on the button, on the row, or in the sentence.
+  const reading = readRun({ update: snapshot ?? check, run, crew: census, now: Date.now() });
   const legs = [...reading.legs];
-  const rows = peerRows(census, legs);
+  const rows = peerRows(census, legs, current);
   const hasPeers = rows.length > 0 || crewLead;
   const behind = peersBehind(census, current);
-  const rolledBack = peersRolledBack(legs);
+  const rolledBack = peersRolledBack(legs, census, current);
   // A packaged install never takes an update from here (ADR 0035): the root is not writable, the CLI
   // refuses, and `POST /api/update` would do nothing but relay that refusal. Read HERE, above the
   // action, because it is one of the facts that decides which action there is — not merely whether
@@ -254,6 +264,9 @@ export function UpdateCard() {
   useEffect(() => {
     noteSnapshotRun(snapshot?.run);
   }, [snapshot?.run]);
+  useEffect(() => {
+    noteSnapshotCrew(snapshot);
+  }, [snapshot]);
 
   // The bundle self-updater must not reload the page mid-run. Stamped from here as well as from the
   // snapshot loader, because the window that matters most is the one where the snapshot is not
@@ -292,10 +305,16 @@ export function UpdateCard() {
       // The band's (s) state, and the only thing that produces it: `POST /api/update` returns
       // immediately and hands off to a detached process, so the run record says nothing for a beat.
       // A silent band in that beat reads as "nothing happened" about the thing just consented to.
-      noteUpdateStarted(Date.now(), answer.run?.runId ?? null);
+      //
+      // A PEERS-ONLY START IS A RUN THIS DEVICE STARTED TOO (M32). Its 202 carries this lead's OLD
+      // record, because nothing runs here, so that record's id is not this run's and is not recorded
+      // as if it were, and the record is not handed to the store as the run just begun. What the store
+      // is told instead is that a crew-only run began, which is what takes the screen in this tap.
+      noteUpdateStarted(Date.now(), ask.peersOnly ? null : (answer.run?.runId ?? null));
       setStarted(true);
       setConfirming(null);
-      noteStartedRun(answer.run);
+      if (ask.peersOnly) noteCrewRunBegun(current);
+      else noteStartedRun(answer.run);
       // Pull the snapshot now rather than waiting out the poll gap: the operator has just tapped,
       // and the run record is what they are waiting to see.
       revalidator.revalidate();

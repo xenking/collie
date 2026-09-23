@@ -189,6 +189,9 @@ export const ko: Dictionary = {
   "settings.display.rawTerminal.label": "원시 터미널",
   "settings.display.rawTerminal.hint":
     "프롬프트 버튼, UI 장식, 상태 바 없이 순수 화면만 표시합니다. 대화상자가 깨져서 직접 키를 입력해야 할 때 유용합니다.",
+  "settings.display.noInvert.label": "이 창을 원본 그대로 표시",
+  "settings.display.noInvert.hint":
+    "이 창에만 라이트 테마 반전을 적용하지 않습니다. 에이전트가 라이트 테마인데 미러가 어둡게 표시될 때 켜세요. 표시가 정상이면 꺼두세요.",
   "settings.display.textSize.label": "글꼴 크기",
   "settings.display.textSize.decrease": "글꼴 축소",
   "settings.display.textSize.increase": "글꼴 확대",
@@ -227,12 +230,16 @@ export const ko: Dictionary = {
   "composer.attach.title": "첨부",
   "composer.attach.photos": "사진",
   "composer.attach.files": "파일",
+  "composer.attach.listAria": "첨부 파일",
+  "composer.attach.removeAria": "{name} 제거",
   "composer.send.typeAnyway": "그대로 입력할까요?",
   "composer.send.reallySend": "전송할까요?",
   "composer.send.stopTypingAria": "터미널 입력 중단",
   "composer.send.sendAria": "전송",
   "composer.draft.tooLong": "임시 저장 용량을 초과했습니다. 창 전환 시에는 유지되지만 앱 종료 시 삭제됩니다.",
   "composer.status.dialogWaiting": "대기 중인 대화상자가 있습니다. 먼저 응답해야 전송할 수 있습니다.",
+  "composer.status.unreadDialog":
+    "Collie가 이 대화상자를 읽을 수 없습니다. 카드에 {key}이(가) 있습니다. 그래도 입력하려면 전송을 다시 누르세요.", // wordsmith
   "composer.status.paneNotWritable": "창에 쓸 수 없는 상태입니다. 아무것도 전송되지 않았습니다.",
   "composer.status.inputChanged":
     "입력 초기화 중 내용이 변경되어 전송이 취소되었습니다. 창을 확인하십시오.",
@@ -243,7 +250,7 @@ export const ko: Dictionary = {
   "composer.discard.confirmKeys.other": "대기 중인 키 {count}개를 삭제하려면 다시 누르세요.",
   "composer.destructive.confirm": "주의가 필요한 명령: {reason}. 확인하려면 전송을 다시 누르세요.",
   "composer.destructive.confirmOnHost": "주의가 필요한 명령: {host}의 {reason}. 확인하려면 전송을 다시 누르세요.",
-  "composer.upload.success": "파일이 첨부되었습니다",
+  "composer.upload.success": "파일 첨부됨",
   "composer.upload.tooLarge": "파일이 이 Collie의 제한인 {max}MB를 초과합니다.",
   "composer.upload.badType": "Collie에서 {name} 파일을 첨부할 수 없습니다.",
   "composer.noEcho.title": "비밀번호 입력 프롬프트. 입력 내용이 표시되지 않습니다.",
@@ -259,6 +266,7 @@ export const ko: Dictionary = {
   "composer.noEcho.dismissAria": "비밀번호 프롬프트 알림 닫기",
   "composer.draftPreview.title": "터미널 임시 저장본",
   "composer.draftPreview.takeOver": "가져오기",
+  "composer.draftPreview.dismissAria": "터미널 임시 저장본 알림 닫기",
 
   // --- sendMode (the armed "typing straight through" indicator) ---
   "sendMode.armed.title": "터미널 직접 입력 모드",
@@ -658,6 +666,18 @@ export const ko: Dictionary = {
 
   // --- dialog (menu / multi-select / wizard / preview-select block renderers) ---
   "dialog.sendingAria": "전송 중",
+  // TODO wordsmith
+  "dialog.terminalControl": "Terminal",
+  // TODO wordsmith
+  "dialog.terminalControlAria": "Show the terminal instead of this card",
+  // TODO wordsmith
+  "dialog.backToCard": "Back to the card",
+  // TODO wordsmith
+  "dialog.putAwayControl": "Put away",
+  // TODO wordsmith
+  "dialog.putAwayControlAria": "Hide this card's buttons, keep the terminal",
+  // TODO wordsmith
+  "dialog.showButtons": "Show the buttons",
   "dialog.previousStepAria": "이전 단계",
   "dialog.nextStepAria": "다음 단계",
   "dialog.answeredAria": "응답 완료",
@@ -677,6 +697,11 @@ export const ko: Dictionary = {
   "dialog.menu.moveDown": "아래로 이동",
   "dialog.menu.leftAria": "왼쪽: {verb} ({label})",
   "dialog.menu.rightAria": "오른쪽: {verb} ({label})",
+  // TODO wordsmith
+  "dialog.menu.levelAria": "{verb} to {label}",
+  // TODO wordsmith
+  "dialog.menu.levelCurrentAria": "{label}, current",
+  "unreadDialog.caption": "Collie가 이 대화상자를 읽을 수 없습니다", // wordsmith
   "dialog.preview.currentAnswerAria": "현재 답변",
   "dialog.preview.previewedBelowAria": "하단 미리보기",
   "dialog.preview.previewLabel": "미리보기 · {label}",
@@ -813,6 +838,7 @@ export const ko: Dictionary = {
   "apiError.update.major_confirm_required": "{version} 버전은 메이저 업데이트이므로 별도 승인이 필요합니다.",
   "apiError.update.target_mismatch": "화면에는 {asked} 버전이 표시되었으나 실제로는 {would} 버전이 설치됩니다. 화면을 새로고침하십시오.",
   "apiError.update.none_available": "설치할 최신 릴리스가 없습니다.",
+  "apiError.update.peers_packaged": "{name}은(는) 패키지 설치본입니다. 업데이트는 해당 머신의 패키지 관리자에서 받습니다.",
   "apiError.update.packaged": "업데이트는 패키지 관리자를 통해 제공됩니다. Collie는 이 설치본의 파일을 덮어쓰지 않습니다.",
   "apiError.update.start_failed": "업데이트를 시작하지 못했습니다: {reason}",
   // --- settings.updateCard (the update card, M15/05) ---
@@ -954,6 +980,8 @@ export const ko: Dictionary = {
   "cache.sheet.overridden": "Moved by cache-rules.toml",
   "cache.sheet.thisMachine": "This machine",
   "cache.sheet.onPeer": "Read on {host}. Its rule catalog is not forwarded, so the source is not quoted here.",
+  "cache.sheet.reset.pending": "마지막 턴 이후: {action}. 다음 턴에서 캐시를 다시 만듭니다.",
+  "cache.sheet.reset.cause": "마지막 턴 이전: {action}. 그 턴에서 캐시를 다시 만들었습니다.",
   "cache.sheet.state": "State",
   "cache.sheet.state.warm": "Warm",
   "cache.sheet.state.expiring": "Expiring",
@@ -1051,12 +1079,14 @@ export const ko: Dictionary = {
   "updateScreen.state.updating": "updating",
   "updateScreen.state.unreachable": "no answer",
   "updateScreen.state.packageManaged": "package-managed",
+  "updateScreen.state.current": "이미 최신 상태",
   "updateScreen.peer.lastSeen": "last seen {ago} ago",
   "updateScreen.peer.packageManagedNote": "Its package manager owns this machine, so the run leaves it alone.",
   "updateScreen.failed.rolledBack": "The update rolled back. This machine is still on {version}: {reason}",
   "updateScreen.failed.stuck": "The update is stuck: {reason}",
   "updateScreen.failed.interrupted": "The update was interrupted: {reason}",
   "updateScreen.lead.stalled": "Still working. Nothing is wrong yet, and waiting is the whole job.",
+  "updateScreen.lead.crewOnly": "이번 실행은 멤버만 업데이트합니다. 이 머신은 그대로 유지되며 다시 시작하지 않습니다.",
   "updateScreen.device.title": "This device",
   "updateScreen.device.downloading": "Downloading the new app, {done} of {total} files",
   "updateScreen.device.downloadingUnknown": "Downloading the new app",
@@ -1066,4 +1096,5 @@ export const ko: Dictionary = {
   "updateScreen.device.keepUsing": "Keep using the app",
   "updateScreen.done.crew": "Crew updated to {version}",
   "updateScreen.done.solo": "{machine} updated to {version}",
+  "updateScreen.done.members": "멤버를 {version}(으)로 업데이트했습니다",
 };

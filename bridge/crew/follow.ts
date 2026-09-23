@@ -531,6 +531,16 @@ export class UpdateTurns {
    * readable; naming their run is what keeps that from becoming a claim about a different one.
    */
   private legsRunId: string | null = null;
+  /**
+   * The version those legs were being levelled TO, kept for exactly as long as {@link legsRunId}.
+   *
+   * The phone reads it to tell a run that moves only the members from one whose lead is about to
+   * move too. A peers-only run levels the members to the lead's own version, so its target equals
+   * the lead's `current`. A full run begins its queue before the lead's own record exists, so for a
+   * while its legs ride the status beside an older record, and only this target, the release above
+   * `current`, says that the lead is part of it.
+   */
+  private legsTarget: string | null = null;
   /** When each leg last CHANGED state. The wall clock below reads this, never the run's own start. */
   private readonly legChangedAt = new Map<string, number>();
   /**
@@ -552,6 +562,17 @@ export class UpdateTurns {
    * fault of its own, and its own clock would fail it while it answered every sweep on time.
    */
   private progressAt = 0;
+  /**
+   * Why each member could not be handed the turn, so the journal says it once rather than every sweep.
+   *
+   * A withheld turn used to be the one thing in this queue that happened in total silence. On the
+   * 1.11.0 run the lead granted nothing for two minutes twenty five seconds while the leg read
+   * `waiting`, and there was no line on the lead, no line on the member, and nothing on the phone but
+   * a spinner. The cause is nearly always `eligible`'s verdict gate, and the cause is the part an
+   * operator reads. Cleared the moment a turn is granted, so a member that was blocked and then moved
+   * can be reported again in a later run.
+   */
+  private readonly blocked = new Map<string, string>();
   /** When every leg first reached a terminal state, or null while the run is still moving. */
   private settled: number | null = null;
 
@@ -575,6 +596,7 @@ export class UpdateTurns {
     this.settled = null;
     this.progressAt = 0;
     this.legsRunId = runId;
+    this.legsTarget = this.run.target;
   }
 
   /**
@@ -590,6 +612,7 @@ export class UpdateTurns {
     this.run = null;
     this.held = null;
     this.missed.clear();
+    this.blocked.clear();
     this.swept = false;
   }
 
@@ -607,6 +630,11 @@ export class UpdateTurns {
   /** The run the legs describe, live or over, or null when this queue has never run. */
   legsRun(): string | null {
     return this.legsRunId;
+  }
+
+  /** The version the legs' run levels the members to, live or over, or null when it never ran. */
+  legsTo(): string | null {
+    return this.legsTarget;
   }
 
   /** Every member's leg, as the sweep banked it. The route that reads this dials nobody. */
@@ -718,9 +746,33 @@ export class UpdateTurns {
       if (this.held !== null) {
         this.legChangedAt.set(this.held, now);
         this.progressAt = now;
+        this.blocked.clear();
+      } else {
+        this.reportBlocked(runId, ordered);
       }
     }
     return { released };
+  }
+
+  /**
+   * Name every member that is queued and cannot be handed the turn, once per member per reason.
+   *
+   * It runs only on a sweep that granted nothing at all, which is the shape of a run that looks
+   * frozen from the phone. `null` is the reading that matters: it means this lead holds NO verdict
+   * for that machine, which {@link eligible} refuses exactly as it refuses a red one, and which the
+   * lead can fix by asking for a fresh one on its next dial (`crew/lead.ts`).
+   */
+  private reportBlocked(runId: string, ordered: readonly TurnMember[]): void {
+    for (const m of ordered) {
+      if (this.legs.get(m.memberId)?.state !== "waiting") continue;
+      const why =
+        m.verdict === null
+          ? "this lead holds no preflight verdict for it, and unknown is not green"
+          : `its own preflight is ${m.verdict}`;
+      if (this.blocked.get(m.memberId) === why) continue;
+      this.blocked.set(m.memberId, why);
+      this.log(`[crew] update ${shortRunId(runId)}: ${m.memberId} is not being handed the turn — ${why}`);
+    }
   }
 
   /**

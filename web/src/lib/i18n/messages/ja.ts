@@ -190,6 +190,9 @@ export const ja: Dictionary = {
   "settings.display.rawTerminal.label": "未加工ターミナル",
   "settings.display.rawTerminal.hint":
     "プロンプトボタンやステータス表示を除いた素の出力を表示します。ダイアログの表示崩れを手動で制御する際に使用します。",
+  "settings.display.noInvert.label": "このペインをそのまま表示",
+  "settings.display.noInvert.hint":
+    "このペインだけライトテーマの反転を行いません。エージェントがライトテーマで、ミラーが暗く表示される場合にオンにしてください。表示が正しい場合はオフのままにします。",
   "settings.display.textSize.label": "文字サイズ",
   "settings.display.textSize.decrease": "文字サイズを縮小",
   "settings.display.textSize.increase": "文字サイズを拡大",
@@ -228,6 +231,8 @@ export const ja: Dictionary = {
   "composer.attach.title": "添付",
   "composer.attach.photos": "写真",
   "composer.attach.files": "ファイル",
+  "composer.attach.listAria": "添付ファイル",
+  "composer.attach.removeAria": "{name}を削除",
   "composer.send.typeAnyway": "強制的に入力しますか？",
   "composer.send.reallySend": "送信しますか？",
   "composer.send.stopTypingAria": "ターミナルへの入力を停止",
@@ -235,6 +240,8 @@ export const ja: Dictionary = {
   "composer.draft.tooLong":
     "下書き保存の上限を超えています。ペイン切り替え時は保持されますが、アプリ終了時に破棄されます。",
   "composer.status.dialogWaiting": "対話プロンプトの応答待ちです。先に応答してから送信してください。",
+  "composer.status.unreadDialog":
+    "Collie はこの対話を読み取れません。カードに {key} があります。それでも入力するには、もう一度送信をタップしてください。", // wordsmith
   "composer.status.paneNotWritable": "ペインが書き込み不可になったため、送信を中止しました",
   "composer.status.inputChanged":
     "消去中に入力内容が変更されたため、入力を中断しました。ペインを確認してください。",
@@ -261,6 +268,7 @@ export const ja: Dictionary = {
   "composer.noEcho.dismissAria": "パスワードプロンプト通知を閉じる",
   "composer.draftPreview.title": "ターミナル内の下書き",
   "composer.draftPreview.takeOver": "引き継ぐ",
+  "composer.draftPreview.dismissAria": "ターミナルの下書きの通知を閉じる",
 
   // --- sendMode (the armed "typing straight through" indicator) ---
   "sendMode.armed.title": "ターミナル直接入力中",
@@ -660,6 +668,18 @@ export const ja: Dictionary = {
 
   // --- dialog (menu / multi-select / wizard / preview-select block renderers) ---
   "dialog.sendingAria": "送信中",
+  // TODO wordsmith
+  "dialog.terminalControl": "Terminal",
+  // TODO wordsmith
+  "dialog.terminalControlAria": "Show the terminal instead of this card",
+  // TODO wordsmith
+  "dialog.backToCard": "Back to the card",
+  // TODO wordsmith
+  "dialog.putAwayControl": "Put away",
+  // TODO wordsmith
+  "dialog.putAwayControlAria": "Hide this card's buttons, keep the terminal",
+  // TODO wordsmith
+  "dialog.showButtons": "Show the buttons",
   "dialog.previousStepAria": "前のステップ",
   "dialog.nextStepAria": "次のステップ",
   "dialog.answeredAria": "回答済み",
@@ -679,6 +699,11 @@ export const ja: Dictionary = {
   "dialog.menu.moveDown": "下へ移動",
   "dialog.menu.leftAria": "左: {verb}（{label}）",
   "dialog.menu.rightAria": "右: {verb}（{label}）",
+  // TODO wordsmith
+  "dialog.menu.levelAria": "{verb} to {label}",
+  // TODO wordsmith
+  "dialog.menu.levelCurrentAria": "{label}, current",
+  "unreadDialog.caption": "Collie はこの対話を読み取れません", // wordsmith
   "dialog.preview.currentAnswerAria": "現在の回答",
   "dialog.preview.previewedBelowAria": "プレビューを下に表示中",
   "dialog.preview.previewLabel": "プレビュー · {label}",
@@ -821,6 +846,7 @@ export const ja: Dictionary = {
   "apiError.update.major_confirm_required": "{version} はメジャー更新です。個別の確認が必要です。",
   "apiError.update.target_mismatch": "画面上の対象は {asked} ですが、この collie にインストールされるのは {would} です。再読み込みして確認してください。",
   "apiError.update.none_available": "利用可能な新しいリリースはありません。",
+  "apiError.update.peers_packaged": "{name} はパッケージ版です。更新はそのマシンのパッケージマネージャーから提供されます。",
   "apiError.update.packaged": "更新はパッケージマネージャーから行われます。Collie はこのインストールのファイルを置換しません。",
   "apiError.update.start_failed": "更新を開始できませんでした: {reason}",
   // --- settings.updateCard (the update card, M15/05) ---
@@ -962,6 +988,8 @@ export const ja: Dictionary = {
   "cache.sheet.overridden": "Moved by cache-rules.toml",
   "cache.sheet.thisMachine": "This machine",
   "cache.sheet.onPeer": "Read on {host}. Its rule catalog is not forwarded, so the source is not quoted here.",
+  "cache.sheet.reset.pending": "前回のターンの後: {action}。次のターンでキャッシュが再構築されます。",
+  "cache.sheet.reset.cause": "前回のターンの前: {action}。そのターンでキャッシュが再構築されました。",
   "cache.sheet.state": "State",
   "cache.sheet.state.warm": "Warm",
   "cache.sheet.state.expiring": "Expiring",
@@ -1059,12 +1087,14 @@ export const ja: Dictionary = {
   "updateScreen.state.updating": "updating",
   "updateScreen.state.unreachable": "no answer",
   "updateScreen.state.packageManaged": "package-managed",
+  "updateScreen.state.current": "すでに最新",
   "updateScreen.peer.lastSeen": "last seen {ago} ago",
   "updateScreen.peer.packageManagedNote": "Its package manager owns this machine, so the run leaves it alone.",
   "updateScreen.failed.rolledBack": "The update rolled back. This machine is still on {version}: {reason}",
   "updateScreen.failed.stuck": "The update is stuck: {reason}",
   "updateScreen.failed.interrupted": "The update was interrupted: {reason}",
   "updateScreen.lead.stalled": "Still working. Nothing is wrong yet, and waiting is the whole job.",
+  "updateScreen.lead.crewOnly": "この実行で更新するのはメンバーだけです。このマシンはそのままで、再起動しません。",
   "updateScreen.device.title": "This device",
   "updateScreen.device.downloading": "Downloading the new app, {done} of {total} files",
   "updateScreen.device.downloadingUnknown": "Downloading the new app",
@@ -1074,4 +1104,5 @@ export const ja: Dictionary = {
   "updateScreen.device.keepUsing": "Keep using the app",
   "updateScreen.done.crew": "Crew updated to {version}",
   "updateScreen.done.solo": "{machine} updated to {version}",
+  "updateScreen.done.members": "メンバーを {version} に更新しました",
 };

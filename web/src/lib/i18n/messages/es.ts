@@ -192,6 +192,9 @@ export const es: Dictionary = {
   "settings.display.rawTerminal.label": "Terminal sin formato",
   "settings.display.rawTerminal.hint":
     "Muestra la sesion directa sin botones de interfaz ni barras. Util si un dialogo falla y requiere control manual mediante Teclas.",
+  "settings.display.noInvert.label": "Mostrar este panel de forma nativa",
+  "settings.display.noInvert.hint":
+    "Omite la inversión del tema claro solo en este panel. Actívalo cuando un agente use un tema CLARO y el espejo lo muestre oscuro; déjalo desactivado si el panel se ve bien.",
   "settings.display.textSize.label": "Tamano del texto",
   "settings.display.textSize.decrease": "Reducir fuente",
   "settings.display.textSize.increase": "Aumentar fuente",
@@ -230,6 +233,8 @@ export const es: Dictionary = {
   "composer.attach.title": "Adjuntar",
   "composer.attach.photos": "Fotos",
   "composer.attach.files": "Archivos",
+  "composer.attach.listAria": "Adjuntos",
+  "composer.attach.removeAria": "Quitar {name}",
   "composer.send.typeAnyway": "¿Escribir de todos modos?",
   "composer.send.reallySend": "¿Confirmar envío?",
   "composer.send.stopTypingAria": "Detener escritura en la terminal",
@@ -237,6 +242,8 @@ export const es: Dictionary = {
   "composer.draft.tooLong":
     "Texto demasiado largo para persistir como borrador. Se conserva al cambiar de panel, pero no al cerrar la app.",
   "composer.status.dialogWaiting": "Hay un diálogo pendiente. Respóndelo antes de enviar.",
+  "composer.status.unreadDialog":
+    "Collie no puede leer este diálogo. {key} está en la tarjeta. Pulsa Enviar de nuevo para escribir igualmente.", // wordsmith
   "composer.status.paneNotWritable": "El panel ya no admite escritura. No se envió nada.",
   "composer.status.inputChanged":
     "La entrada cambió durante la limpieza y no se escribió nada. Revisa el panel.",
@@ -264,6 +271,7 @@ export const es: Dictionary = {
   "composer.noEcho.dismissAria": "Descartar aviso de contraseña",
   "composer.draftPreview.title": "Borrador en la terminal",
   "composer.draftPreview.takeOver": "Retomar",
+  "composer.draftPreview.dismissAria": "Cerrar el aviso del borrador en la terminal",
 
   // --- sendMode (the armed "typing straight through" indicator) ---
   "sendMode.armed.title": "Escribiendo en la terminal",
@@ -667,6 +675,18 @@ export const es: Dictionary = {
 
   // --- dialog (menu / multi-select / wizard / preview-select block renderers) ---
   "dialog.sendingAria": "Enviando",
+  // TODO wordsmith
+  "dialog.terminalControl": "Terminal",
+  // TODO wordsmith
+  "dialog.terminalControlAria": "Show the terminal instead of this card",
+  // TODO wordsmith
+  "dialog.backToCard": "Back to the card",
+  // TODO wordsmith
+  "dialog.putAwayControl": "Put away",
+  // TODO wordsmith
+  "dialog.putAwayControlAria": "Hide this card's buttons, keep the terminal",
+  // TODO wordsmith
+  "dialog.showButtons": "Show the buttons",
   "dialog.previousStepAria": "Paso anterior",
   "dialog.nextStepAria": "Paso siguiente",
   "dialog.answeredAria": "Respondida",
@@ -686,6 +706,11 @@ export const es: Dictionary = {
   "dialog.menu.moveDown": "Bajar",
   "dialog.menu.leftAria": "Izquierda: {verb} ({label})",
   "dialog.menu.rightAria": "Derecha: {verb} ({label})",
+  // TODO wordsmith
+  "dialog.menu.levelAria": "{verb} to {label}",
+  // TODO wordsmith
+  "dialog.menu.levelCurrentAria": "{label}, current",
+  "unreadDialog.caption": "Collie no puede leer este diálogo", // wordsmith
   "dialog.preview.currentAnswerAria": "Respuesta actual",
   "dialog.preview.previewedBelowAria": "Vista previa a continuación",
   "dialog.preview.previewLabel": "Vista previa · {label}",
@@ -830,6 +855,7 @@ export const es: Dictionary = {
   "apiError.update.major_confirm_required": "{version} pasa a una versión mayor y requiere confirmación explícita.",
   "apiError.update.target_mismatch": "Esta pantalla ofreció {asked}, pero este collie instalaría {would}. Recargue y vuelva a revisar.",
   "apiError.update.none_available": "No hay ninguna versión más reciente disponible.",
+  "apiError.update.peers_packaged": "{name} es una instalación por paquete. Sus actualizaciones vienen de su propio gestor de paquetes.",
   "apiError.update.packaged": "Las actualizaciones se gestionan con tu gestor de paquetes. Collie no reemplazará los archivos de esta instalación.",
   "apiError.update.start_failed": "No se pudo iniciar la actualización: {reason}",
   // --- settings.updateCard (the update card, M15/05) ---
@@ -971,6 +997,8 @@ export const es: Dictionary = {
   "cache.sheet.overridden": "Moved by cache-rules.toml",
   "cache.sheet.thisMachine": "This machine",
   "cache.sheet.onPeer": "Read on {host}. Its rule catalog is not forwarded, so the source is not quoted here.",
+  "cache.sheet.reset.pending": "Después del último turno: {action}. El siguiente turno reconstruye la caché.",
+  "cache.sheet.reset.cause": "Antes del último turno: {action}. Ese turno reconstruyó la caché.",
   "cache.sheet.state": "State",
   "cache.sheet.state.warm": "Warm",
   "cache.sheet.state.expiring": "Expiring",
@@ -1068,12 +1096,14 @@ export const es: Dictionary = {
   "updateScreen.state.updating": "updating",
   "updateScreen.state.unreachable": "no answer",
   "updateScreen.state.packageManaged": "package-managed",
+  "updateScreen.state.current": "ya al día",
   "updateScreen.peer.lastSeen": "last seen {ago} ago",
   "updateScreen.peer.packageManagedNote": "Its package manager owns this machine, so the run leaves it alone.",
   "updateScreen.failed.rolledBack": "The update rolled back. This machine is still on {version}: {reason}",
   "updateScreen.failed.stuck": "The update is stuck: {reason}",
   "updateScreen.failed.interrupted": "The update was interrupted: {reason}",
   "updateScreen.lead.stalled": "Still working. Nothing is wrong yet, and waiting is the whole job.",
+  "updateScreen.lead.crewOnly": "Esta ejecución solo actualiza a los miembros. Esta máquina se queda como está y no se reinicia.",
   "updateScreen.device.title": "This device",
   "updateScreen.device.downloading": "Downloading the new app, {done} of {total} files",
   "updateScreen.device.downloadingUnknown": "Downloading the new app",
@@ -1083,4 +1113,5 @@ export const es: Dictionary = {
   "updateScreen.device.keepUsing": "Keep using the app",
   "updateScreen.done.crew": "Crew updated to {version}",
   "updateScreen.done.solo": "{machine} updated to {version}",
+  "updateScreen.done.members": "Miembros actualizados a {version}",
 };

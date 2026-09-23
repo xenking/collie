@@ -14,7 +14,6 @@
 // Nothing here is a security boundary. A file that gets past it still meets the bridge's own sniff.
 
 import type { UploadCapability } from "@/lib/types";
-import type { DraftAttachment } from "./drafts";
 
 /** What a bridge that publishes no `upload` block accepts. See the header. */
 const LEGACY: UploadCapability = {
@@ -98,20 +97,99 @@ export function limitMb(limits: UploadCapability): number {
   return Math.round(limits.maxBytes / (1024 * 1024));
 }
 
-/** Whether a paste is large enough to become a text attachment. */
-export function shouldAttachPaste(text: string): boolean {
-  if (text.length > 1000) return true;
-  let lines = 1;
-  for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) === 10 && ++lines > 10) return true;
-  }
-  return false;
+// ── AN ATTACHMENT IS A CHIP, AND ITS MARKER HOLDS ITS PLACE (ADR 0060) ──────────────────────────
+//
+// The composer used to write the bridge's host path straight into the draft. The path is the right
+// thing for the TERMINAL and the wrong thing for the phone: a 70-character run of `/`-joined
+// directory names that says nothing to the person holding it. So the draft now carries a short
+// marker, `[Image #N]` or `[File #N]`, at the spot the attachment was added (Claude Code's own
+// `[Image #1]` convention), a chip above the field shows what it is, and Send swaps each marker for
+// its path. The functions below are that whole contract, pure, so the tests can pin it without a
+// DOM.
+
+/** A marker placed in a draft: the new text, and where the caret goes after it. */
+export interface PlacedMarker {
+  text: string;
+  caret: number;
 }
 
-/** Build the message sent alongside uploaded attachment paths without changing the original text. */
-export function attachmentMessage(
+/** The chip as far as the marker grammar cares: its number and what it is drawn as. */
+export interface MarkedAttachment {
+  n: number;
+  path: string;
+  kind: "image" | "file";
+}
+
+/** Whether a picked file is drawn (and marked) as a photo or a file. The browser's own word wins;
+ *  an extension-only image (a camera-roll entry with no MIME type) still counts as one. */
+export function attachmentKind(file: File, limits: UploadCapability): "image" | "file" {
+  if (file.type.startsWith("image/")) return "image";
+  const ext = extensionOf(file.name);
+  return ext !== null && limits.imageTypes.includes(ext) ? "image" : "file";
+}
+
+/** The marker text for a chip: `[Image #N]` or `[File #N]`. */
+export function markerFor(attachment: Pick<MarkedAttachment, "n" | "kind">): string {
+  return `[${attachment.kind === "image" ? "Image" : "File"} #${attachment.n}]`;
+}
+
+/**
+ * Put a marker into the draft at `caret` (the end when there is none), padded so it never welds to
+ * a word: a space before it unless the text there already ends in whitespace, and a space after it
+ * unless the text there already starts with some. Returns the new text and where the caret goes,
+ * which is past the marker and past the space that follows it.
+ */
+export function insertMarker(
   text: string,
-  attachments: readonly DraftAttachment[],
-): string {
-  return [text, ...attachments.map(({ path }) => path)].filter(Boolean).join("\n\n");
+  caret: number | null,
+  marker: string,
+): PlacedMarker {
+  const at = Math.min(Math.max(caret ?? text.length, 0), text.length);
+  const before = text.slice(0, at);
+  const after = text.slice(at);
+  const lead = before !== "" && !/\s$/.test(before) ? " " : "";
+  const trail = /^\s/.test(after) ? "" : " ";
+  const inserted = `${lead}${marker}${trail}`;
+  return { text: `${before}${inserted}${after}`, caret: at + inserted.length + (trail === "" ? 1 : 0) };
+}
+
+/** Take every copy of a marker out of the draft, with one space beside it (the one after, else the
+ *  one before), so removing a chip does not leave a double space where its marker stood. */
+export function removeMarker(text: string, marker: string): string {
+  let out = text;
+  for (let at = out.indexOf(marker); at !== -1; at = out.indexOf(marker, at)) {
+    let start = at;
+    let end = at + marker.length;
+    if (out[end] === " ") end += 1;
+    else if (start > 0 && out[start - 1] === " ") start -= 1;
+    out = out.slice(0, start) + out.slice(end);
+    at = start;
+  }
+  return out;
+}
+
+/**
+ * The line Send types into the terminal. Each marker whose number matches a chip becomes that
+ * chip's path, where it stands. A chip whose marker is no longer in the text (the operator edited
+ * it away) is not dropped: its path goes in front of the text, in chip order, so nothing attached
+ * is lost by accident. A marker-looking string with no chip behind it is left exactly as typed.
+ */
+export function composeLine(text: string, attachments: readonly MarkedAttachment[]): string {
+  let line = text;
+  const orphans: string[] = [];
+  for (const attachment of attachments) {
+    const marker = markerFor(attachment);
+    if (!text.includes(marker)) {
+      orphans.push(attachment.path);
+      continue;
+    }
+    line = line.split(marker).join(attachment.path);
+  }
+  const words = line.trim();
+  return [...orphans, ...(words === "" ? [] : [words])].join(" ");
+}
+
+/** A file name cut to fit a chip: at most `max` characters, the cut marked with an ellipsis. */
+export function shortName(name: string, max = 14): string {
+  return name.length > max ? `${name.slice(0, max - 1)}…` : name;
 }

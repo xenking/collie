@@ -30,7 +30,7 @@ describe("TabStrip", () => {
 
     const renderedTabs = screen
       .getAllByRole("button")
-      .map((button) => button.textContent)
+      .map((button) => button.lastElementChild?.lastElementChild?.textContent)
       .filter((label) => label === "First" || label === "Second");
     expect(renderedTabs).toEqual(["Second", "First"]);
   });
@@ -59,7 +59,7 @@ describe("TabStrip", () => {
   // box-affecting class besides the border's colour and the fill is identical between the two
   // states, so a selection can never re-flow a label. jsdom has no layout, so this pins the
   // mechanism (which classes differ) rather than pixels.
-  it("marks the open tab with an underline, with the rest of the box unchanged on selection", () => {
+  it("marks the open tab by ink and weight without changing its box", () => {
     const { rerender } = render(
       <TabStrip
         workspaceId="w1"
@@ -77,10 +77,8 @@ describe("TabStrip", () => {
         .toSorted();
 
     const inactive = screen.getByRole("button", { name: "2" });
-    // Every tab reserves the same border and radius box; an inactive one keeps the border transparent
-    // and draws no fill.
-    expect(inactive.className).toContain("border-transparent");
-    expect(inactive.className).not.toContain("border-foreground");
+    expect(inactive.className).toContain("text-muted-foreground");
+    expect(inactive.className.split(/\s+/)).not.toContain("text-foreground");
     const inactiveBox = boxClasses(inactive);
     rerender(
       <TabStrip
@@ -94,14 +92,10 @@ describe("TabStrip", () => {
     );
     const active = screen.getByRole("button", { name: "2" });
     expect(active).toHaveAttribute("aria-current", "true");
-    // Every box-affecting class is shared — the border's colour and the fill are the only differences.
     expect(boxClasses(active)).toEqual(inactiveBox);
-    expect(active.className).toContain("border-b-2");
-    expect(active.className).toContain("border-foreground");
-    // No dashed desktop-focus ring on any cell any more: the fill is the only "open" mark.
+    expect(active.className.split(/\s+/)).toContain("text-foreground");
     expect(active.className).not.toContain("outline-dashed");
-    // Rule E: state may not change font weight, or the whole row re-flows.
-    expect(active.className).toContain("font-medium");
+    expect(active.className).toContain("font-semibold");
   });
 
   // NO HORIZONTAL RULE, AND NO HAIRLINE BETWEEN TABS EITHER. Altan, from the phone, on the row this
@@ -169,20 +163,20 @@ describe("TabStrip — a tab with no name of its own", () => {
   it("draws its raw numeric position, in the lighter ink, as the button's own spoken name", () => {
     strip("1");
     const tab = screen.getByRole("button", { name: "1" });
-    expect(tab.textContent).toBe("1");
-    expect(tab.querySelector(".text-muted-foreground")?.textContent).toBe("1");
+    expect(tab.lastElementChild?.lastElementChild?.textContent).toBe("1");
+    expect(tab.lastElementChild?.className).toContain("text-muted-foreground/70");
     expect(tab.querySelector(".sr-only")).toBeNull();
   });
 
   it("treats zellij's own default the same way", () => {
     strip("Tab #3");
-    expect(screen.getByRole("button", { name: "Tab #3" }).textContent).toBe("Tab #3");
+    expect(screen.getByRole("button", { name: "Tab #3" }).lastElementChild?.lastElementChild?.textContent).toBe("Tab #3");
   });
 
   it("draws a real name as text, with no dot and no positional ink standing in for it", () => {
     strip("review");
     const tab = screen.getByRole("button", { name: "review" });
-    expect(tab.textContent).toBe("review");
+    expect(tab.lastElementChild?.lastElementChild?.textContent).toBe("review");
     expect(tab.querySelector(".sr-only")).toBeNull();
     expect(tab.querySelector(".text-muted-foreground")).toBeNull();
   });

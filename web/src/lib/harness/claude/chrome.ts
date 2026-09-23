@@ -1,6 +1,7 @@
 // Chrome stripping — trims the agent's own TUI chrome off the TAIL of a parsed buffer so the app's
 // composer/statusline supersedes it instead of duplicating it. Today that's the Claude Code input
-// box (the "❯ …" prompt line sandwiched between two rules) plus the statusline / hint lines below it
+// box (the "❯ …" prompt line, or "! …" in shell mode, sandwiched between two rules) plus the
+// statusline / hint lines below it
 // and any trailing blank runs.
 //
 // Deliberately CONSERVATIVE: it strips only when the WHOLE input-box frame matches confidently at
@@ -39,6 +40,8 @@ const MAX_STATUS_LINES = 8;
 // ("◯ <agent>  <task…>   <elapsed> · ↓ <tokens>"). We peel it off the tail as chrome too, bounded to
 // this many rows (header + a handful of agents, plus a possible "… +N more" line) so a borderless
 // buffer still can't strip unboundedly — an over-long block just falls back to the raw mirror.
+// Peeled is not dropped: extractAgentsFooter hands the same rows to their own chrome element (issue
+// #242). Until then they left the mirror with no home, which ADR 0048's tail model does not allow.
 const MAX_FOOTER_LINES = 8;
 
 // A long draft WRAPS inside the input box: the "❯ …" prompt line plus continuation lines (indented,
@@ -108,13 +111,15 @@ function inputBoxHoldsGhostText(lines: StyledLine[], box: InputBox): boolean {
   for (let j = box.prompt; j < box.bottomBorder; j++) {
     // The "❯" marker is unstyled and may share a segment with the text that follows it (a real draft
     // arrives as one segment, "❯ hello"), so it is stripped from the text rather than skipped as a
-    // segment — otherwise the marker's own non-faint run would answer "not a ghost" every time.
+    // segment — otherwise the marker's own non-faint run would answer "not a ghost" every time. Shell
+    // mode's "!" is stripped the same way; there the marker is its own PAINTED segment, so it would
+    // answer "not a ghost" for a reason this code did not state.
     let beforeMarker = j === box.prompt;
     for (const seg of lines[j]!.segments) {
       let text = seg.text;
       if (beforeMarker) {
         const head = text.trimStart();
-        if (!head.startsWith("❯")) {
+        if (!isPromptRow(head)) {
           if (head.length === 0) continue; // indent ahead of the marker
         } else {
           text = head.slice(1);
@@ -200,6 +205,37 @@ export function extractStatusLines(lines: StyledLine[]): StyledLine[] {
 }
 
 /**
+ * The background-agents footer ("● main" + one "◯ <agent> <task> <elapsed>" row per agent) that the
+ * statusline walk peels off below the blank separator. stripChrome takes it off the mirror and
+ * extractStatusLines stops above it, so without this probe the agent list was on no surface at all
+ * (issue #242). It gets its own chrome element rather than more rows in the statusline strip: the
+ * strip's height cap guards against an operator's script, and this block is Claude's own and already
+ * bounded by MAX_FOOTER_LINES.
+ *
+ * POSITIONAL, like the strip: the rows from where walkStatusline says the footer starts to the last
+ * non-blank line, STYLED, top to bottom. `[]` when there is no box, the tail is not a statusline run,
+ * or no footer was peeled. One content check: the block must open with Claude's "●" header. The walk
+ * peels by position, so a custom statusline with a blank row in it also loses its lower rows there;
+ * without the header check those rows would show on the phone labelled as agents.
+ */
+export function extractAgentsFooter(lines: StyledLine[]): StyledLine[] {
+  const texts = lines.map(lineText);
+  let end = lines.length;
+  while (end > 0 && isBlank(texts[end - 1]!)) end--;
+  if (end === 0) return [];
+
+  const box = locateInputBox(lines, texts, end);
+  if (box === null || box.tail !== "statusline") return [];
+
+  const rows: StyledLine[] = [];
+  for (let j = box.agentsStart; j < end; j++) {
+    if (!isBlank(texts[j]!)) rows.push(lines[j]!);
+  }
+  if (rows.length === 0 || !lineText(rows[0]!).trimStart().startsWith("●")) return [];
+  return rows;
+}
+
+/**
  * The user's draft text stranded on the input box's "❯" prompt line. When a message is queued while
  * the agent is busy and then recalled (Up/Esc), the text lands here and persists across turns — but
  * stripChrome peels the whole box off the mirror, so it becomes invisible, and the composer (local
@@ -226,7 +262,9 @@ export function extractInputDraft(lines: StyledLine[]): string | null {
   if (inputBoxHoldsGhostText(lines, box)) return null;
 
   let head = texts[box.prompt]!.trimStart();
-  if (head.startsWith("❯")) head = head.slice(1);
+  // The marker is chrome and never reaches the draft, so shell mode's draft is the command alone.
+  // Memory mode keeps its "#": there the marker is still "❯" and the "#" is typed content.
+  if (isPromptRow(head)) head = head.slice(1);
   const parts = [head.trim()];
   // Continuation lines of a wrapped draft: everything between the prompt and the bottom border,
   // de-indented. Blank lines are dropped (interior/trailing padding), so they never inject a space.
@@ -292,6 +330,9 @@ interface InputBox {
    *  the walk down there knows where the run stops, so it hands the bound out rather than letting
    *  extractStatusLines re-derive it. */
   statusEnd: number;
+  /** First row of the background-agents footer the walk peeled (extractAgentsFooter), or the
+   *  exclusive end of the non-blank tail when there is no footer, so the range is empty. */
+  agentsStart: number;
 }
 
 // How many rows may sit between the bottom border and the last non-blank line — the search bound
@@ -308,7 +349,7 @@ const MAX_TAIL_LINES = MAX_AUTOCOMPLETE_LINES;
  * of this holds, checked in order:
  *
  *     <top border>         (isInputBoxTopBorder: bare, or carrying a session label)
- *     ❯ <draft>            (the prompt line)
+ *     ❯ <draft>            (the prompt line; "!" in shell mode)
  *     <continuation…>      (0..MAX_DRAFT_LINES wrapped-draft lines, no leading "❯")
  *     <bottom border>      (bare U+2500 rule)
  *     <tail…>              (0..MAX_TAIL_LINES rows, classified by classifyTail)
@@ -323,8 +364,9 @@ const MAX_TAIL_LINES = MAX_AUTOCOMPLETE_LINES;
  *     (isStatuslineFrameMark), but the box is then kept only when every such row sits inside a
  *     `statusline` tail's run, at most MAX_STATUS_LINES rows under the border, and no labelled rule
  *     sits directly on a "❯" row (a second box's top border and prompt).
- *  2. THE FRAME CLOSES: a "❯" line above the bottom border and a top border above that, inside the
- *     shared MAX_DRAFT_LINES budget.
+ *  2. THE FRAME CLOSES: a prompt line above the bottom border and a top border above that, inside
+ *     the shared MAX_DRAFT_LINES budget. The prompt line carries "❯", or "!" in shell mode
+ *     (isPromptRow). Only this step learned the bang; step 1's marks stay chevron-only.
  *  3. THE TAIL IS ACCOUNTED FOR (classifyTail): a statusline run, a completion popup, or `unknown`.
  *  4. NO MODAL IS ON SCREEN: every specific dialog grammar runs over the WHOLE screen, and none may
  *     claim it; no tail row may carry a dialog footer; no `statusline` or `unknown` tail row may carry
@@ -368,18 +410,31 @@ function locateInputBox(lines: StyledLine[], texts: string[], end: number): Inpu
   if (frame === null) return null;
 
   // 3. The tail is accounted for.
-  const { tail, statusEnd } = classifyTail(texts, { prompt: frame.prompt, bottomBorder: b }, end);
+  const { tail, statusEnd, agentsStart } = classifyTail(texts, { prompt: frame.prompt, bottomBorder: b }, end);
   if (!steppedMarksAreStatusline(texts, stepped, tail, b, statusEnd)) return null;
 
   // 4. No modal on screen.
   for (let j = b + 1; j < end; j++) {
-    if (classifyFooter(texts[j]!) !== null) return null;
+    if (classifyFooter(texts[j]!, texts) !== null) return null;
     if (tail !== "autocomplete" && tailNamesAMenu(texts[j]!)) return null;
     if (tail === "unknown" && tailLooksModal(texts[j]!)) return null;
   }
   if (dialogOnScreen(lines)) return null;
 
-  return { top: frame.top, prompt: frame.prompt, bottomBorder: b, tail, statusEnd };
+  return { top: frame.top, prompt: frame.prompt, bottomBorder: b, tail, statusEnd, agentsStart };
+}
+
+/** A row carrying the input box's prompt marker: "❯", or "!" in shell mode, where Claude paints
+ *  the bang in place of the chevron. The bang must be followed by whitespace or end the row, so an
+ *  ordinary "!important" line inside the frame is not a prompt. Step 1's frame marks (isFrameMark)
+ *  deliberately do NOT learn it: shell mode's bang only ever appears INSIDE the frame, and a
+ *  "!"-led transcript row below the box must stay ordinary text. ADR 0048 step 2. */
+function isPromptRow(text: string): boolean {
+  const head = text.trimStart();
+  if (head.startsWith("❯")) return true;
+  if (!head.startsWith("!")) return false;
+  const next = head[1];
+  return next === undefined || /\s/.test(next);
 }
 
 /** A row that belongs to a box or a dialog's frame, unless a statusline drew it (isStatuslineFrameMark):
@@ -465,6 +520,7 @@ interface TailOwner {
 interface TailReading {
   tail: InputBoxTail;
   statusEnd: number;
+  agentsStart: number;
 }
 
 /**
@@ -475,17 +531,17 @@ interface TailReading {
  */
 function classifyTail(texts: string[], box: TailOwner, end: number): TailReading {
   const first = box.bottomBorder + 1;
-  if (first >= end) return { tail: "statusline", statusEnd: first };
+  if (first >= end) return { tail: "statusline", statusEnd: first, agentsStart: end };
 
   // The popup is confirmed, not assumed: Claude paints it only while the draft STARTS WITH "/".
   const popup = findAutocompleteRun(texts, end);
   if (popup !== null && popup.start === first && promptIsSlashCommand(texts, box.prompt)) {
-    return { tail: "autocomplete", statusEnd: first };
+    return { tail: "autocomplete", statusEnd: first, agentsStart: end };
   }
 
-  const statusEnd = walkStatusline(texts, box.bottomBorder, end);
-  if (statusEnd !== null) return { tail: "statusline", statusEnd };
-  return { tail: "unknown", statusEnd: first };
+  const run = walkStatusline(texts, box.bottomBorder, end);
+  if (run !== null) return { tail: "statusline", ...run };
+  return { tail: "unknown", statusEnd: first, agentsStart: end };
 }
 
 /** Whether the "❯" line holds a slash command — the draft state that puts the completion popup on
@@ -497,8 +553,9 @@ function promptIsSlashCommand(texts: string[], prompt: number): boolean {
 
 /**
  * The statusline walk, bottom-up from `end` (exclusive): an optional background-agents footer and its
- * blank separator, then up to MAX_STATUS_LINES status/hint rows. Returns the run's exclusive end when
- * the walk lands exactly on `bottomBorder`, else null.
+ * blank separator, then up to MAX_STATUS_LINES status/hint rows. Returns the run's exclusive end and
+ * the footer's first row (`end` when there is no footer) when the walk lands exactly on
+ * `bottomBorder`, else null.
  *
  *     <bottom border>
  *     <statusline>         (statusline + hint rows together are 0..MAX_STATUS_LINES, by position)
@@ -507,8 +564,13 @@ function promptIsSlashCommand(texts: string[], prompt: number): boolean {
  *     <● main>             (0..MAX_FOOTER_LINES footer lines, matched by position not content)
  *     <◯ agent …>
  */
-function walkStatusline(texts: string[], bottomBorder: number, end: number): number | null {
+function walkStatusline(
+  texts: string[],
+  bottomBorder: number,
+  end: number,
+): { statusEnd: number; agentsStart: number } | null {
   let i = end - 1;
+  let agentsStart = end;
 
   // (a) Optional background-agents footer at the very tail (a newer Claude Code UI): a non-blank run
   //     ("● main" header + "◯ …" agent rows) divided from the statusline/hint by a blank line. Matched
@@ -522,6 +584,7 @@ function walkStatusline(texts: string[], bottomBorder: number, end: number): num
       j--;
     }
     if (footer > 0 && j > bottomBorder && isBlank(texts[j]!)) {
+      agentsStart = j + 1;
       while (j > bottomBorder && isBlank(texts[j]!)) j--; // consume the blank separator run
       i = j;
     }
@@ -536,7 +599,7 @@ function walkStatusline(texts: string[], bottomBorder: number, end: number): num
     status++;
     i--;
   }
-  return i === bottomBorder ? statusEnd : null;
+  return i === bottomBorder ? { statusEnd, agentsStart } : null;
 }
 
 /** The frame above a bottom border: the "❯" prompt line and the top border, or null. */
@@ -555,13 +618,13 @@ function walkFrame(texts: string[], bottomBorder: number): { top: number; prompt
   while (
     i >= 0 &&
     !isBoxBorder(texts[i]!) &&
-    !texts[i]!.trimStart().startsWith("❯") &&
+    !isPromptRow(texts[i]!) &&
     wrapped < MAX_DRAFT_LINES
   ) {
     wrapped++;
     i--;
   }
-  if (i < 0 || !texts[i]!.trimStart().startsWith("❯")) return null;
+  if (i < 0 || !isPromptRow(texts[i]!)) return null;
   const prompt = i;
   i--;
   // Blank padding between the prompt and the top border (e.g. a blank first line inside a freshly

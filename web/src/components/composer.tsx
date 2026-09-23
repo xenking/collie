@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import type { ChangeEvent, ClipboardEvent, CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
+import { createPortal } from "react-dom";
+import type { ChangeEvent, ClipboardEvent, CSSProperties, ReactNode } from "react";
 import { useRevalidator } from "react-router";
 import { Check, FileText, Image, Keyboard, Loader2, Mic, Paperclip, Send, Settings2, Slash, Square, Terminal, X, Zap } from "lucide-react";
 
@@ -16,7 +17,7 @@ import { useBusyWhile } from "@/lib/busy";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ChatInput } from "@/components/ui/chat/chat-input";
-import { NavTray, type NavTrayView } from "@/components/nav-tray";
+import { NavTray } from "@/components/nav-tray";
 import { CommandPalette } from "@/components/command-palette";
 import { QuickActionsContent } from "@/components/quick-actions";
 import { ActionsRow } from "@/components/actions-row";
@@ -30,15 +31,29 @@ import { describeApiError, describeThrownError } from "@/lib/api-error-message";
 import { commandsFor } from "@/lib/agent-commands";
 import { useMuxCapability, useMuxUnsupportedKeys } from "@/lib/mux-capability";
 import { useOperatorCommands, useOperatorKeys, useUploadCapability } from "@/lib/operator-config";
-import { acceptAttribute, attachmentMessage, limitMb, offersFiles, PHOTO_ACCEPT, rejectAttachment, shouldAttachPaste, uploadLimits } from "@/lib/attachments";
+import {
+  acceptAttribute,
+  attachmentKind,
+  composeLine,
+  insertMarker,
+  limitMb,
+  markerFor,
+  offersFiles,
+  PHOTO_ACCEPT,
+  rejectAttachment,
+  removeMarker,
+  uploadLimits,
+} from "@/lib/attachments";
 import { ctrlPresetsFor } from "@/lib/operator-keys";
 import { isDestructiveInput } from "@/lib/destructive";
 import { HostChip } from "@/components/host-chip";
 import { useAmbientHost, useHostLabel } from "@/components/crew-provider";
-import { clearDraft, fitsDraftStore, loadDraft, loadDraftAttachments, saveDraft, type DraftAttachment } from "@/lib/drafts";
+import { clearDraft, fitsDraftStore, loadDraftEntry, saveDraft } from "@/lib/drafts";
+import { AttachmentChip, type ComposerAttachment } from "@/components/attachment-chip";
 import { useHoldReload } from "@/lib/reload-guard";
 import { isSelfEcho, normalizeDraft } from "@/hooks/use-terminal-draft";
 import { adapterFor } from "@/lib/harness";
+import { keyLabel } from "@/lib/key-queue";
 import { sendGuardedReply } from "@/lib/reply-action";
 import { TerminalDraftPreview } from "@/components/terminal-draft-preview";
 import { scopeKey, type Scope } from "@/lib/scope";
@@ -47,7 +62,7 @@ import { RecordingStrip } from "@/components/recording-strip";
 import { useSttRecorder } from "@/hooks/use-stt-recorder";
 import { useHandsFree, useSttCapability, useVoiceCapability } from "@/lib/stt";
 import { NoEchoNotice } from "@/components/no-echo-notice";
-import { VoiceInput, type VoiceInputHandle, type VoiceState } from "@/components/voice-input";
+import { VoiceInput } from "@/components/voice-input";
 
 export interface ComposerHandle {
   /** Focus the input and put the caret at the end — used by the mirror-tap-to-focus in AgentChat. */
@@ -60,10 +75,15 @@ interface ComposerProps {
   scope?: Scope;
   /** The pane's agent name — drives the slash-command palette and the reply-vs-shell placeholder. */
   agent: string | undefined | null;
-  /** True for a bare shell pane (tweaks the placeholder copy, and is its own status word). */
+  /** True for a bare shell pane — tweaks the placeholder copy. */
   isShell: boolean;
   /** Only a path-backed OMP pane can hand replies to the local speech daemon. */
   replySpeechSupported?: boolean;
+  /* NO `status` AND NO `stale` HERE ANY MORE. The composer took the pane's state as a prop for one
+     reason: the status band above the controls row drew it as a word. That band is gone (see the
+     long note at the row below), the word went with it rather than moving, and the state is the
+     pane header's and the dashboard's to state. A composer that knows what the pane is DOING is a
+     composer that will be asked to draw it again; it does not know any more. */
   /** Pane is gone (no agent) — locks the composer with a distinct placeholder. */
   gone: boolean;
   /** This device isn't authorised to type — locks the composer with a distinct placeholder. */
@@ -92,6 +112,12 @@ interface ComposerProps {
   /** A dialog (prompt/wizard/preview/multi-select) is on screen, so the TUI's keyboard belongs to it.
    * Free-text sending is refused while true — see send(). Answer it with its own buttons instead. */
   dialogPresent: boolean;
+  /** …and that dialog is the UNREAD-DIALOG CARD (.adr/0053): no grammar read the screen, so the
+   * refusal below is a GUESS about an unknown screen rather than a parsed fact. It still refuses —
+   * that is the point — but it arms the two-tap override and names the card's key, so a splash
+   * screen or an alt-screen tool that trips the card's four conditions costs one extra tap instead
+   * of a locked composer. False while any READ dialog is up, where the refusal stands flat. */
+  dialogUnread?: boolean;
   /** Latest pane text — clears the pending-send preview once the mirror echoes the send back. */
   text: string;
   /** A user draft stranded on the terminal's "❯" input line (extractInputDraft), STABILISED across
@@ -109,6 +135,9 @@ interface ComposerProps {
   stepFontSize: (delta: number) => void;
   setRawTerminal: (raw: boolean) => void;
   setTapToFocus: (tapToFocus: boolean) => void;
+  /** This pane's mirror-inversion override, resolved and owned by AgentChat. */
+  mirrorNative: boolean;
+  setMirrorNative: (native: boolean) => void;
   setExpandClippedReply: (expandClippedReply: boolean) => void;
   /** Snap the mirror to the live tail (follow + revalidate + scroll) after a successful send. */
   onSent: () => void;
@@ -129,6 +158,14 @@ interface ComposerProps {
     /** Another pane needs you: the switcher mark wears a red dot. */
     alert?: boolean;
   };
+
+  /**
+   * Where the terminal-draft notice floats (ADR 0061): an absolutely positioned box the pane view
+   * keeps at the bottom edge of the mirror, above the card dock and the belt. The notice is portalled
+   * into it, so it covers terminal text and never takes a row of the composer's own flow. Absent
+   * (a composer mounted alone, as in its tests), the notice floats above the composer itself.
+   */
+  draftNoticeSlot?: HTMLElement | null;
 }
 
 // The composer cluster at the bottom of the pane view — everything a phone keyboard can't do on its
@@ -141,12 +178,11 @@ interface ComposerProps {
 // "display" joined the drawer union when the permanent icon-only View row was retired: wrap / raw
 // terminal / font size are settings you touch once, so they cost a whole row of a phone viewport for
 // nothing, and the raw-terminal toggle in particular was an unlabelled `>_` glyph nobody could
-// decode. They now live behind the ⚙ on the single Controls row, as labelled rows in the same
+// decode. They now live behind the ⚙ on the actions row, as labelled rows in the same
 // in-flow dock (they change how the mirror LOOKS, so the mirror has to stay visible while you flip
 // them). Find moved the other way — to the header, where its find bar already takes over the row.
 type ComposerDrawer = "quick" | "cmd" | "keys" | "display" | null;
 
-const VOICE_HOLD_MS = 350;
 
 // Pause after clearing a stranded terminal draft so the TUI settles before pane.send_text. Exported
 // so the test can pin the WAIT ITSELF (the reply never overtakes the sweep) against the constant
@@ -171,14 +207,12 @@ const KEY_REVALIDATE_MS = 300;
 function ComposerDock({
   title,
   host,
-  controls,
   onClose,
   children,
 }: {
   title: string;
   /** The machine a key sent from this dock lands on. Renders nothing on a single-host install. */
   host?: string;
-  controls?: ReactNode;
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -186,7 +220,7 @@ function ComposerDock({
     <div className="-mx-3 mb-2 flex flex-col border-t border-border bg-background">
       <div className="flex items-center justify-between px-3 pt-2">
         <div className="flex min-w-0 items-center gap-2">
-          {controls ?? <SectionLabel>{title}</SectionLabel>}
+          <SectionLabel>{title}</SectionLabel>
           {/* A key press from the Keys dock IS a write into a terminal — the dock names which one. */}
           <HostChip host={host} variant="target" />
         </div>
@@ -208,21 +242,48 @@ function ComposerDock({
 /** How long the attach button holds its pressed tone, in ms. Just under the sheet's own 240ms
  *  entrance, so the flash hands over to the sheet rather than lingering behind it. */
 const ATTACH_PRESS_MS = 220;
-function attachmentSizeLabel(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB"];
-  let value = bytes;
-  let unit = "B";
-  for (const nextUnit of units) {
-    value /= 1024;
-    unit = nextUnit;
-    if (value < 1024 || nextUnit === units[units.length - 1]) break;
+
+/**
+ * The 44px tap floor, bought back as HIT AREA by the two buttons inside the composer's box.
+ *
+ * DESIGN.md §6 states the floor and also states this trade: where drawn height is expensive, a
+ * control may measure less and reach out with a transparent `::before`, exactly as
+ * `STRIP_TAP_TARGET` does for the strips. It is expensive here. The two buttons stand INSIDE the
+ * composer's box, on the field's own row, so their face sets the height of an empty composer, and
+ * every pixel of it is a pixel of mirror the operator stops seeing.
+ *
+ * The arithmetic, and it is the whole reason this is a constant and not a class at two call sites:
+ * the face is `size-9`, 36px, and `-inset-1` reaches 4px out on all four sides, so 36 + 8 = 44 in
+ * BOTH axes. The box's own `p-1` is 4px, so the reach stays inside the border and the box's inner
+ * height is exactly that 44px: one row. Beside the field the reach runs into the row's `gap-1`, so
+ * no hit box crosses the textarea's own edge. Change the face, the inset, the box's padding or the
+ * gap and all of these facts must be re-checked together (ADR 0057, amended 2026-09-22).
+ */
+const TOOLBAR_TAP_TARGET = "relative before:absolute before:-inset-1 before:content-['']";
+
+/**
+ * A photo chip's thumbnail source: a blob URL for the picked file, valid for this page session only
+ * (ADR 0060). Undefined where the browser has no object URLs (jsdom), which draws the icon tile. The
+ * bridge's CSP admits `blob:` in `img-src` for exactly this; a blob URL is minted by this page's own
+ * script, so it opens no new origin.
+ */
+function makePreview(file: File): string | undefined {
+  if (!("createObjectURL" in URL)) return undefined;
+  try {
+    return URL.createObjectURL(file);
+  } catch {
+    return undefined;
   }
-  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${unit}`;
+}
+
+/** Release a chip's thumbnail. Called when the chip is removed, sent, or its pane is left. */
+function revokePreview(attachment: ComposerAttachment) {
+  if (attachment.previewUrl === undefined || !("revokeObjectURL" in URL)) return;
+  URL.revokeObjectURL(attachment.previewUrl);
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { paneId, scope, agent, isShell, replySpeechSupported = false, gone, readOnly, hostBlock, composing, dialogPresent, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setTapToFocus, setExpandClippedReply, onSent, pullHandle },
+  { paneId, scope, agent, isShell, replySpeechSupported = false, gone, readOnly, hostBlock, composing, dialogPresent, dialogUnread, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setTapToFocus, mirrorNative, setMirrorNative, setExpandClippedReply, onSent, pullHandle, draftNoticeSlot },
   ref,
 ) {
   const revalidator = useRevalidator();
@@ -261,7 +322,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // The machine every write on this row lands on. The pane view addresses one host (the pane's own,
   // carried in `?h=` since the row was opened), so the ambient scope IS the target here. Undefined on
   // a solo install, which renders no chip and leaves every confirm string unchanged.
+  // It names the Keys dock's own header; the belt below it carried the tag for a day and the pane
+  // header carries it now (agent-chat.tsx).
   const writeHost = useAmbientHost(scope?.host);
+  // Its display name, or undefined when there is no crew — the copy-level half of the hide rule.
   const writeHostLabel = useHostLabel(scope?.host);
   // …and a ref alongside it, for the ONE caller that reads it after an await. `send()` checks
   // `locked` once, up front, but its pre-clear sweep goes out on the far side of the pre-flight's
@@ -274,90 +338,66 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // The phone-owned draft, restored from (and written through to) the per-pane draft store — the
   // pane view is keyed by paneId, so without this, stepping over to another tab mid-reply ate the
   // message. Lazy initialiser so the restore happens on the mount, before first paint.
-  const [input, setInput] = useState(() => loadDraft(scope, paneId) ?? "");
-  const [attachments, setAttachments] = useState<DraftAttachment[]>(() => loadDraftAttachments(scope, paneId));
-  const [voiceState, setVoiceState] = useState<VoiceState | null>(null);
-  const voiceInputRef = useRef<VoiceInputHandle>(null);
-  const appendVoiceSessionRef = useRef(false);
-  const appendHoldTimerRef = useRef<number | null>(null);
-  const appendHoldSourceRef = useRef<"pointer" | "keyboard" | null>(null);
-  const appendHoldPointerRef = useRef<number | null>(null);
-  const appendHoldModeRef = useRef<api.VoiceRecordingMode | null>(null);
-  const appendHoldSelectedRef = useRef(false);
-  const appendHoldStartedRef = useRef(false);
-  const suppressSendClickRef = useRef(false);
-  const [appendVoiceActive, setAppendVoiceActive] = useState(false);
-  const [appendMicSelected, setAppendMicSelected] = useState(false);
-  const [voiceRecordingMode, setVoiceRecordingMode] = useState<api.VoiceRecordingMode | null>(null);
-  const voiceModeErrorRef = useRef("Voice recording mode unavailable");
-  // A final caption remains visible while VoiceInput awaits the transcript callback. Once that
-  // callback has inserted it into the real draft, hide only the caption copy so it cannot duplicate.
-  const acceptedVoiceCaptionRef = useRef<string | null>(null);
-  const voiceGenerationRef = useRef<number | null>(null);
-  const voiceCaretRef = useRef<{ start: number; end: number } | null>(null);
-  function handleVoiceStateChange(next: VoiceState | null) {
-    if (next === null) {
-      acceptedVoiceCaptionRef.current = null;
-      voiceGenerationRef.current = null;
-      voiceCaretRef.current = null;
-    } else if (next.phase === "listening" && voiceGenerationRef.current !== next.generation) {
-      acceptedVoiceCaptionRef.current = null;
-      voiceGenerationRef.current = next.generation;
-      if (appendVoiceSessionRef.current) {
-        const end = inputValueRef.current.length;
-        voiceCaretRef.current = { start: end, end };
-      } else {
-        const field = inputRef.current;
-        voiceCaretRef.current = field
-          ? { start: field.selectionStart, end: field.selectionEnd }
-          : { start: inputValueRef.current.length, end: inputValueRef.current.length };
-      }
-    }
-    setVoiceState(next);
-  }
+  const [restoredDraft] = useState(() => loadDraftEntry(scope, paneId));
+  const [input, setInput] = useState(restoredDraft?.text ?? "");
+  // The attachments waiting as chips above the field (ADR 0060), and the number the next one gets.
+  // Each chip's `[Image #N]` / `[File #N]` marker sits in `input` where it was added; Send swaps
+  // the marker for the chip's path (lib/attachments.ts, `composeLine`). Refs beside the state for
+  // the same reason `inputValueRef` exists: the write-through reads them in the tick they change.
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>(restoredDraft?.attachments ?? []);
+  const attachmentsRef = useRef<ComposerAttachment[]>(attachments);
+  const nextAttachmentRef = useRef(restoredDraft?.next ?? 1);
+  // Where the caret last stood in the field, so an upload that lands after the field lost focus (a
+  // native picker took it) still puts its marker where the operator was. Null means "no caret
+  // yet", which puts the marker at the end.
+  const caretRef = useRef<number | null>(null);
   // Mirror of `input` for the write-through path: updateInput needs the previous value to apply a
   // functional update AND to persist the result, without either reading stale state or doing the
   // save inside a (double-invoked) state updater.
   const inputValueRef = useRef(input);
-  const attachmentsRef = useRef<DraftAttachment[]>(attachments);
-  attachmentsRef.current = attachments;
-  // Which pane the current `input` and attachments belong to. DetailRoute keys AgentChat by paneId,
-  // so in the app a pane→pane navigation remounts this component and the lazy initialisers above do
-  // the work — but the component must not depend on that: if it is ever rendered with a changed
-  // paneId/session in place, the effect below saves the outgoing pane's draft and loads the incoming
-  // one, so pane A's text and files can never surface in pane B.
+  // Which pane the current `input` belongs to. DetailRoute keys AgentChat by paneId, so in the app a
+  // pane→pane navigation remounts this component and the lazy initialiser above does the work — but
+  // the component must not depend on that: if it is ever rendered with a changed paneId/session in
+  // place, the effect below saves the outgoing pane's draft and loads the incoming one, so pane A's
+  // text can never surface in pane B.
   // Compared by VALUE (its cache key), never by object identity: a scope is a value passed as an
   // object, and an identity compare here would re-run the save/restore below on every poll.
   const scopeId = scopeKey(scope);
-  const paneKey = `${scopeId}\0${paneId}`;
-  const paneKeyRef = useRef(paneKey);
-  paneKeyRef.current = paneKey;
   const draftPaneRef = useRef({ scope, scopeId, paneId });
 
   /**
-   * Set the draft AND persist it. Every write to `input` or attachments goes through here — empty
-   * text with no files removes the stored key, while attachment-only drafts remain sendable.
+   * Set the draft AND persist it. Every write to `input` goes through here — an empty value removes
+   * the stored key, so the deliberate-clear paths (verified send, user emptying the box) need no
+   * special case.
    *
    * PERSISTENCE STOPS while a password prompt is on screen (#103). By the time the notice appears the
-   * secret is already in the 48h store — the write-through ran on every keystroke, before any send
-   * was attempted — so `noEchoRef` gates the save AND the pane-leave save below.
+   * secret is already in the 48h store — the write-through ran on every keystroke, before any send was
+   * attempted — so `noEchoRef` gates the save AND the pane-leave save below, and the outcome that sets
+   * it removes the stored copy outright. The button was never enough: the operator who taps Send,
+   * gives up and walks to a laptop (which is exactly what #103 reports doing, for three days) never
+   * presses anything, and the pane-leave path would have re-saved it on the way out.
+   *
+   * Gating on a REF, not the state, because the two must change in the same tick as the outcome that
+   * decides it — a render behind is a render in which the next keystroke is still being stored.
+   * The in-memory draft is untouched: a false positive costs one draft its ability to survive the OS
+   * killing the PWA, which is a cheap price for never storing a real one.
    */
-  function updateDraft(value: string, nextAttachments: readonly DraftAttachment[]) {
-    const storedAttachments = [...nextAttachments];
-    inputValueRef.current = value;
-    attachmentsRef.current = storedAttachments;
-    setInput(value);
-    setAttachments(storedAttachments);
-    if (noEchoRef.current !== null) return;
-    saveDraft(scope, paneId, value, storedAttachments);
-  }
-
   function updateInput(value: string) {
-    updateDraft(value, attachmentsRef.current);
+    inputValueRef.current = value;
+    setInput(value);
+    persistDraft();
   }
 
-  function updateAttachments(nextAttachments: readonly DraftAttachment[]) {
-    updateDraft(inputValueRef.current, nextAttachments);
+  /** The write-through, text and chips together. The chip writers (addAttachment, removeAttachment,
+   *  clearComposedDraft) set the chip ref first and then write the text through updateInput, so
+   *  one save carries both. An empty draft (no text, no chips) also forgets its chip
+   *  numbering, so the next draft starts at #1 again; lib/drafts.ts forgets it on disk the same way. */
+  function persistDraft() {
+    if (inputValueRef.current.trim() === "" && attachmentsRef.current.length === 0) {
+      nextAttachmentRef.current = 1;
+    }
+    if (noEchoRef.current !== null) return;
+    saveDraft(scope, paneId, inputValueRef.current, attachmentsRef.current, nextAttachmentRef.current);
   }
 
   /** {@link updateInput} for the appenders, which need the current value to build the next one.
@@ -371,29 +411,31 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const prev = draftPaneRef.current;
     if (prev.paneId === paneId && prev.scopeId === scopeId) return;
     if (noEchoRef.current === null) {
-      saveDraft(prev.scope, prev.paneId, inputValueRef.current, attachmentsRef.current);
+      saveDraft(prev.scope, prev.paneId, inputValueRef.current, attachmentsRef.current, nextAttachmentRef.current);
     }
+    // The outgoing pane's previews die here: its chips come back from the store as icon tiles.
+    for (const attachment of attachmentsRef.current) revokePreview(attachment);
     draftPaneRef.current = { scope, scopeId, paneId };
-    const restored = loadDraft(scope, paneId) ?? "";
-    const restoredAttachments = loadDraftAttachments(scope, paneId);
-    inputValueRef.current = restored;
-    attachmentsRef.current = restoredAttachments;
-    setInput(restored);
-    setAttachments(restoredAttachments);
+    const restored = loadDraftEntry(scope, paneId);
+    inputValueRef.current = restored?.text ?? "";
+    setInput(inputValueRef.current);
+    attachmentsRef.current = restored?.attachments ?? [];
+    setAttachments(attachmentsRef.current);
+    nextAttachmentRef.current = restored?.next ?? 1;
+    caretRef.current = null;
+    setPreviewDismissed(false); // it was about the pane we just left
     noticeNoEchoRef.current(null); // it described the pane we just left
   }, [scope, scopeId, paneId]);
   const [sending, setSending] = useState(false);
-  const [pendingUploads, setPendingUploads] = useState(0);
-  const uploading = pendingUploads > 0;
+  const [uploading, setUploading] = useState(false);
   // Pending-send preview: set on a successful send, cleared when the mirror catches up (next text
   // update) or after a 6s safety timeout. Shows "You sent: …" so the user knows the message landed.
   const [lastSent, setLastSent] = useState<string | null>(null);
   const [justSent, setJustSent] = useState(false); // brief ✓ on the send button after a send
   // Terminal-draft preview bookkeeping. The composer input is EXCLUSIVELY phone-owned — a host draft
   // is never written into it implicitly; it only surfaces in a read-only preview the user can
-  // deliberately Take over. There is no user-facing dismiss — the preview is honest state (a draft
-  // really is stranded on the host's line), so it stays visible until the host line clears, the user
-  // takes it over, or the user sends. `handledKey` is the NORMALISED text the user has handled (took
+  // deliberately Take over. The x (ADR 0061) hides it until the host line clears; otherwise it stays
+  // visible until the host line clears, the user takes it over, or the user sends. `handledKey` is the NORMALISED text the user has handled (took
   // over or sent) — the preview stays hidden while the live draft still normalises to it, so it can't
   // re-latch onto the same text we just copied/sent (the raw line still holds it until the host clears
   // or Enter lands); a genuinely different draft is fair game again. `previewLatched` is the show/hide
@@ -402,9 +444,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // below).
   const [handledKey, setHandledKey] = useState<string | null>(null);
   const [previewLatched, setPreviewLatched] = useState(false);
+  // The notice's x (ADR 0061): hidden until the terminal draft is gone. Not keyed on the text, so a
+  // host that keeps typing into the same line keeps it hidden; the line clearing (below, where the
+  // latch drops) is the only thing that lifts it. In memory and per pane: the pane-change effect
+  // resets it, and nothing stores it.
+  const [previewDismissed, setPreviewDismissed] = useState(false);
   // Composer sheets are mutually exclusive — at most one open (Keys / Quick / Agent / Display).
   const [drawer, setDrawer] = useState<ComposerDrawer>(null);
-  const [keyView, setKeyView] = useState<NavTrayView>("keys");
   // Keys staged in the (unmounted-on-close) NavTray, pushed up so leaving the Keys dock can guard a
   // composed sequence. See requestDrawer.
   const [queuedKeys, setQueuedKeys] = useState(0);
@@ -504,6 +550,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // is the feature being off: no button at all, not a disabled one.
   const stt = useSttCapability();
   const voiceEnabled = useVoiceCapability();
+  const [voiceRecordingMode, setVoiceRecordingMode] = useState<api.VoiceRecordingMode | null>(null);
   const handsFree = useHandsFree();
   // The microphone is armed state, and it obeys the same rules as "Type into terminal": it dies on a
   // pane switch, on any composer lock, and on a hidden page, and it is never persisted. The clip is
@@ -517,42 +564,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onError: (message) => setStatus(message, "error"),
   });
   useEffect(() => {
-    setVoiceRecordingMode(null);
-    if (!voiceEnabled) return;
-    let disposed = false;
-    let controller: AbortController | null = null;
-    const refresh = () => {
-      if (document.visibilityState === "hidden") return;
-      controller?.abort();
-      const nextController = new AbortController();
-      controller = nextController;
-      void api.fetchVoicePreferences(nextController.signal).then((prefs) => {
-        if (prefs.recordingMode !== "hold" && prefs.recordingMode !== "toggle") {
-          throw new Error("Voice recording mode unavailable");
-        }
-        if (disposed || controller !== nextController) return;
-        voiceModeErrorRef.current = "Voice recording mode unavailable";
-        setVoiceRecordingMode(prefs.recordingMode);
-      }).catch((error: unknown) => {
-        if (disposed || controller !== nextController || (error instanceof DOMException && error.name === "AbortError")) return;
-        voiceModeErrorRef.current = error instanceof Error ? error.message : "Voice recording mode unavailable";
-        setVoiceRecordingMode(null);
+    if (!voiceEnabled) {
+      setVoiceRecordingMode(null);
+      return;
+    }
+    const controller = new AbortController();
+    void api.fetchVoicePreferences(controller.signal)
+      .then((value) => setVoiceRecordingMode(value.recordingMode))
+      .catch((error: unknown) => {
+        if (!(error instanceof DOMException && error.name === "AbortError")) setStatus(describeThrownError(error), "error");
       });
-    };
-    const onFocus = () => refresh();
-    const timer = window.setInterval(refresh, 5_000);
-    window.addEventListener("focus", onFocus);
-    refresh();
-    return () => {
-      disposed = true;
-      controller?.abort();
-      window.clearInterval(timer);
-      window.removeEventListener("focus", onFocus);
-      if (appendHoldTimerRef.current !== null) {
-        window.clearTimeout(appendHoldTimerRef.current);
-        appendHoldTimerRef.current = null;
-      }
-    };
+    return () => controller.abort();
   }, [voiceEnabled]);
   // ── THE ORBIT TURNS WHILE THE OPERATOR'S WORK IS IN FLIGHT (lib/busy.ts) ───────────────────────
   //
@@ -568,28 +590,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // so, in words, and a spinning mark would claim the phone was busy while it waits on a human.
   useBusyWhile(sending);
   useBusyWhile(uploading);
-  const voiceCaption =
-    voiceState?.caption?.role === "user" &&
-    voiceState.caption.text !== acceptedVoiceCaptionRef.current
-      ? voiceState.caption.text
-      : null;
-  const displayedInput = voiceCaption === null ? input : input ? `${input}\n${voiceCaption}` : voiceCaption;
-  const hasDraft = input.trim() !== "" || attachments.length > 0;
-  useEffect(() => {
-    const field = inputRef.current;
-    if (field && voiceCaption !== null) field.scrollTop = field.scrollHeight;
-  }, [voiceCaption]);
   useBusyWhile(recorder.phase === "transcribing");
 
   // Whether the round button at the end of the row is the microphone rather than Send. True only on
-  // an EMPTY box with no uploaded files, which is the one state where Send can do nothing anyway.
-  // `direct.active` keeps it, because there the same button is the "stop typing into the terminal"
-  // control and that must not be displaceable.
+  // an EMPTY box, which is the one state where Send can do nothing anyway; the first character typed
+  // hands the button straight back. `direct.active` keeps it, because there the same button is the
+  // "stop typing into the terminal" control and that must not be displaceable.
+  // A chip is something to send (ADR 0060), so a box holding only chips shows Send, not the mic.
+  const hasDraft = input.trim() !== "" || attachments.length > 0;
+  const customVoiceVisible = voiceEnabled && !direct.active && !hasDraft;
   const micIsPrimary = !voiceEnabled && stt !== null && !direct.active && !hasDraft;
-  const customVoiceVisible =
-    voiceEnabled &&
-    !direct.active &&
-    (!hasDraft || (voiceState !== null && input.trim() !== "" && !appendVoiceActive && !appendMicSelected));
 
   /**
    * What happens to a finished transcript.
@@ -609,33 +619,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
    *  • **The composer can't send at all** (locked, or a dialog owns the keyboard). `send()` would
    *    refuse anyway; inserting keeps the words.
    */
-  async function acceptTranscript(transcript: string): Promise<boolean> {
-    acceptedVoiceCaptionRef.current = transcript;
+  function acceptTranscript(transcript: string) {
     const draftEmpty = inputValueRef.current.trim() === "" && attachmentsRef.current.length === 0;
     const mayHandsFree =
       handsFree && draftEmpty && noEchoRef.current === null && !locked && !dialogPresent;
     if (mayHandsFree) {
-      updateInput(transcript);
-      return send(transcript, true);
+      void send(transcript, false);
+      return;
+    }
+    insertTranscript(transcript);
+  }
+
+  async function acceptVoiceTranscript(transcript: string): Promise<boolean> {
+    const draftEmpty = inputValueRef.current.trim() === "" && attachmentsRef.current.length === 0;
+    if (handsFree && draftEmpty && noEchoRef.current === null && !locked && !dialogPresent) {
+      return send(transcript, false);
     }
     insertTranscript(transcript);
     return false;
-  }
-  async function handleVoiceTranscript(transcript: string): Promise<boolean> {
-    try {
-      return await acceptTranscript(transcript);
-    } finally {
-      if (appendVoiceSessionRef.current) {
-        appendVoiceSessionRef.current = false;
-        setAppendVoiceActive(false);
-      }
-    }
-  }
-
-  function handleVoiceError(message: string): void {
-    appendVoiceSessionRef.current = false;
-    setAppendVoiceActive(false);
-    setStatus(message, "error");
   }
 
   /** Splice a transcript into the draft AT THE CARET (the field is where the operator left it, and
@@ -645,9 +646,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     direct.deactivateSilently();
     const el = inputRef.current;
     const prev = inputValueRef.current;
-    const start = voiceCaretRef.current?.start ?? el?.selectionStart ?? prev.length;
-    const end = voiceCaretRef.current?.end ?? el?.selectionEnd ?? prev.length;
-    voiceCaretRef.current = null;
+    const start = el?.selectionStart ?? prev.length;
+    const end = el?.selectionEnd ?? prev.length;
     const before = prev.slice(0, start);
     const after = prev.slice(end);
     const inserted = before !== "" && !/\s$/.test(before) ? ` ${transcript}` : transcript;
@@ -707,7 +707,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       if (sentTimer.current) clearTimeout(sentTimer.current);
       if (lastSentTimerRef.current) clearTimeout(lastSentTimerRef.current);
       if (keyRevalidateTimer.current) clearTimeout(keyRevalidateTimer.current);
-      if (appendHoldTimerRef.current !== null) window.clearTimeout(appendHoldTimerRef.current);
+      for (const attachment of attachmentsRef.current) revokePreview(attachment);
     },
     [],
   );
@@ -724,6 +724,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   // Block a self-update reload while there's unsent work here: real typed text OR an upload in flight.
   // The composer input is phone-owned, so any non-empty value is genuine unsent work. A terminal draft
+  // is SAFE on its own — it lives on the "❯" line and its preview re-derives after a reload — so it
+  // never holds. When held, the self-updater shows the "tap to update" banner instead and updates once
+  // the hold clears (see lib/self-update.ts). Keyed by pane so panes don't clobber each other's hold.
   useHoldReload(
     `composer:${paneId}`,
     hasDraft || direct.active || direct.value !== "" || direct.busy || uploading,
@@ -751,6 +754,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (effectiveRaw === null) {
       setPreviewLatched(false);
       setHandledKey(null);
+      setPreviewDismissed(false);
     }
   }, [effectiveRaw]);
 
@@ -763,6 +767,30 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Take over (a local text copy); only the actual Send stays gated.
   const showPreview =
     !gone && previewLatched && effectiveRaw !== null && normalizeDraft(effectiveRaw) !== handledKey;
+
+  // The floating notice (ADR 0061). The wrapper passes touches through (`pointer-events-none`) and
+  // the notice takes them back, so the mirror under the empty part of the slot still scrolls.
+  // Portalled into the pane view's slot when there is one; otherwise it floats above this
+  // composer's own top edge.
+  const draftNotice =
+    showPreview && !previewDismissed && effectiveRaw !== null ? (
+      <div
+        data-slot="terminal-draft-notice"
+        className={cn(
+          "pointer-events-none",
+          draftNoticeSlot ? undefined : "absolute inset-x-3 bottom-full z-20 mb-2",
+        )}
+      >
+        <TerminalDraftPreview
+          text={effectiveRaw}
+          // No Take over when the line is only the harness's own opaque token (Claude's
+          // `[Pasted text #N +M lines]`): pulling that into the composer would send the literal
+          // string. The preview keeps showing it — the screen really does say that.
+          onTakeOver={adapter?.draftIsOpaque?.(effectiveRaw) ? null : takeOverDraft}
+          onDismiss={() => setPreviewDismissed(true)}
+        />
+      </div>
+    ) : null;
 
   // Take over: the explicit "I'll handle this on mobile now" action. One-shot COPY of the current raw
   // draft into the composer (set on an empty input, else appended on a new line so mobile-typed work
@@ -845,10 +873,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // submit key went out). The quick-reply grid consumes the verdict to drive its own ✓ and to decide
   // whether to close its dock, so every early return below has to answer honestly.
   async function send(value: string, isDraft: boolean, force = false): Promise<boolean> {
-    const draftAttachments = isDraft ? attachmentsRef.current : [];
-    const message = isDraft ? attachmentMessage(value, draftAttachments) : value;
-    const t = message.trim();
-    if (!t || locked || sending || uploading) return false;
+    const t = value.trim();
+    if (!t || locked || sending) return false;
     // A dialog on screen owns the TUI's keyboard: our text is swallowed and the submit key ANSWERS
     // the dialog, approving whatever option was highlighted (#34). Refuse BEFORE the destructive
     // pre-clear sweep below — those ctrl+k/Backspaces would land in the dialog too. The input is
@@ -856,8 +882,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     // queue-and-auto-send, because the text may be a reaction to state the dialog just changed —
     // sending is consent, and the conditions moved.
     if (dialogPresent) {
-      setStatus(translate("composer.status.dialogWaiting"), "error");
-      return false;
+      // A READ dialog is a parsed fact: the refusal stands flat, and the way through it is its own
+      // buttons.
+      if (!dialogUnread) {
+        setStatus(translate("composer.status.dialogWaiting"), "error");
+        return false;
+      }
+      // The unread card is the one dialog whose refusal is not the end of the conversation. Its four
+      // conditions are heuristics about a screen NOTHING could read (.adr/0053), and a splash or an
+      // alt-screen tool can trip all four — so the first Send arms the SAME deliberate second-tap
+      // override a `blocked` pre-flight arms below (.adr/0009's "A second Send overrides it
+      // deliberately") and names the key the card is offering. The second tap arrives here with
+      // `force` already set by onSendClick and falls through to type.
+      if (!force) {
+        forceConfirm.confirm("force");
+        setStatus(
+          translate("composer.status.unreadDialog", { key: keyLabel(adapter?.cancelKey ?? "") }),
+          "error",
+        );
+        return false;
+      }
     }
     setSending(true);
     // The operator has just acted on this pane, so the poller should watch it land. Stamped HERE —
@@ -946,9 +990,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         },
       });
       if (res.status === "sent") {
-        // Phone-owned draft state — clear text and metadata only after the guarded reply is verified.
-        // Quick replies and palette commands pass `isDraft=false`, so they never consume attachments.
-        if (isDraft) updateDraft("", []);
+        // Phone-owned input — cleared once the reply is on its way. Via updateInput, so the stored
+        // draft goes with it (an empty value removes the key).
+        // The chips go with the text: their paths were in the line that just went out.
+        if (isDraft) clearComposedDraft();
         // Remember what/when we sent, so the next few polls recognise this text echoing on the "❯"
         // line as our own in-flight reply rather than a stranded draft (suppressEcho above).
         lastSentRef.current = { text: t, at: Date.now() };
@@ -1016,15 +1061,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // "Really send?" state instead of sending; the confirming second tap goes through. Non-destructive
   // input sends immediately (and any stray armed state is cleared).
   function onSendClick() {
-    if (!hasDraft || uploading) return;
     // An armed override takes precedence: this tap IS the deliberate "type anyway", so it skips the
     // destructive re-confirm (already answered on the tap that got blocked) and the pre-flight.
+    // The line the terminal gets: every chip's marker swapped for its path (ADR 0060). Both the
+    // destructive check and the send read THIS, never the draft with its markers in it.
+    const line = composeLine(input, attachments);
     if (forceConfirm.pending === "force") {
       forceConfirm.reset();
-      send(input, true, true);
+      send(line, true, true);
       return;
     }
-    const reason = isDestructiveInput(input);
+    const reason = isDestructiveInput(line);
     if (reason && !sendConfirm.confirm("send")) {
       // On a crew the confirm names the machine as well as the pattern: "rm -r" is a different
       // sentence depending on whose disk it runs on, and this line is the last thing read before the
@@ -1038,145 +1085,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     sendConfirm.reset();
-    send(input, true);
+    send(line, true);
   }
   const confirmingSend = sendConfirm.pending === "send";
   const forcingSend = forceConfirm.pending === "force";
-  const appendVoiceEligible =
-    voiceEnabled &&
-    input.trim() !== "" &&
-    !direct.active &&
-    !locked &&
-    !sending &&
-    !uploading &&
-    !dialogPresent &&
-    !confirmingSend &&
-    !forcingSend;
-  const appendVoiceEligibleRef = useRef(false);
-  appendVoiceEligibleRef.current = appendVoiceEligible;
-
-  function clearAppendHoldTimer(): void {
-    if (appendHoldTimerRef.current === null) return;
-    window.clearTimeout(appendHoldTimerRef.current);
-    appendHoldTimerRef.current = null;
-  }
-
-  function startAppendVoice(): void {
-    appendVoiceSessionRef.current = true;
-    setAppendVoiceActive(true);
-    const end = inputValueRef.current.length;
-    voiceCaretRef.current = { start: end, end };
-    voiceInputRef.current?.start();
-  }
-
-  function beginAppendHold(source: "pointer" | "keyboard", pointerId?: number): void {
-    if (!appendVoiceEligible || appendHoldSourceRef.current !== null) return;
-    appendHoldSourceRef.current = source;
-    appendHoldPointerRef.current = pointerId ?? null;
-    appendHoldModeRef.current = voiceRecordingMode;
-    appendHoldSelectedRef.current = appendMicSelected;
-    suppressSendClickRef.current = false;
-    appendHoldTimerRef.current = window.setTimeout(() => {
-      appendHoldTimerRef.current = null;
-      if (appendHoldSourceRef.current !== source || !appendVoiceEligibleRef.current) {
-        appendHoldSourceRef.current = null;
-        appendHoldPointerRef.current = null;
-        appendHoldModeRef.current = null;
-        return;
-      }
-      appendHoldStartedRef.current = true;
-      if (appendHoldModeRef.current === "hold") {
-        startAppendVoice();
-      } else if (appendHoldModeRef.current === "toggle") {
-        setAppendMicSelected(!appendHoldSelectedRef.current);
-        if (appendHoldSelectedRef.current && appendVoiceSessionRef.current) voiceInputRef.current?.stop();
-      } else {
-        setStatus(voiceModeErrorRef.current, "error");
-      }
-    }, VOICE_HOLD_MS);
-  }
-
-  function finishAppendHold(commit: boolean): boolean {
-    const started = appendHoldStartedRef.current;
-    const mode = appendHoldModeRef.current;
-    clearAppendHoldTimer();
-    appendHoldSourceRef.current = null;
-    appendHoldPointerRef.current = null;
-    appendHoldModeRef.current = null;
-    appendHoldStartedRef.current = false;
-    if (!started) {
-      if (!commit) suppressSendClickRef.current = true;
-      return false;
-    }
-    suppressSendClickRef.current = true;
-    if (mode === "hold") {
-      if (commit) voiceInputRef.current?.stop();
-      else {
-        appendVoiceSessionRef.current = false;
-        setAppendVoiceActive(false);
-        voiceInputRef.current?.cancel();
-      }
-    }
-    return true;
-  }
-
-  function handleAppendPointerDown(event: PointerEvent<HTMLButtonElement>): void {
-    if (event.button !== 0 || !appendVoiceEligible) return;
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Pointer capture is unavailable in a few embedded webviews; the timer still guards the click.
-    }
-    beginAppendHold("pointer", event.pointerId);
-  }
-
-  function handleAppendPointerUp(event: PointerEvent<HTMLButtonElement>): void {
-    if (appendHoldSourceRef.current !== "pointer" || appendHoldPointerRef.current !== event.pointerId) return;
-    finishAppendHold(true);
-  }
-
-  function handleAppendPointerCancel(event: PointerEvent<HTMLButtonElement>): void {
-    if (appendHoldSourceRef.current !== "pointer" || appendHoldPointerRef.current !== event.pointerId) return;
-    finishAppendHold(false);
-  }
-
-  function handleAppendKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
-    if (!appendVoiceEligible || event.repeat || (event.key !== "Enter" && event.key !== " ")) return;
-    event.preventDefault();
-    beginAppendHold("keyboard");
-  }
-
-  function handleAppendKeyUp(event: KeyboardEvent<HTMLButtonElement>): void {
-    if (appendHoldSourceRef.current !== "keyboard" || (event.key !== "Enter" && event.key !== " ")) return;
-    event.preventDefault();
-    if (!finishAppendHold(true)) handlePrimaryClick();
-  }
-
-  function handleAppendBlur(): void {
-    if (appendHoldSourceRef.current === "keyboard") finishAppendHold(false);
-  }
-
-  function handleAppendMicClick(): void {
-    if (voiceRecordingMode !== "toggle") {
-      handleVoiceError(voiceModeErrorRef.current);
-      return;
-    }
-    if (appendVoiceSessionRef.current) voiceInputRef.current?.stop();
-    else startAppendVoice();
-  }
-
-  function handlePrimaryClick(): void {
-    if (suppressSendClickRef.current) {
-      suppressSendClickRef.current = false;
-      return;
-    }
-    if (appendMicSelected) {
-      handleAppendMicClick();
-      return;
-    }
-    if (appendVoiceSessionRef.current) return;
-    onSendClick();
-  }
 
   // Coalesce revalidations from a burst of key presses, LEADING edge first: the first press in a
   // burst refetches immediately, and only presses that arrive inside the window collapse into one
@@ -1233,85 +1145,118 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     focusInputEnd();
   }
 
-  // Upload an attachment; successful uploads become metadata cards while the returned host path is
-  // kept only for the guarded message sent later. Shared by the file picker and clipboard paste.
+  // Upload an attachment; on success it becomes a chip above the field, and its marker lands in the
+  // draft where the caret stood (ADR 0060). Shared by the file picker and clipboard paste.
   //
   // The two local refusals below are an ECONOMY, never a gate: the bridge asks the same two
   // questions again on arrival, and its answer is the one that counts (it can read the bytes, which
   // is the only way to catch a binary wearing a `.md` name). Spending a phone's uplink on 40 MB to
   // be told 10 is the limit is the thing worth not doing.
-  const pastedTextSequenceRef = useRef(0);
-  async function uploadFile(
-    file: File,
-    pasteFallback?: {
-      text: string;
-      original: string;
-      start: number;
-      end: number;
-      paneKey: string;
-    },
-  ) {
-    if (locked || sending) return;
-    const uploadPaneKey = paneKeyRef.current;
-    const restorePastedText = () => {
-      if (!pasteFallback || paneKeyRef.current !== uploadPaneKey) return;
-      const current = inputValueRef.current;
-      const restored =
-        current === pasteFallback.original
-          ? `${current.slice(0, pasteFallback.start)}${pasteFallback.text}${current.slice(pasteFallback.end)}`
-          : current === ""
-            ? pasteFallback.text
-            : `${current}\n${pasteFallback.text}`;
-      updateInput(restored);
-      focusInputEnd();
-    };
+  async function uploadFile(file: File) {
+    if (locked) return;
     const refusal = rejectAttachment(file, limits);
     if (refusal === "tooLarge") {
       setStatus(translate("composer.upload.tooLarge", { max: limitMb(limits) }), "error");
-      restorePastedText();
       return;
     }
     if (refusal === "badType") {
       setStatus(translate("composer.upload.badType", { name: file.name }), "error");
-      restorePastedText();
       return;
     }
-    setPendingUploads((count) => count + 1);
+    setUploading(true);
     try {
       const res = await api.uploadFile(paneId, file, scope);
-      if (paneKeyRef.current !== uploadPaneKey) return;
       if (res.ok) {
-        updateAttachments([
-          ...attachmentsRef.current,
-          { path: res.path, name: file.name, size: file.size },
-        ]);
         direct.deactivateSilently();
-        focusInputEnd();
+        addAttachment(file, res.path);
         setStatus(translate("composer.upload.success"), "success");
       } else {
         setStatus(describeApiError(res), "error");
-        restorePastedText();
       }
     } catch (err) {
-      if (paneKeyRef.current !== uploadPaneKey) return;
       setStatus(describeThrownError(err), "error");
-      restorePastedText();
     } finally {
-      setPendingUploads((count) => Math.max(0, count - 1));
+      setUploading(false);
     }
   }
 
-  async function onPickFile(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = ""; // allow re-picking the same file
-    if (!file) return;
-    await uploadFile(file);
+  /**
+   * A finished upload joins the draft: a chip with the next number, and its marker at the caret.
+   *
+   * The caret is the field's own while it has focus (the attach button keeps focus on the field by
+   * refusing its own `pointerdown`), else the last one `caretRef` saw, else the end. After the
+   * insert the caret stands past the marker, so a multi-photo pick lays its markers down in pick
+   * order, each after the one before.
+   */
+  function addAttachment(file: File, path: string) {
+    const n = nextAttachmentRef.current;
+    nextAttachmentRef.current = n + 1;
+    const kind = attachmentKind(file, limits);
+    const attachment: ComposerAttachment = { n, path, name: file.name, kind };
+    if (kind === "image") {
+      const previewUrl = makePreview(file);
+      if (previewUrl !== undefined) attachment.previewUrl = previewUrl;
+    }
+    const field = inputRef.current;
+    const caret =
+      field !== null && document.activeElement === field ? field.selectionStart : caretRef.current;
+    const placed = insertMarker(inputValueRef.current, caret, markerFor(attachment));
+    attachmentsRef.current = [...attachmentsRef.current, attachment];
+    setAttachments(attachmentsRef.current);
+    caretRef.current = placed.caret;
+    updateInput(placed.text);
+    focusInputAt(placed.caret);
   }
 
-  // A file in the clipboard is uploaded as-is. Large plain text is converted to a .txt attachment;
-  // short prose still uses the browser's native paste path.
+  /** The chip's x: the chip goes, and so does its marker (with one space beside it). Deleting the
+   *  marker by hand instead keeps the chip, and Send puts its path in front (`composeLine`). */
+  function removeAttachment(attachment: ComposerAttachment) {
+    revokePreview(attachment);
+    attachmentsRef.current = attachmentsRef.current.filter((a) => a.n !== attachment.n);
+    setAttachments(attachmentsRef.current);
+    caretRef.current = null;
+    updateInput(removeMarker(inputValueRef.current, markerFor(attachment)));
+  }
+
+  /** After a verified send: the text, the chips and their previews all go, and numbering restarts. */
+  function clearComposedDraft() {
+    for (const attachment of attachmentsRef.current) revokePreview(attachment);
+    attachmentsRef.current = [];
+    setAttachments([]);
+    caretRef.current = null;
+    updateInput("");
+  }
+
+  function focusInputAt(caret: number) {
+    setTimeout(() => {
+      const field = inputRef.current;
+      if (!field) return;
+      field.focus();
+      field.setSelectionRange(caret, caret);
+    }, 0);
+  }
+
+  /** Remember the caret whenever the field reports one, so a marker can land there later. */
+  function rememberCaret(e: { currentTarget: HTMLTextAreaElement }) {
+    caretRef.current = e.currentTarget.selectionStart;
+  }
+
+  async function onPickFile(e: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-picking the same file(s)
+    for (const file of files) {
+      await uploadFile(file);
+    }
+  }
+
+  // Paste a file straight from the clipboard (e.g. a screenshot) the same way the picker does.
+  //
+  // A PLAIN TEXT PASTE STILL FALLS THROUGH UNTOUCHED, and that stays true now that text files are
+  // attachable: the branch turns on `item.kind === "file"`, so pasted PROSE is prose and only a
+  // pasted FILE becomes an upload. Copying a `.md` in a file manager produces the second; selecting
+  // its contents in an editor produces the first, and neither has become the other.
   function onPasteFile(e: ClipboardEvent<HTMLTextAreaElement>) {
-    if (locked || direct.active || sending) return;
+    if (locked || direct.active) return;
     const items = e.clipboardData.items;
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -1323,27 +1268,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       void uploadFile(file);
       return;
     }
-    const text = e.clipboardData.getData("text/plain");
-    if (!shouldAttachPaste(text)) return;
-    e.preventDefault();
-    const current = inputValueRef.current;
-    const field = inputRef.current;
-    const start = field?.selectionStart ?? current.length;
-    const end = field?.selectionEnd ?? start;
-    const sequence = ++pastedTextSequenceRef.current;
-    const file = new File([text], `pasted-text-${Date.now()}-${sequence}.txt`, { type: "text/plain" });
-    void uploadFile(file, { text, original: current, start, end, paneKey: paneKeyRef.current });
-  }
-  function removeAttachment(index: number) {
-    if (locked || direct.active || sending) return;
-    updateAttachments(attachmentsRef.current.filter((_, current) => current !== index));
   }
 
   return (
     <>
       <div
         className={cn(
-          "bg-chrome px-3",
+          // `relative` anchors the floating draft notice when no slot was handed in (ADR 0061).
+          "relative bg-chrome px-3",
           // See `composing` on the props above: the inset reserves room for the home indicator, and
           // while the keyboard is up the keyboard is already covering it. Paying it twice costs
           // ~24px on the one screen that has none.
@@ -1371,6 +1303,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
         {/* File input stays mounted here (not inside the keyboard-only key row) so the picker
             callback survives the keyboard collapsing. Attach fires it from the reply-input row
+            below (always visible, not gated behind the keyboard-open quick keys); structural commands
             (New tab/space, Kill) and Stop (Esc, in the Keys dock) live elsewhere. */}
         {/* TWO inputs, because a phone's picker cannot be asked both questions at once. The
             camera roll is offered only when EVERY entry in `accept` maps to a gallery, so the
@@ -1378,7 +1311,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             both Android and iOS — the attach button opened the file browser and nothing else.
             `PHOTO_ACCEPT` is the first input's whole answer; the second keeps the full list. Which
             one fires is the sheet's question, and both land in the same `onPickFile`. */}
-        <input ref={photoRef} data-testid="attach-photos" type="file" accept={PHOTO_ACCEPT} hidden onChange={onPickFile} />
+        <input ref={photoRef} data-testid="attach-photos" type="file" accept={PHOTO_ACCEPT} multiple hidden onChange={onPickFile} />
         <input ref={fileRef} data-testid="attach-files" type="file" accept={accept} hidden onChange={onPickFile} />
 
         {/* Keys / Quick / Display dock — a single in-flow site ABOVE the Controls row (so the toggle
@@ -1391,25 +1324,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <ComposerDock
             title={translate("composer.controls.keys")}
             host={writeHost}
-            controls={
-              <div className="flex min-w-0 gap-0.5" role="group" aria-label="Keypad view">
-                {(["keys", "digits", "presets", "fkeys"] as const).map((view) => (
-                  <Button
-                    key={view}
-                    variant={keyView === view ? "secondary" : "ghost"}
-                    className="h-11 px-2 text-xs"
-                    aria-pressed={keyView === view}
-                    onClick={() => setKeyView(view)}
-                  >
-                    {{ keys: "Keys", digits: "123", presets: "Presets", fkeys: "F keys" }[view]}
-                  </Button>
-                ))}
-              </div>
-            }
             onClose={closeDrawer}
           >
             <NavTray
-              view={keyView}
               // The chords THIS multiplexer refuses (M10/06). A key is not a capability: the Keys
               // door is `sendKeys` (the lock above), and this is the list of holes behind it, so a
               // refused chord greys its own button instead of being discovered by a failed send.
@@ -1428,7 +1345,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               onClose={closeDrawer}
               agent={agent}
               isShell={isShell}
-              disabled={locked || sending || uploading}
+              disabled={locked || sending}
             />
           </ComposerDock>
         )}
@@ -1436,6 +1353,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <ComposerDock title={translate("composer.controls.display")} onClose={closeDrawer}>
             <DisplayPrefsContent
               prefs={prefs}
+              mirrorNative={mirrorNative}
+              setMirrorNative={setMirrorNative}
               setWrap={setWrap}
               stepFontSize={stepFontSize}
               setRawTerminal={setRawTerminal}
@@ -1444,71 +1363,143 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             />
           </ComposerDock>
         )}
-        {/* The upstream action belt is the single owner of Keys, Type, Quick, Agent, display
-            settings, harness commands, and the pane switcher. The docks above stay in-flow; this
-            row only chooses their callbacks and state. */}
+        {/* The one action row: Keys · Quick · Agent · ⚙ (Agent only when the pane's agent has
+            commands). Display prefs used to sit on a second, permanent icon-only "View" row above
+            this one; folding them behind the ⚙ gives the mirror that row back. The gear is icon-only
+            and NOT flex-1 — it's a settings affordance, not a peer of the three action toggles, and
+            keeping it to one square (44px, its tap target and nothing more) leaves the labelled
+            buttons the rest of a 390px phone. */}
+        {/* THE STATUS BAND IS GONE, AND THIS IS WHERE IT STOOD.
+
+            It was 14px, roomy-only, bounded by a hairline on both edges, and it read as one
+            sentence: the machine every button below writes to, then what that machine's pane was
+            doing. Altan, on the phone, after the belt landed: "we should address the small status
+            line with the server and status, the server is still necessary somewhere, but the status
+            is unnecessary at this place."
+
+            SO THE TWO RUNS WENT DIFFERENT WAYS. The machine moved ONE row down, onto the actions
+            belt — and then UP, into the pane header, under the cache reading, once the belt's right
+            end was needed for the Switch pill (agent-chat.tsx draws it, actions-row.tsx says why).
+            It is a `variant="tag"` either way: the 10px uppercase caption was sized for this band
+            and reads as a word that fell off something anywhere else.
+
+            THE STATUS WORD WAS DELETED, NOT MOVED, AND THAT NEEDED ONE CHECK FIRST. The word was
+            here because a 10px dot encodes this range in HUE ALONE and the range does not survive
+            it: on the app's own `--status-*` tokens a deuteranope reads blocked / working / done as
+            one colour in light theme, and "needs you" against "done" collapses in both
+            (status-badge.tsx holds the measurement). Deleting a coloured word is therefore only
+            safe while the state is still readable without colour SOMEWHERE. It is: the pane
+            header's agent tile badges a StatusDot that is NAMED — `label={statusLabel(...)}`, the
+            one named dot in the app — so a screen reader still gets "needs you" from the header,
+            and a shell pane's tile carries an `sr-only` "shell" for the same reason
+            (agent-chat.tsx says both at the line). The dashboard states it in words as well. No
+            visible word was added anywhere to pay for this one; that was the point of removing it.
+
+            WHAT THE REMOVAL BOUGHT, MEASURED AT 390px: 22px off the stack — the band's own 14px
+            (1 + 12 + 1) plus the 8px `mt-2` that separated it from the buttons. The belt's top
+            margin absorbed that decision: see `mt-1.5` on the roomy ActionsRow below, which is the
+            air between the dock/handle above and the belt now that there is nothing between them.
+
+            The dock still takes NO top padding: its top rule and fill live on the chrome block in
+            `agent-chat.tsx`, because the swipe handle stands on that same ground and the boundary
+            against the terminal is drawn once, above everything the thumb operates. */}
+        {/* ── THE ACTIONS ROW ──────────────────────────────────────────────────────────────────
+            One row, two segments: Collie's own controls, then the running harness's own commands in
+            the harness's own colour. It replaced the Controls row and the separate harness bar,
+            which were two rows of a phone's glass answering one question. The row itself is
+            actions-row.tsx; everything below is only what each action DOES.
+  */}
         <ActionsRow
           general={[
-            {
-              id: "keys",
-              icon: Keyboard,
-              label: translate("composer.controls.keys"),
-              on: drawer === "keys",
-              expanded: drawer === "keys",
-              disabled: locked,
-              onSelect: () => requestDrawer(drawer === "keys" ? null : "keys"),
-            },
-            {
-              id: "type",
-              icon: Terminal,
-              label: translate("composer.controls.typeAria"),
-              word: translate("composer.controls.type"),
-              on: direct.active,
-              pressed: direct.active,
-              disabled: locked || sending,
-              onSelect: () => {
-                if (direct.active) {
-                  direct.deactivate();
-                  return;
-                }
-                requestDrawer(null);
-                direct.activate();
+              // Keys and Quick are TOGGLES for the in-flow dock above (not overlays): tap to
+              // open, tap again to close. `expanded` ties each to the dock; the "on" tint marks
+              // it pressed while open. Both share the single-valued `drawer`, so opening one
+              // closes the other.
+              {
+                id: "keys",
+                icon: Keyboard,
+                label: translate("composer.controls.keys"),
+                on: drawer === "keys",
+                expanded: drawer === "keys",
+                disabled: locked,
+                onSelect: () => requestDrawer(drawer === "keys" ? null : "keys"),
               },
-            },
-            {
-              id: "quick",
-              icon: Zap,
-              label: translate("composer.controls.quick"),
-              on: drawer === "quick",
-              expanded: drawer === "quick",
-              disabled: locked,
-              onSelect: () => requestDrawer(drawer === "quick" ? null : "quick"),
-            },
-            ...(commands.length > 0
-              ? [
-                  {
-                    id: "agent",
-                    icon: Slash,
-                    label: translate("composer.controls.agent"),
-                    disabled: locked,
-                    onSelect: () => requestDrawer("cmd"),
-                  },
-                ]
-              : []),
-            {
-              id: "display",
-              icon: Settings2,
-              label: translate("composer.controls.displayAria"),
-              word: translate("composer.controls.display"),
-              on: drawer === "display",
-              expanded: drawer === "display",
-              onSelect: () => requestDrawer(drawer === "display" ? null : "display"),
-            },
+              // "Type into terminal" lives HERE, beside Keys, rather than on the Send button.
+              // It is the same problem split in half: Keys exists because the phone keyboard
+              // cannot send Esc/Tab/arrows/chords, this exists because it cannot send bare
+              // printable letters — so someone who wants to press `b` looks in this row first.
+              // It is also used in bursts (a picker, a y/n prompt) and then not for days, which
+              // is the wrong shape for a permanent fixture on the app's most-used control: a
+              // split Send button cost a third of the primary action's width every day to serve
+              // a mode used on a few of them.
+              // Unlike its neighbours this toggles state instead of opening a dock — the armed
+              // strip above the input is what makes that visible. Arming is still an explicit
+              // NAMED choice, which is what keeps an accidental touch from quietly wiring the
+              // keyboard to a live terminal; see use-direct-typing.ts for the rest.
+              {
+                id: "type",
+                icon: Terminal,
+                // Announced in full, drawn short: the pill has one word of room beside its glyph,
+                // and "Type into terminal" is the name a reader must still hear.
+                label: translate("composer.controls.typeAria"),
+                word: translate("composer.controls.type"),
+                on: direct.active,
+                pressed: direct.active,
+                disabled: locked || sending,
+                onSelect: () => {
+                  if (direct.active) {
+                    direct.deactivate();
+                    return;
+                  }
+                  // Close whatever dock is open first: the mode needs the phone keyboard, and a
+                  // dock holding half the viewport is the thing in its way. Routed through
+                  // requestDrawer so a staged key queue still gets its discard confirm
+                  // (ADR 0005).
+                  requestDrawer(null);
+                  direct.activate();
+                },
+              },
+              {
+                id: "quick",
+                icon: Zap,
+                label: translate("composer.controls.quick"),
+                on: drawer === "quick",
+                expanded: drawer === "quick",
+                disabled: locked,
+                onSelect: () => requestDrawer(drawer === "quick" ? null : "quick"),
+              },
+              // Withdrawn rather than greyed when this pane has no commands at all: there is no
+              // palette to open, which is a different thing from one this device may not use.
+              ...(commands.length > 0
+                ? [
+                    {
+                      id: "agent",
+                      icon: Slash,
+                      label: translate("composer.controls.agent"),
+                      disabled: locked,
+                      onSelect: () => requestDrawer("cmd"),
+                    },
+                  ]
+                : []),
+              // Display prefs. Not gated on `locked`: wrap/font/raw-terminal are local view
+              // state, so a read-only device or a gone pane can still make its mirror readable.
+              {
+                id: "display",
+                icon: Settings2,
+                label: translate("composer.controls.displayAria"),
+                word: translate("composer.controls.display"),
+                on: drawer === "display",
+                expanded: drawer === "display",
+                onSelect: () => requestDrawer(drawer === "display" ? null : "display"),
+              },
           ]}
           agent={agent}
           mine={operatorCommands}
           onRun={(command) => send(command, false)}
           disabled={locked}
+          // The pane switcher: a Switch pill pinned at this belt's right end, above Send, and the
+          // belt itself as the drag surface behind it. The pane decides whether there is one
+          // (agent-chat.tsx); this row draws the pill, wires the drag, and costs no height.
           handle={pullHandle}
         />
         {/* ── THE FOOTER'S NOTICE STRIPS, SORTED BY KIND (DESIGN.md §1, §2) ─────────────────────
@@ -1520,30 +1511,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             with no controls — belongs in the pills (lib/status, `setStatus`), where it costs the
             layout nothing and dismisses itself. A CONDITION belongs here, at the surface it is about,
             for as long as it is true. Sorted that way, every strip in this footer is a condition and
-            each one carries its own controls: the take-over preview (Take over), the password notice
-            (Use Type / ✕), the two armed-mode strips (Stop / ✕), and the draft-too-long line, which
+            each one carries its own controls: the password notice (Use Type / ✕), the two armed-mode strips (Stop / ✕), and the draft-too-long line, which
             lasts as long as the text does and would re-fire on every keystroke as a pill. The one
             genuine event in this region — "sent" — is ALREADY a pill (`composer.status.sent`); what
             stays here under that name is the verification half, and the strip itself says why. */}
-        {/* Terminal-draft preview: a read-only view of a stranded "❯"-line draft (a message queued
-            then recalled on the HOST, which stripChrome hides from the mirror). It appears only after
-            the draft stabilises (never a blip/self-echo), then its text tracks the live line — host
-            typing streams straight in. It NEVER writes into the phone-owned input; only the explicit
-            Take over copies the text here. No dismiss — it's honest state and persists until the user
-            takes over, sends, or the host line clears. Same zinc/text-xs chrome as the "You sent:"
-            strip above. */}
-        <Collapse open={showPreview && effectiveRaw !== null}>
-          {showPreview && effectiveRaw !== null && (
-            <TerminalDraftPreview
-              text={effectiveRaw}
-              // No Take over when the line is only the harness's own opaque token (Claude's
-              // `[Pasted text #N +M lines]`): pulling that into the composer would send the literal
-              // string. The preview keeps showing it — the screen really does say that.
-              onTakeOver={adapter?.draftIsOpaque?.(effectiveRaw) ? null : takeOverDraft}
-            />
-          )}
-        </Collapse>
-        {/* The password-prompt notice (#103). Sits here, in the same in-flow slot as the other two
+        {/* The terminal-draft notice is NOT one of these strips any more (ADR 0061). It floats over
+            the mirror's bottom edge, out of this flow, so a draft stranding or clearing on the host
+            never moves the belt or the field. See `draftNotice` above; it renders here. */}
+        {draftNoticeSlot ? createPortal(draftNotice, draftNoticeSlot) : draftNotice}
+        {/* The password-prompt notice (#103). Sits here, in the same in-flow slot as the other
             strips, because that is where the eye already is when a send is refused — and it is a
             NOTICE beside the unchanged "Type anyway?" override, never a replacement for it. */}
         <Collapse open={noEcho !== null && !direct.active}>
@@ -1588,7 +1564,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <RecordingStrip
               elapsed={recorder.elapsedLabel}
               transcribing={recorder.phase === "transcribing"}
-              handsFree={handsFree && input.trim() === "" && attachments.length === 0 && noEcho === null}
+              handsFree={handsFree && !hasDraft && noEcho === null}
               onStop={recorder.stopAndSend}
               onDiscard={recorder.discard}
             />
@@ -1605,53 +1581,97 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             {translate("composer.draft.tooLong")}
           </p>
         </Collapse>
-        {attachments.length > 0 && (
-          <div data-slot="composer-attachments" className="mb-2 flex flex-wrap gap-1.5">
-            {attachments.map((attachment, index) => (
-              <div
-                key={`${attachment.path}\0${attachment.name}\0${index}`}
-                className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 text-xs"
-              >
-                <FileText aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 max-w-[60vw] truncate" title={attachment.name}>
-                  {attachment.name}
-                </span>
-                <span className="shrink-0 text-muted-foreground">{attachmentSizeLabel(attachment.size)}</span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="size-11 shrink-0 text-muted-foreground"
-                  disabled={locked || direct.active || sending}
-                  aria-label={translate("keys.queue.removeAria", { label: attachment.name })}
-                  onClick={() => removeAttachment(index)}
-                >
-                  <X aria-hidden="true" className="size-3.5" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-        {/* gap-3, not gap-2: with the attach button moved inside the field this row is only the
-            field and Send, and the old spacing left them looking joined. */}
-        <div className="flex items-end gap-3">
-          {/* The input and its attach button share one box: the button is positioned INSIDE the
-              field, messenger-style, rather than sitting beside it as a third control in the row.
-              It used to occupy a full-height slot to the left, which spent the widest part of the
-              composer on the least-used action; inside the field it costs nothing but a strip of
-              padding the text was not using anyway. `pr-11` on the textarea reserves that strip so a
-              long line can never run underneath the icon.
+        {/* ── ONE BOX, ONE ROW: THE FIELD, ATTACH, THE PRIMARY ACTION ──────────────────────
+            The field, the attach control and Send used to be three shapes on one line: a
+            bordered field with a button tucked into its bottom-right corner, and a round primary
+            action floating beside it. They are one bordered container now, ported by hand from the
+            prompt-input pattern (ADR 0057). For one round the box also carried a toolbar row under
+            the field; on a phone that was a second row of height on an EMPTY composer, so the two
+            buttons came back inline (ADR 0057, amended 2026-09-22).
 
-              The machine this write lands on is NOT in here. It was, for one round, docked at the
-              field's right edge — and it cost 60px of typing width on a crew, out of the widest part
-              of the composer. It answers the same question from the controls row above (the status
-              strip there), which is equally at the write surface and costs the draft nothing. */}
-          <div className="relative min-w-0 flex-1">
+            ATTACH STANDS AT THE RIGHT, NEXT TO THE PRIMARY ACTION, AS IT DID BEFORE THIS FILE
+            MADE IT ONE BOX. It sat at the box's left edge for one round; Altan asked for it back
+            beside Send, so the row reads field, attach, primary action (ADR 0057, amended again
+            2026-09-22).
+
+            THE ROW. `flex items-end gap-1 p-1`: the field (`flex-1 min-w-0`), attach, the primary
+            action. `items-end` pins both buttons to the bottom edge while a long draft grows the
+            field upward to its cap, which is where a thumb already is. `p-1` is 4px, exactly the
+            reach of `TOOLBAR_TAP_TARGET`, so an empty box is 36 + 8 = 44px inside its border.
+
+            THE FRAME IS HERE AND NOWHERE ELSE, AND THERE IS ONE. The border is unconditional and
+            only its colour moves on focus, so the box never resizes under the caret (DESIGN.md §2),
+            and `focus-within:ring-1` doubles it to a 2px line as a box-shadow, which costs no
+            layout. It WAS an outline two pixels outside the border as well, and a ring-coloured
+            border plus an offset outline drew two frames around one field. Do not bring an
+            `outline-offset-*` back: one frame is the focus mark, and it is still a visible one.
+
+            No wrapper padding above the box any more. It was `pt-1`, there only to keep the old
+            outline's 4px reach off the belt; the ring reaches 1px, and the belt's own `mb-1`
+            clears that.
+
+            `relative` is the anchor `AnchoredMenu` positions against, so the attach picker opens
+            above the whole box, right-aligned against it — which now sits close to the attach
+            button itself, one button-width and a gap in from the box's own right edge
+            (ui/anchored-menu.tsx carries that measurement). The menu is still a child of the box
+            rather than of the button: it is absolutely positioned, so it takes no place in the row,
+            and anchoring it to the box is what keeps it lined up above the box's own right edge
+            regardless of which control stands nearest that edge.
+
+            THE BELT IS NOT PART OF THIS BOX. Keys / Type / Quick / Agent / Display stay above it
+            (actions-row.tsx). They open docks that fill half the viewport; the box holds the two
+            controls that act on the draft in front of you, and nothing else moves in.
+
+            The machine this write lands on is NOT in here, and must not move in. It was, for one
+            round, docked at the field's right edge, and it cost 60px of typing width on a crew,
+            out of the widest part of the composer. It answers the same question from the belt
+            above, which is equally at the write surface and costs the draft nothing. */}
+        <div
+          className={cn(
+            "relative flex items-end gap-1 rounded-xl border border-input bg-background p-1 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
+            // Chips take a line of their own ABOVE the row (ADR 0060). `flex-wrap` plus a
+            // full-basis strip does that without re-parenting the field, so the textarea is never
+            // remounted (and never loses its caret) when the first chip arrives. With no chips the
+            // class is absent and the box is exactly the one row it was.
+            attachments.length > 0 && "flex-wrap",
+            // A composer nobody may write to says so as a surface, not just as a placeholder:
+            // the fill recedes and both buttons in the box are disabled anyway.
+            locked && "bg-muted/40",
+            // Armed "Type into terminal". The tint was on the field while the field wore the
+            // frame; it follows the frame.
+            direct.active && "border-primary focus-within:border-primary focus-within:ring-primary",
+          )}
+        >
+          {attachments.length > 0 && (
+            // The strip scrolls sideways when the chips outrun the box; `pt-1 px-1` is room for
+            // the corner badge and the x, which stand 4px outside each chip.
+            <ul
+              aria-label={translate("composer.attach.listAria")}
+              className="flex w-full basis-full gap-2 overflow-x-auto px-1 pt-1 pb-0.5"
+            >
+              {attachments.map((attachment) => (
+                <AttachmentChip
+                  key={attachment.n}
+                  attachment={attachment}
+                  onRemove={() => removeAttachment(attachment)}
+                  disabled={sending}
+                />
+              ))}
+            </ul>
+          )}
           <ChatInput
             ref={inputRef}
-            value={direct.active ? direct.value : displayedInput}
-            onChange={direct.active ? direct.onChange : (e) => updateInput(e.target.value)}
-            readOnly={voiceCaption !== null}
+            value={direct.active ? direct.value : input}
+            onChange={
+              direct.active
+                ? direct.onChange
+                : (e) => {
+                    rememberCaret(e);
+                    updateInput(e.target.value);
+                  }
+            }
+            onSelect={direct.active ? undefined : rememberCaret}
+            onBlur={direct.active ? undefined : rememberCaret}
             onCompositionStart={direct.active ? direct.onCompositionStart : undefined}
             onCompositionEnd={direct.active ? direct.onCompositionEnd : undefined}
             onKeyDown={
@@ -1687,20 +1707,31 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             autoCorrect={direct.active ? "off" : undefined}
             spellCheck={direct.active ? false : undefined}
             className={cn(
-              // Room for the attach button tucked into the bottom-right of the field. `block`
-              // matters: a textarea is inline-level by default, so the wrapper inherits a few px of
-              // baseline gap beneath it and the absolutely-positioned button hangs past the field's
-              // bottom edge.
+              // `flex-1 min-w-0`: the field takes whatever width the two buttons beside it leave,
+              // and `min-w-0` is what lets it go NARROWER than its content asks. A flex item's
+              // automatic minimum width is its min-content width, and `field-sizing-content` turns
+              // that into a laid-out one, so without it a long host path (typed or pasted; an upload
+              // puts only its short marker here since ADR 0060) would widen the field and push the
+              // primary action off the right edge (`wrap-anywhere` in chat-input.tsx
+              // stops the same thing at the source; the two are independent and both stay).
               //
-              // ONE `pr-*` here, unconditionally, and it is the attach button's alone. MEASURED in
-              // the playground at a true 390px content width: the field is 310px, so the typing area
-              // is 254px — on a crew and on a solo install alike. At 320px it is 184px, again both.
-              // For one round a crew paid 60px of that to a chip docked at the field's right edge
-              // (194px and 124px); the host answers the same question from the status strip above
-              // now, and the width came back. A second, conditional `pr-*` in this same cn() would
-              // not stack — tailwind-merge keeps only the last padding-right (DESIGN.md §7) — which
-              // is why nothing else may reserve space by adding one here.
-              "block pr-11",
+              // `py-1.5 min-h-9 pl-2` centre ONE line of the draft against the 36px buttons on the
+              // same row, and claim no more: an empty composer is one button row tall. `min-h-9` is
+              // that one row, not a second one (the field is `box-border`, so the padding is inside
+              // it), and it keeps a smaller draft size from leaving the text a few pixels low.
+              //
+              // `pl-2`, AND ONLY ON THE LEFT. The field is the box's first child now, sitting
+              // directly against the box's own `p-1`, so without an inset of its own the text would
+              // start 4px from the border — the box's padding alone, with nothing of the field's to
+              // add to it. Attach used to stand there and supplied that room as its own width; now
+              // that it has moved beside Send, the field pays for the left margin itself instead.
+              //
+              // NO `pr-*`, AND NOTHING MAY ADD ONE. It was `pr-11`, the 44px strip the attach button
+              // needed while it was tucked into the field's corner. The buttons are siblings of the
+              // field now, so nothing inside the field needs a strip kept clear for either of them —
+              // the field's right side takes no padding of its own, and the box's `gap-1` to attach
+              // is what keeps the text off it.
+              "min-w-0 flex-1 min-h-9 pl-2 py-1.5",
               // The draft is terminal-bound text, so the field wears the TERMINAL face — the same
               // family the mirror above it renders in, not the app's chrome face. `font-mono` is
               // the mirror's own default; the style below follows the operator's mirror-family
@@ -1713,94 +1744,101 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // That fact is now handled where it belongs, as a floor inside `applyDraftFontSize`,
               // so every other browser gets the smaller default the operator asked for.
               "font-mono",
-              direct.active &&
-                "border-primary focus-visible:border-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
             )}
             // Built above, where the two halves and their reasons sit together.
             style={draftStyle}
             disabled={locked}
             rows={1}
           />
-            <AnchoredMenu
-              open={picking}
-              onClose={() => setPicking(false)}
-              label={translate("composer.attach.title")}
-            >
-              <ActionRow
-                icon={<Image aria-hidden="true" className="size-4 shrink-0" />}
-                label={translate("composer.attach.photos")}
-                onClick={() => {
-                  setPicking(false);
-                  photoRef.current?.click();
-                }}
-              />
-              <ActionRow
-                icon={<FileText aria-hidden="true" className="size-4 shrink-0" />}
-                label={translate("composer.attach.files")}
-                onClick={() => {
-                  setPicking(false);
-                  fileRef.current?.click();
-                }}
-              />
-            </AnchoredMenu>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              // bottom-1, not centred: the field grows upward as the draft wraps, and a vertically
-              // centred button would drift up with it, away from the thumb and away from the send
-              // button it pairs with. Pinned to the bottom it stays put at any height.
-              className={cn(
-                "absolute bottom-1 right-1 size-9 rounded-full text-muted-foreground",
-                // The press echo, in the tone this app already uses for "your press landed" —
-                // `variant="default"`, which is what a tapped quick reply and a busy dialog option
-                // both flip to. It was `bg-accent` first, and that was a token chosen by name
-                // rather than by looking: in the dark theme `accent` resolves to oklch(0.269),
-                // which is the SAME value as `muted` and sits 0.06 of lightness above the card it
-                // is drawn on. Measured through a real tap, it faded in over 180ms, held for 40,
-                // and faded out — a flash nobody could see on a phone. `primary` is oklch(0.922).
-                //
-                // `duration-0` on the way IN, and the base duration on the way out. A press has to
-                // answer immediately or it is not answering the press; the release is the part that
-                // wants easing. Removing both classes in one commit is what lets the exit animate.
-                // Lit for the press, and then for as long as the menu it opened is standing: the
-                // menu is anchored above rather than over the button precisely so this can be seen,
-                // and a trigger that went dark under its own open menu would waste that.
-                (pressed || picking) && "scale-95 bg-primary text-primary-foreground duration-0",
-              )}
-              disabled={uploading || locked || direct.active || sending}
-              onPointerDown={(e) => e.preventDefault()}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className={cn(
+              TOOLBAR_TAP_TARGET,
+              "size-9 rounded-full text-muted-foreground",
+              // The press echo, in the tone this app already uses for "your press landed" —
+              // `variant="default"`, which is what a tapped quick reply and a busy dialog option
+              // both flip to. It was `bg-accent` first, and that was a token chosen by name
+              // rather than by looking: in the dark theme `accent` resolves to oklch(0.269),
+              // which is the SAME value as `muted` and sits 0.06 of lightness above the card it
+              // is drawn on. Measured through a real tap, it faded in over 180ms, held for 40,
+              // and faded out — a flash nobody could see on a phone. `primary` is oklch(0.922).
+              //
+              // `duration-0` on the way IN, and the base duration on the way out. A press has to
+              // answer immediately or it is not answering the press; the release is the part that
+              // wants easing. Removing both classes in one commit is what lets the exit animate.
+              // Lit for the press, and then for as long as the menu it opened is standing: the
+              // menu is anchored above rather than over the button precisely so this can be seen,
+              // and a trigger that went dark under its own open menu would waste that.
+              (pressed || picking) && "scale-95 bg-primary text-primary-foreground duration-0",
+            )}
+            disabled={uploading || locked || direct.active}
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={() => {
+              echoAttachPress();
+              if (asksWhich) setPicking(true);
+              else photoRef.current?.click();
+            }}
+            aria-label={translate("composer.attach.aria")}
+            aria-haspopup="dialog"
+            aria-expanded={asksWhich ? picking : undefined}
+          >
+            {uploading ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Paperclip className="size-4" />
+            )}
+          </Button>
+          {/* The picker, anchored to the BOX so it opens above the whole shape rather than over
+              the button that opened it (ui/anchored-menu.tsx carries the measurement, and the
+              box's own `relative` is the anchor). It is not anchored to the attach button itself
+              even now that attach stands near the box's own right edge: the panel is `right-0
+              min-w-44` against its anchor, and the gap between attach and that edge is NOT fixed —
+              the primary action beside it is a size-9 icon square most of the time but widens into
+              a text button ("Type anyway?" / "Really send?") the moment a confirm is armed, which
+              would slide the menu sideways if it followed the button instead of the box. Anchoring
+              to the box keeps the picker's own right edge pinned to the box's right edge no matter
+              which shape the primary action is wearing.
+              Two rows, no confirm, each one opens a native picker, which is its own decision
+              point. The menu closes BEFORE the click so it is not left standing behind the
+              system UI, and the click still counts as the user gesture the browser requires
+              because both happen in this one handler. */}
+          <AnchoredMenu
+            open={picking}
+            onClose={() => setPicking(false)}
+            label={translate("composer.attach.title")}
+          >
+            <ActionRow
+              icon={<Image aria-hidden="true" className="size-4 shrink-0" />}
+              label={translate("composer.attach.photos")}
               onClick={() => {
-                echoAttachPress();
-                if (asksWhich) setPicking(true);
-                else photoRef.current?.click();
+                setPicking(false);
+                photoRef.current?.click();
               }}
-              aria-label={translate("composer.attach.aria")}
-              aria-haspopup="dialog"
-              aria-expanded={asksWhich ? picking : undefined}
-            >
-              {uploading ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Paperclip className="size-4" />
-              )}
-            </Button>
-          </div>
-          {voiceEnabled && (
+            />
+            <ActionRow
+              icon={<FileText aria-hidden="true" className="size-4 shrink-0" />}
+              label={translate("composer.attach.files")}
+              onClick={() => {
+                setPicking(false);
+                fileRef.current?.click();
+              }}
+            />
+          </AnchoredMenu>
+          {customVoiceVisible ? (
             <VoiceInput
-              ref={voiceInputRef}
               paneId={paneId}
               session={scope?.session}
-              showControl={customVoiceVisible}
+              showControl
               disabled={locked || dialogPresent || sending || uploading}
               recordingMode={voiceRecordingMode}
               replySpeechSupported={replySpeechSupported}
-              onTranscript={handleVoiceTranscript}
-              onVoiceStateChange={handleVoiceStateChange}
-              onError={handleVoiceError}
+              onTranscript={acceptVoiceTranscript}
+              onVoiceStateChange={() => {}}
+              onError={(message) => setStatus(message, "error")}
             />
-          )}
-          {!customVoiceVisible && (!direct.active && forcingSend ? (
+          ) : !direct.active && forcingSend ? (
             // The pre-flight refused and the user is being offered the override. Labelled for what it
             // actually does — TYPE the text into whatever is on screen — not "send", because the
             // submit key is still conditional on the verify step behind it.
@@ -1812,11 +1850,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // slot that already exists, on the horizontal axis; `Collapse` animates a row's HEIGHT,
             // so wrapping it would animate nothing and add a wrapper between the flex row and its
             // child. §2 is kept by the button box being the same height in all four branches.
+            //
+            // The two confirm branches are the only ones that carry a WORD, so they are the only
+            // ones that are not square: `h-9` to match the round faces beside them, and `shrink-0`
+            // keeps the word whole; the field is the one flex item that gives up width for it.
             <Button
               variant="destructive"
-              className="h-11 shrink-0 rounded-md px-4 text-sm font-semibold"
+              className={cn(TOOLBAR_TAP_TARGET, "h-9 shrink-0 rounded-md px-3 text-sm font-semibold")}
               onClick={onSendClick}
-              disabled={locked || !hasDraft || sending || uploading}
+              disabled={locked || !hasDraft || sending}
               aria-label={translate("composer.send.typeAnyway")}
             >
               {translate("composer.send.typeAnyway")}
@@ -1824,9 +1866,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ) : !direct.active && confirmingSend ? (
             <Button
               variant="destructive"
-              className="h-11 shrink-0 rounded-md px-4 text-sm font-semibold"
+              className={cn(TOOLBAR_TAP_TARGET, "h-9 shrink-0 rounded-md px-3 text-sm font-semibold")}
               onClick={onSendClick}
-              disabled={locked || !hasDraft || sending || uploading}
+              disabled={locked || !hasDraft || sending}
               aria-label={translate("composer.send.reallySend")}
             >
               {translate("composer.send.reallySend")}
@@ -1843,8 +1885,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <Button
               size="icon"
               variant={recorder.busy ? "destructive" : "default"}
-              className="size-11 shrink-0 rounded-full"
-              disabled={!stt.available || locked || sending || uploading || recorder.phase === "transcribing"}
+              className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 rounded-full")}
+              disabled={!stt.available || locked || sending || recorder.phase === "transcribing"}
               aria-pressed={recorder.busy}
               // The bridge's own words when it cannot serve — the operator's next move is on the
               // host, so the button says what is wrong rather than just refusing.
@@ -1870,54 +1912,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ) : (
             <Button
               size="icon"
-              variant={appendVoiceActive ? "destructive" : "default"}
-              className="size-11 shrink-0 rounded-full"
-              onClick={direct.active ? () => direct.deactivate() : handlePrimaryClick}
-              onPointerDown={handleAppendPointerDown}
-              onPointerUp={handleAppendPointerUp}
-              onPointerCancel={handleAppendPointerCancel}
-              onLostPointerCapture={handleAppendPointerCancel}
-              onKeyDown={handleAppendKeyDown}
-              onKeyUp={handleAppendKeyUp}
-              onBlur={handleAppendBlur}
-              disabled={locked || sending || uploading}
+              className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 rounded-full")}
+              onClick={direct.active ? () => direct.deactivate() : onSendClick}
+              disabled={locked || sending}
               aria-label={
                 direct.active
                   ? translate("composer.send.stopTypingAria")
-                  : appendVoiceActive
-                    ? translate("composer.mic.stopAria")
-                    : appendMicSelected
-                      ? translate("composer.mic.recordAria")
-                      : translate("composer.send.sendAria")
+                  : translate("composer.send.sendAria")
               }
-              title={
-                !direct.active && voiceEnabled && input.trim() !== ""
-                  ? voiceRecordingMode === "hold"
-                    ? "Hold to record; release to append"
-                    : voiceRecordingMode === "toggle"
-                      ? appendMicSelected
-                        ? "Tap to start or stop voice input; hold to switch to Send"
-                        : "Tap to send; hold to switch to microphone"
-                      : voiceModeErrorRef.current
-                  : undefined
-              }
-              aria-description={
-                !direct.active && voiceEnabled && input.trim() !== ""
-                  ? voiceRecordingMode === "hold"
-                    ? "Hold to record; release to append"
-                    : voiceRecordingMode === "toggle"
-                      ? appendMicSelected
-                        ? "Tap to start or stop voice input; hold to switch to Send"
-                        : "Tap to send; hold to switch to microphone"
-                      : voiceModeErrorRef.current
-                  : undefined
-              }
-              aria-pressed={direct.active || appendVoiceActive || appendMicSelected}
+              aria-pressed={direct.active}
             >
               {direct.active ? (
                 <Keyboard className="size-4" />
-              ) : appendVoiceActive || appendMicSelected ? (
-                <Mic className="size-4" />
               ) : sending ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : justSent ? (
@@ -1926,7 +1932,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 <Send className="size-4" />
               )}
             </Button>
-          ))}
+          )}
         </div>
       </div>
 
@@ -1935,8 +1941,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         open={drawer === "cmd"}
         onClose={closeDrawer}
         agent={agent}
-        paneId={paneId}
-        scope={scope}
         mine={operatorCommands}
         onInsert={insertCommand}
         onSubmit={(t) => send(t, false)}

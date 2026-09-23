@@ -14,9 +14,18 @@ import { detectPreviewSelectRegion } from "./preview-select";
 import { detectWizardRegion } from "./wizard";
 import { detectMultiSelectRegion } from "./multi-select";
 import { detectPromptSelectRegion } from "./prompt-select";
+import { detectEffortRegion } from "./effort";
+import { detectResumePickerRegion } from "./resume";
 import { detectMenuRegion } from "./menu";
 import { detectAutocompleteRegion } from "./autocomplete";
-import { stripChrome, extractStatusLines, extractInputDraft, hasInputBox, inputBoxTail } from "./chrome";
+import {
+  stripChrome,
+  extractStatusLines,
+  extractAgentsFooter,
+  extractInputDraft,
+  hasInputBox,
+  inputBoxTail,
+} from "./chrome";
 import { isPastePlaceholderOnly, pasteCarriesSend } from "./paste";
 
 /**
@@ -75,8 +84,34 @@ export function claudeBuildBlocks(lines: StyledLine[]): Block[] {
     return blocks;
   }
 
+  // The `/effort` slider (effort.ts) — a specific grammar for a screen the generic one below CAN
+  // claim but cannot read: the value lives in the `▲`'s column, and the arrows are advertised by the
+  // footer itself, which the generic detector never scans (and must not, since MENU_ARROW_ROW
+  // matches that line with an empty value and the rest of the footer as its verb).
+  const effortRegion = detectEffortRegion(lines);
+  if (effortRegion) {
+    const before = trimTrailingBlank(lines.slice(0, effortRegion.startLine));
+    const blocks: Block[] = [];
+    if (before.length > 0) blocks.push({ kind: "raw", lines: before });
+    blocks.push({ kind: "menu", menu: effortRegion.model, lines: lines.slice(effortRegion.startLine) });
+    return blocks;
+  }
+
+  // The `/resume` session picker (resume.ts, .adr/0058) — another screen the generic menu CAN claim
+  // but cannot drive: its footer never names Enter or the arrows, so the generic card could only
+  // cancel. Recognised by its own title, search box and footer, it lifts as a pointed list whose
+  // taps walk the `❯` and send Enter, the one unprinted key ADR 0058 allows on this dialog alone.
+  const resumeRegion = detectResumePickerRegion(lines);
+  if (resumeRegion) {
+    const before = trimTrailingBlank(lines.slice(0, resumeRegion.startLine));
+    const blocks: Block[] = [];
+    if (before.length > 0) blocks.push({ kind: "raw", lines: before });
+    blocks.push({ kind: "prompt-select", prompt: resumeRegion.model, lines: lines.slice(resumeRegion.startLine) });
+    return blocks;
+  }
+
   // LAST RESORT: a modal screen none of the specific grammars claimed, driven by the keys its own
-  // footer names (menu.ts). It runs after all four deliberately — every grammar above encodes a
+  // footer names (menu.ts). It runs after all six deliberately — every grammar above encodes a
   // VERIFIED keystroke recipe for a dialog it recognises, and this one only knows what the screen
   // printed. It must never pre-empt them; it exists to catch what they decline (the `/model` picker),
   // where the alternative is no buttons at all and a composer send typed into the picker.
@@ -118,16 +153,22 @@ export function claudeBuildBlocks(lines: StyledLine[]): Block[] {
   return [{ kind: "raw", lines: stripChrome(lines) }];
 }
 
-export { extractStatusLines, extractInputDraft };
+export { extractStatusLines, extractAgentsFooter, extractInputDraft };
 
 export const claudeAdapter: HarnessAdapter = {
   agent: "claude",
   buildBlocks: claudeBuildBlocks,
   extractStatusLines,
+  extractAgentsFooter,
   extractInputDraft,
   // The reply path's pre-flight: Claude's input box is exactly what `hasInputBox` finds, and its
   // absence is exactly the condition under which typing lands in a modal instead (#34's shape).
   composerReady: hasInputBox,
+  // The way OUT of a Claude modal, for the unread-dialog card (.adr/0053). Every Claude footer that
+  // names one names `Esc to cancel` — the `/model` picker, the rewind screen, the config screens and
+  // the `/effort` slider all print it, and `claude/markers.ts` treats the phrase as background chrome
+  // precisely because it is on so many of them.
+  cancelKey: "Escape",
   // Long sends never appear in the box as themselves — Claude collapses them into `[Pasted text #N
   // +M lines]` — so the reply guard's literal match can't verify them and the send stalls. These two
   // read that token: as send evidence when it's consistent with what we typed (.adr/0010), and as

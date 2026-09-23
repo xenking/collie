@@ -99,8 +99,8 @@ The config file groups every setting under a `[section]`. The environment name o
 | `journal` | where each harness keeps its own session log |
 | `crew` | the budgets a lead gives a member, and a peer's own browser |
 | `standby` | the deputy's second door: port, bind address, arming |
-| `update` | where releases come from, how many versions stay |
-| `serve` | whether Collie publishes the front door, and on what |
+| `update` | where releases come from, how many versions stay, a GitHub token for the release check |
+| `serve` | whether Collie publishes the front door, on what, and under which path (`base_path`) |
 | `stt` | speech-to-text, absent until `collie stt setup` runs |
 
 To read history from multiple agent home directories, provide a comma-separated list in
@@ -420,6 +420,11 @@ The chip's hourglass carries the state in one of three colours, and the number b
 The hourglass is green while the window is wide, red during the final quarter of it, and blue once
 the window expires or a turn pays the full rate. The chip says `cold` in the blue state, and `<1m`
 instead of seconds when under one minute remains.
+
+Some actions drop the cache while time is still left: a `/model` switch to another model, an effort
+change, a compaction, and `/reload-plugins --force`. The chip turns blue as soon as Claude Code writes
+the action to its transcript, and the sheet names the action. opencode reports a compaction and a
+model change the same way.
 
 The chip sits at the right end of the pane header's second line, after the pane's workspace. On a
 crew the machine's name sits beside it, on the same line. Tap the chip to view the underlying rule:

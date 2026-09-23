@@ -208,6 +208,9 @@ export const en = {
   "settings.display.rawTerminal.label": "Raw terminal",
   "settings.display.rawTerminal.hint":
     "Shows the plain mirror — no tappable prompt buttons, no chrome or status strips. Use it when a dialog renders wrong and you want to drive it by hand from Keys.",
+  "settings.display.noInvert.label": "Render this pane natively",
+  "settings.display.noInvert.hint":
+    "Skips the light-theme inversion for this pane only. Turn it on when an agent is on a LIGHT theme and the mirror renders it dark; leave it off when the pane looks right.",
   "settings.display.textSize.label": "Text size",
   "settings.display.textSize.decrease": "Decrease font size",
   "settings.display.textSize.increase": "Increase font size",
@@ -246,6 +249,8 @@ export const en = {
   "composer.attach.title": "Attach",
   "composer.attach.photos": "Photos",
   "composer.attach.files": "Files",
+  "composer.attach.listAria": "Attachments",
+  "composer.attach.removeAria": "Remove {name}",
   "composer.send.typeAnyway": "Type anyway?",
   "composer.send.reallySend": "Really send?",
   "composer.send.stopTypingAria": "Stop typing into terminal",
@@ -253,6 +258,8 @@ export const en = {
   "composer.draft.tooLong":
     "Too long to keep as a saved draft — it survives switching panes, but not closing the app.",
   "composer.status.dialogWaiting": "A dialog is waiting — answer it first, then send.",
+  "composer.status.unreadDialog":
+    "Collie cannot read this dialog. {key} is on the card. Tap Send again to type anyway.",
   "composer.status.paneNotWritable": "Pane is no longer writable — nothing was sent",
   "composer.status.inputChanged":
     "The input box changed while clearing it — nothing was typed. Check the pane.",
@@ -279,6 +286,7 @@ export const en = {
   "composer.noEcho.dismissAria": "Dismiss password-prompt notice",
   "composer.draftPreview.title": "Draft in terminal",
   "composer.draftPreview.takeOver": "Take over",
+  "composer.draftPreview.dismissAria": "Dismiss the terminal draft notice",
 
   // --- sendMode (the armed "typing straight through" indicator) ---
   "sendMode.armed.title": "Typing into terminal",
@@ -694,6 +702,15 @@ export const en = {
 
   // --- dialog (menu / multi-select / wizard / preview-select block renderers) ---
   "dialog.sendingAria": "Sending",
+  // ADR 0056: every lifted card's own way back to the terminal rows it replaced.
+  "dialog.terminalControl": "Terminal",
+  "dialog.terminalControlAria": "Show the terminal instead of this card",
+  "dialog.backToCard": "Back to the card",
+  // ADR 0056 counsel fix: the generic-menu and unread-dialog cards already show the mirror by
+  // default, so their own Terminal control only hides their buttons — it needs its own words.
+  "dialog.putAwayControl": "Put away",
+  "dialog.putAwayControlAria": "Hide this card's buttons, keep the terminal",
+  "dialog.showButtons": "Show the buttons",
   "dialog.previousStepAria": "Previous step",
   "dialog.nextStepAria": "Next step",
   "dialog.answeredAria": "Answered",
@@ -713,6 +730,11 @@ export const en = {
   "dialog.menu.moveDown": "Move down",
   "dialog.menu.leftAria": "Left — {verb} ({label})",
   "dialog.menu.rightAria": "Right — {verb} ({label})",
+  // The printed scale's chips (.adr/0054): one per value the screen listed. The chip's own text is
+  // the level, so the aria name adds what a tap DOES to it.
+  "dialog.menu.levelAria": "{verb} to {label}",
+  "dialog.menu.levelCurrentAria": "{label}, current",
+  "unreadDialog.caption": "Collie cannot read this dialog",
   "dialog.preview.currentAnswerAria": "Current answer",
   "dialog.preview.previewedBelowAria": "Previewed below",
   "dialog.preview.previewLabel": "Preview · {label}",
@@ -861,6 +883,7 @@ export const en = {
   "apiError.update.major_confirm_required": "{version} crosses a major, and a major needs its own confirm.",
   "apiError.update.target_mismatch": "This screen offered {asked}, but this collie would install {would}. Reload and read it again.",
   "apiError.update.none_available": "There is no newer release to take.",
+  "apiError.update.peers_packaged": "{name} is a packaged install. Its updates come from its own package manager.",
   "apiError.update.packaged": "Updates come from your package manager. Collie won't replace this install's files.",
   "apiError.update.start_failed": "The update couldn't be started: {reason}",
   // --- settings.updateCard (the update card, M15/05) ---
@@ -1044,6 +1067,8 @@ export const en = {
   "cache.sheet.overridden": "Moved by cache-rules.toml",
   "cache.sheet.thisMachine": "This machine",
   "cache.sheet.onPeer": "Read on {host}. Its rule catalog is not forwarded, so the source is not quoted here.",
+  "cache.sheet.reset.pending": "{action} after the last turn, so the next turn rebuilds the cache.",
+  "cache.sheet.reset.cause": "{action} before the last turn, so that turn rebuilt the cache.",
   "cache.sheet.state": "State",
   "cache.sheet.state.warm": "Warm",
   "cache.sheet.state.expiring": "Expiring",
@@ -1153,6 +1178,7 @@ export const en = {
   "updateScreen.state.updating": "updating",
   "updateScreen.state.unreachable": "no answer",
   "updateScreen.state.packageManaged": "package-managed",
+  "updateScreen.state.current": "already up to date",
   "updateScreen.peer.lastSeen": "last seen {ago} ago",
   "updateScreen.peer.packageManagedNote": "Its package manager owns this machine, so the run leaves it alone.",
   // The run ended and it did not arrive. The sentence names what happened and the reason the host gave.
@@ -1162,6 +1188,7 @@ export const en = {
   // The lead has held one state longer than a whole build, restart and verify takes. Keep waiting, with
   // the app back in your hands — never a cancel, and never a forced reload.
   "updateScreen.lead.stalled": "Still working. Nothing is wrong yet, and waiting is the whole job.",
+  "updateScreen.lead.crewOnly": "This run updates only the members. This machine stays as it is and does not restart.",
   // THIS device, which is not a machine in the crew: it is the phone fetching the bundle the machines
   // now serve. Counted in FILES, because per-file is the only thing the service worker reports.
   "updateScreen.device.title": "This device",
@@ -1175,6 +1202,7 @@ export const en = {
   // because there is no crew to name.
   "updateScreen.done.crew": "Crew updated to {version}",
   "updateScreen.done.solo": "{machine} updated to {version}",
+  "updateScreen.done.members": "Members updated to {version}",
 } as const;
 
 /** Every key that exists, as a union of string literals. The completeness contract. */

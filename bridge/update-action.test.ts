@@ -634,6 +634,71 @@ describe("the merged verdict — one function, three surfaces", () => {
     });
   });
 
+  // ── ADR 0050 AT THE SECOND GATE ───────────────────────────────────────────
+  // Decision 1 stopped a sleeping laptop DISABLING the button. This is what stops it REFUSING the
+  // tap. The banked peer reports live in memory, so the lead's own update, which restarts it, leaves
+  // every member `unknown` — and without this the fix would last exactly one release.
+  describe("an unknown member that the lead knows is absent", () => {
+    const absent = crewUpdateRows([{ name: "attic", version: null, preflight: null, health: "unreachable" }]);
+    const silent = crewUpdateRows([{ name: "attic", version: null, preflight: null }]);
+
+    test("does not refuse the lead's own start", () => {
+      expect(mergedUpdateVerdict(GREEN, absent, undefined, { tolerateAbsent: true })).toEqual({
+        verdict: "unknown",
+        member: "attic",
+        reason: "we could not check attic",
+        blocks: false,
+      });
+    });
+
+    test("still refuses a peers-only run, where the members are the whole request", () => {
+      expect(mergedUpdateVerdict(GREEN, absent).blocks).toBe(true);
+    });
+
+    test("an unknown member with no health is uninspected, not absent, and still blocks", () => {
+      expect(mergedUpdateVerdict(GREEN, silent, undefined, { tolerateAbsent: true })).toEqual({
+        verdict: "unknown",
+        member: "attic",
+        reason: "we could not check attic",
+        blocks: true,
+      });
+    });
+
+    test("one absent member does not carry a second member that is merely unknown", () => {
+      const nas = crewUpdateRows([{ name: "nas", version: null, preflight: null }]);
+      const both = [...absent, ...nas];
+      const merged = mergedUpdateVerdict(GREEN, both, undefined, { tolerateAbsent: true });
+      expect(merged.blocks).toBe(true);
+      expect(merged.member).toBe("nas");
+    });
+
+    // The predicate is an exact match on ONE state. A later "simplify" to `health !== "reachable"`
+    // would swallow these three silently, and each of them is a member that ANSWERED: a protocol
+    // mismatch, a refusal with a reason, and a member following someone else's lead.
+    test("answers that are not absence keep refusing: incompatible, refused, conflicted", () => {
+      for (const health of ["incompatible", "refused", "conflicted"] as const) {
+        const rows = crewUpdateRows([{ name: "attic", version: null, preflight: null, health }]);
+        expect(mergedUpdateVerdict(GREEN, rows, undefined, { tolerateAbsent: true }).blocks, health).toBe(true);
+      }
+    });
+
+    test("a red member still refuses, absent or not — red is read before unknown", () => {
+      const red = crewUpdateRows([
+        {
+          name: "nas",
+          version: "1.4.1",
+          preflight: { verdict: "red", asOf: 5, checks: [CHECK("disk", "red", "no space left")] },
+        },
+      ]);
+      const merged = mergedUpdateVerdict(GREEN, [...absent, ...red], undefined, { tolerateAbsent: true });
+      expect(merged).toEqual({ verdict: "red", member: "nas", reason: "no space left", blocks: true });
+    });
+
+    test("the lead's own missing preflight still refuses: it carries no health and never will", () => {
+      expect(mergedUpdateVerdict(null, absent, undefined, { tolerateAbsent: true }).blocks).toBe(true);
+    });
+  });
+
   test("unknown beats amber and blocks; amber never blocks; all green names nobody", () => {
     const amber = crewUpdateRows([
       {
@@ -765,5 +830,58 @@ describe("updateStartVerdict — a packaged install", () => {
       }),
     );
     expect(v.kind).not.toBe("refuse");
+  });
+});
+
+// ── "IS THERE ANYTHING FOR A CREW RUN TO DO?" — THE ROUTE'S HALF OF THE ONE RULE ──
+// The phone offers "Update crew" / "Retry crew update" on the rule in `web/src/lib/crew-level.ts`;
+// this route accepts or refuses the peers-only start on its twin. Both halves are pinned against one
+// list of cases in `crew-level-contract.test.ts`; these cases pin what the route DOES with the answer.
+
+describe("updateStartVerdict — a peers-only start over a crew that may already be level", () => {
+  const lead = (over: Partial<UpdateStartState>) => state({ current: "1.5.0", latest: "1.5.0", ...over });
+  const row = (name: string, version: string | null): CrewUpdateRow => ({
+    name,
+    version,
+    verdict: "green",
+    reasons: [],
+    asOf: 1,
+  });
+
+  test("a member AHEAD of the lead is not behind it: nothing to start", () => {
+    const v = updateStartVerdict(ask({ peersOnly: true }), lead({ crew: [row("minibuch", "1.5.1")] }));
+    expect(v).toMatchObject({ kind: "refuse", status: 409 });
+    expect(JSON.stringify(v)).toContain("update.none_available");
+  });
+
+  test("a member on the lead's own version is not behind it either", () => {
+    const v = updateStartVerdict(ask({ peersOnly: true }), lead({ crew: [row("minibuch", "1.5.0")] }));
+    expect(v).toMatchObject({ kind: "refuse", status: 409 });
+  });
+
+  test("a STALE failed leg whose member has since levelled itself starts nothing", () => {
+    const v = updateStartVerdict(
+      ask({ peersOnly: true }),
+      lead({ crew: [row("minibuch", "1.5.0")], peers: [{ name: "minibuch", state: "rolled-back" }] }),
+    );
+    expect(v).toMatchObject({ kind: "refuse", status: 409 });
+  });
+
+  test("a packaged member left behind is named, not reported as nothing to take", () => {
+    const packaged: CrewUpdateRow = { ...row("minibuch", "1.4.0"), installKind: "packaged" };
+    const v = updateStartVerdict(ask({ peersOnly: true }), lead({ crew: [packaged] }));
+    expect(v).toMatchObject({
+      kind: "refuse",
+      status: 409,
+      body: { code: "update.peers_packaged", detail: { name: "minibuch" } },
+    });
+  });
+
+  test("a failed leg whose member's version nobody could learn still starts the retry", () => {
+    const v = updateStartVerdict(
+      ask({ peersOnly: true }),
+      lead({ crew: [row("minibuch", null)], peers: [{ name: "minibuch", state: "unreachable" }] }),
+    );
+    expect(v).toEqual({ kind: "peers", to: "1.5.0" });
   });
 });

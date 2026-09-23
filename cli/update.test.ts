@@ -671,7 +671,7 @@ describe("updateCheckout", () => {
   });
 
   test("a non-git checkout names the reinstall command and fails", () => {
-    const h = harness({ answers: [[`${GIT} rev-parse --git-dir`, { code: 128 }]] });
+    const h = harness({ answers: [[`${GIT} rev-parse --show-prefix`, { code: 128 }]] });
     expect(updateCheckout(h.deps).code).toBe(EXIT.FAIL);
     expect(h.io.stderr.join("\n")).toContain("herdr plugin install AltanS/collie --yes");
     expect(gitRuns(h.exec)).toEqual([]);
@@ -853,7 +853,7 @@ describe("update", () => {
   });
 
   test("a checkout that would not advance never reaches the rebuild", async () => {
-    const h = harness({ answers: [[`${GIT} rev-parse --git-dir`, { code: 128 }]] });
+    const h = harness({ answers: [[`${GIT} rev-parse --show-prefix`, { code: 128 }]] });
     expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
     expect(h.exec.calls.some((c) => c.includes("_apply-update"))).toBe(false);
   });
@@ -1183,7 +1183,7 @@ function binaryHarness(over: BinaryOptions = {}): Harness {
   ];
   const answers: NonNullable<Scripted["answers"]> = [
     // Not a git checkout: the whole point of this shape.
-    [`git -C ${BROOT} rev-parse --git-dir`, { code: 1 }],
+    [`git -C ${BROOT} rev-parse --show-prefix`, { code: 1 }],
     [`/inst/versions/${NEW}/bin/collie version`, { stdout: over.smoke?.pre === false ? "boom\n" : `${NEW}\n` }],
     [
       `${INST}/current/bin/collie version`,
@@ -1358,7 +1358,39 @@ describe("collie update on a binary install", () => {
     const h = binaryHarness({ tagsFailure: { status: 403, message: "HTTP 403" } });
     expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
     expect(h.io.stderr.join("\n")).toContain("rate-limited");
+    expect(h.io.stderr.join("\n")).toContain("set GH_TOKEN");
     expect(h.link.ops).toEqual([]);
+  });
+
+  test("a rate limit despite a token names the variable it came from, and never the value (#254)", async () => {
+    const h = binaryHarness({
+      env: { GITHUB_TOKEN: "ghp_secret_value" },
+      tagsFailure: { status: 403, message: "HTTP 403" },
+    });
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    const err = h.io.stderr.join("\n");
+    expect(err).toContain("even with the token in");
+    expect(err).toContain("GITHUB_TOKEN");
+    expect(err).not.toContain("set GH_TOKEN");
+    expect(err).not.toContain("ghp_secret_value");
+  });
+
+  test("a refused token is a 401 that names the variable — not a rate limit, not a network fault", async () => {
+    const h = binaryHarness({ env: { GH_TOKEN: "ghp_bad" }, tagsFailure: { status: 401, message: "HTTP 401" } });
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    const err = h.io.stderr.join("\n");
+    expect(err).toContain("refused the token in GH_TOKEN");
+    expect(err).not.toContain("rate-limited");
+    expect(err).not.toContain("ghp_bad");
+    expect(h.link.ops).toEqual([]);
+  });
+
+  test("a 401 with no token in the env is the plain HTTP failure — there is no credential to blame", async () => {
+    const h = binaryHarness({ tagsFailure: { status: 401, message: "HTTP 401" } });
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    const err = h.io.stderr.join("\n");
+    expect(err).toContain("the release check failed (HTTP 401)");
+    expect(err).not.toContain("token");
   });
 
   test("already current reads exactly as it does on a checkout — the paths are indistinguishable", async () => {
@@ -2299,7 +2331,7 @@ describe("the update run id", () => {
 describe("cmdUpdate — a folder a package manager owns", () => {
   /** A root with a marker, no `.git`, and outside `$HOME` — `/opt/collie`, the fake's own root. */
   function packaged() {
-    return harness({ answers: [[`${GIT} rev-parse --git-dir`, { code: 128 }]], installed: "1.5.2" });
+    return harness({ answers: [[`${GIT} rev-parse --show-prefix`, { code: 128 }]], installed: "1.5.2" });
   }
 
   test("it refuses, and never reaches git, bun or the network", async () => {
@@ -2329,7 +2361,7 @@ describe("cmdUpdate — a folder a package manager owns", () => {
     expect(h.io.stderr.join("\n")).toContain("Take the new version with: sudo pacman -Syu collie-bin");
 
     const nameless = "/srv/collie";
-    const u = harness({ answers: [[`git -C ${nameless} rev-parse --git-dir`, { code: 128 }]], installed: "1.5.2" });
+    const u = harness({ answers: [[`git -C ${nameless} rev-parse --show-prefix`, { code: 128 }]], installed: "1.5.2" });
     u.files.entries.set(`${nameless}/herdr-plugin.toml`, { text: 'version = "1.5.2"\n' });
     expect(await cmdUpdate({ ...u.deps, ctx: { ...u.deps.ctx, root: nameless } })).toBe(EXIT.FAIL);
     expect(u.io.stderr.join("\n")).toContain("updates come from your package manager");
@@ -2351,7 +2383,7 @@ describe("cmdUpdate — a folder a package manager owns", () => {
     // The near-miss the predicate must keep refusing to claim: all three of clause 4's disjuncts are
     // false here, so a tarball someone unpacked into their own home is still `loose-binary`.
     const inHome = `${HOME}/collie`;
-    const h = harness({ answers: [[`git -C ${inHome} rev-parse --git-dir`, { code: 128 }]] });
+    const h = harness({ answers: [[`git -C ${inHome} rev-parse --show-prefix`, { code: 128 }]] });
     h.files.entries.set(`${inHome}/herdr-plugin.toml`, { text: 'version = "1.5.2"\n' });
     const deps = { ...h.deps, ctx: { ...h.deps.ctx, root: inHome } };
     expect(await cmdUpdate(deps)).toBe(EXIT.FAIL);
