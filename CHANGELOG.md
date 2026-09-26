@@ -30,6 +30,9 @@ PATH. Details and rollback: [`docs/upgrading.md`](./docs/upgrading.md) → *Upgr
 
 ## [Unreleased]
 
+### Fixed
+- **Live speech now appears in the composer while recording.** Provisional words update the field without becoming a saved draft, remain visible while recognition finishes, and are replaced by the final transcript. ([beea9fac](https://github.com/xenking/collie/commit/beea9fac))
+
 ## [1.12.0] - 2026-09-23
 
 ### Added
