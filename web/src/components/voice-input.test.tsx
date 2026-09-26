@@ -1,6 +1,12 @@
 import { StrictMode, useState } from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterAll } from "vitest";
+import { http, HttpResponse } from "msw";
+import { createMemoryRouter, RouterProvider } from "react-router";
+import { loadDraft } from "@/lib/drafts";
+import { __resetOperatorCommands } from "@/lib/operator-config";
+import { server } from "@/test/setup";
+import { Composer } from "./composer";
 
 import { pcm16, VoiceInput, type VoiceState } from "./voice-input";
 
@@ -396,6 +402,77 @@ describe("VoiceInput", () => {
 
     fireEvent.click(button);
     expect(FakeSocket.instances[0].send).toHaveBeenCalledWith('{"kind":"end"}');
+  });
+
+  it("shows live speech in the real composer without saving a provisional draft", async () => {
+    const secureContext = Object.getOwnPropertyDescriptor(globalThis, "isSecureContext");
+    Object.defineProperty(globalThis, "isSecureContext", { configurable: true, value: true });
+    __resetOperatorCommands();
+    server.use(
+      http.get("/api/config", () => HttpResponse.json({ voice: true })),
+      http.get("/api/voice/preferences", () => HttpResponse.json({ recordingMode: "toggle" })),
+    );
+    try {
+      const router = createMemoryRouter([{
+        path: "/",
+        element: <Composer
+          paneId="w1:voice-preview"
+          agent="omp"
+          isShell={false}
+          gone={false}
+          readOnly={false}
+          dialogPresent={false}
+          text="pane output"
+          terminalDraft={null}
+          rawTerminalDraft={null}
+          prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
+          setWrap={vi.fn()}
+          stepFontSize={vi.fn()}
+          setRawTerminal={vi.fn()}
+          setTapToFocus={vi.fn()}
+          mirrorNative={false}
+          setMirrorNative={vi.fn()}
+          setExpandClippedReply={vi.fn()}
+          onSent={vi.fn()}
+        />,
+      }]);
+      render(<RouterProvider router={router} />);
+      const button = await screen.findByRole("button", { name: "Start voice input" });
+      fireEvent.click(button);
+      await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"start"}'));
+      const field = screen.getByPlaceholderText(/type a reply/i) as HTMLTextAreaElement;
+      act(() => {
+        FakeSocket.instances[0].emit({ kind: "voice-state", generation: 1, phase: "listening" });
+        FakeSocket.instances[0].emit({
+          kind: "voice-state", generation: 1, phase: "listening",
+          caption: { role: "user", text: "При", provisional: true },
+        });
+      });
+      expect(field).toHaveValue("При");
+      act(() => FakeSocket.instances[0].emit({
+        kind: "voice-state", generation: 1, phase: "listening",
+        caption: { role: "user", text: "Привет", provisional: true },
+      }));
+      expect(field).toHaveValue("Привет");
+      expect(field).toHaveAttribute("readonly");
+      expect(loadDraft(undefined, "w1:voice-preview")).toBeNull();
+      expect(screen.getByRole("button", { name: "Stop voice input" })).toBeInTheDocument();
+      act(() => FakeSocket.instances[0].emit({ kind: "voice-state", generation: 1, phase: "finalizing" }));
+      expect(field).toHaveValue("Привет");
+      act(() => {
+        FakeSocket.instances[0].emit({
+          kind: "voice-state", generation: 1, phase: "working",
+          caption: { role: "user", text: "Привет, мир", provisional: false },
+        });
+        FakeSocket.instances[0].emit({ kind: "final", generation: 1, text: "Привет, мир" });
+      });
+      await waitFor(() => expect(field).toHaveValue("Привет, мир"));
+      await waitFor(() => expect(loadDraft(undefined, "w1:voice-preview")).toBe("Привет, мир"));
+    } finally {
+      __resetOperatorCommands();
+      if (secureContext) Object.defineProperty(globalThis, "isSecureContext", secureContext);
+      else Reflect.deleteProperty(globalThis, "isSecureContext");
+    }
   });
 
   it("releases a recording stopped before the bridge is ready without starting a late turn", async () => {

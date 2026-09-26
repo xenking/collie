@@ -460,7 +460,16 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
               generation: message.generation,
               phase: message.phase,
             };
-            if (message.caption) next.caption = message.caption;
+            if (message.caption) {
+              next.caption = message.caption;
+            } else if (
+              voiceRef.current?.generation === message.generation &&
+              voiceRef.current.caption
+            ) {
+              // The bridge drops the caption on phase transitions like finalizing; keep the last
+              // provisional text visible until the final caption or idle arrives.
+              next.caption = voiceRef.current.caption;
+            }
             publishVoice(next);
           }
           return;

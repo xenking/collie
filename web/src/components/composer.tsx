@@ -340,6 +340,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // message. Lazy initialiser so the restore happens on the mount, before first paint.
   const [restoredDraft] = useState(() => loadDraftEntry(scope, paneId));
   const [input, setInput] = useState(restoredDraft?.text ?? "");
+  // Live STT is a display-only preview; only the bridge-final text enters the saved draft.
+  const [voicePreview, setVoicePreview] = useState<string | null>(null);
   // The attachments waiting as chips above the field (ADR 0060), and the number the next one gets.
   // Each chip's `[Image #N]` / `[File #N]` marker sits in `input` where it was added; Send swaps
   // the marker for the chip's path (lib/attachments.ts, `composeLine`). Refs beside the state for
@@ -419,6 +421,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const restored = loadDraftEntry(scope, paneId);
     inputValueRef.current = restored?.text ?? "";
     setInput(inputValueRef.current);
+    setVoicePreview(null);
     attachmentsRef.current = restored?.attachments ?? [];
     setAttachments(attachmentsRef.current);
     nextAttachmentRef.current = restored?.next ?? 1;
@@ -1661,7 +1664,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           )}
           <ChatInput
             ref={inputRef}
-            value={direct.active ? direct.value : input}
+            value={direct.active ? direct.value : voicePreview ?? input}
             onChange={
               direct.active
                 ? direct.onChange
@@ -1748,6 +1751,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // Built above, where the two halves and their reasons sit together.
             style={draftStyle}
             disabled={locked}
+            readOnly={voicePreview !== null}
             rows={1}
           />
           <Button
@@ -1835,7 +1839,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               recordingMode={voiceRecordingMode}
               replySpeechSupported={replySpeechSupported}
               onTranscript={acceptVoiceTranscript}
-              onVoiceStateChange={() => {}}
+              onVoiceStateChange={(next) =>
+                setVoicePreview(next?.caption?.role === "user" ? next.caption.text : null)
+              }
               onError={(message) => setStatus(message, "error")}
             />
           ) : !direct.active && forcingSend ? (
