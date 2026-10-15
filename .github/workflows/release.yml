@@ -633,9 +633,11 @@ jobs:
     # hyphen rule the release job above uses to set `--prerelease`, so the two cannot drift.
     # `needs.release.result` by name, not the default `success()`: that one also reads the jobs
     # BEFORE `release`, so a failed `payload-windows` would skip this job after a good release.
-    if: ${{ github.repository_owner == 'AltanS' && !cancelled() && needs.release.result == 'success' && !contains(github.ref_name, '-') }}
+    if: ${{ !cancelled() && needs.release.result == 'success' && !contains(github.ref_name, '-') }}
     steps:
       - name: Ask colliepwa.dev to re-quote the docs
+        # Fork: only upstream owns the website and its token; the job stays, the dispatch is skipped.
+        if: ${{ github.repository_owner == 'AltanS' }}
         env:
           GH_TOKEN: ${{ secrets.COLLIE_GITHUB_REPO_TOKEN }}
         run: |
