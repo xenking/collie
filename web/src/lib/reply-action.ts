@@ -690,6 +690,10 @@ async function submitOnly(
     try {
       const res = await sendReply(args.paneId, "", true, args.scope, prompt);
       if (!res.ok) {
+        // A retry bound to a prompt that a late repaint has emptied since: the first Enter did submit.
+        if (round > 0 && res.code === "prompt_changed" && (await draftLeftBySubmit(adapter, args)) === null) {
+          return { status: "sent" };
+        }
         // The text is verifiably sitting in the input box and only the submit key failed — same shape
         // as the bridge's own partial-failure case. Tell the caller not to resend.
         return {
@@ -707,7 +711,10 @@ async function submitOnly(
       // The bridge acked the key; only the screen says whether the harness took it as a submit.
       const left = await draftLeftBySubmit(adapter, args);
       if (left === null) return { status: "sent" };
-      if (round >= SUBMIT_RETRIES) {
+      // Never submit text the operator did not type: Enter again only while the box still holds exactly
+      // the sent message. A completion that rewrote it (`@READ` -> `@README.md`) stays unsent.
+      const unchanged = draftCarriesSend(args.text, left.draft) && carriesReplyTail(args.text, left.draft);
+      if (round >= SUBMIT_RETRIES || !unchanged) {
         return { status: "error", error: t("apiError.reply.not_submitted"), textDelivered: true };
       }
       prompt = left.prompt;
@@ -723,23 +730,23 @@ const SUBMIT_RETRIES = 1;
 const SUBMIT_CONFIRM_ATTEMPTS = 4;
 
 /**
- * Whether the input box still holds the message after a submit key, as the prompt region the NEXT
- * submit must bind to; null once the box is empty or gone. A read that fails says nothing, so a pane
- * that cannot be read at all is not held against the send: the bridge already acked the key.
+ * Whether the input box still holds a message after a submit key: its draft, and the prompt region the
+ * NEXT submit must bind to; null once the box is empty or gone. A read that fails says nothing, so a
+ * pane that cannot be read at all is not held against the send: the bridge already acked the key.
  */
 async function draftLeftBySubmit(
   adapter: HarnessAdapter,
   args: GuardedReplyArgs,
-): Promise<{ prompt: string | undefined } | null> {
+): Promise<{ prompt: string | undefined; draft: string | null } | null> {
   const sleep = args.sleep ?? defaultSleep;
-  let left: { prompt: string | undefined } | null = null;
+  let left: { prompt: string | undefined; draft: string | null } | null = null;
   for (let attempt = 0; attempt < SUBMIT_CONFIRM_ATTEMPTS; attempt++) {
     if (attempt > 0) await sleep(POLL_DELAY_MS);
     try {
       const fresh = await fetchPane(args.paneId, args.requestedLines, args.scope);
       const lines = splitLines(parseAnsi(fresh.text));
       if (!adapter.submitLeftDraft!(lines)) return null;
-      left = { prompt: adapter.composerPrompt?.(lines) ?? undefined };
+      left = { prompt: adapter.composerPrompt?.(lines) ?? undefined, draft: adapter.extractInputDraft(lines) };
     } catch {
       // Retry the read only.
     }

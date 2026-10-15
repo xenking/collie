@@ -157,8 +157,9 @@ export interface HarnessAdapter {
    * After the submit key was accepted: does this screen still hold an unsent message in the input?
    * A harness whose Enter can be taken by something other than "submit" (omp's `@` file menu applies
    * the highlighted entry and leaves the text in the box) declares it, and the guarded send then reads
-   * the pane again before it reports `sent`: it submits once more against the prompt it just read, and
-   * if the text is still there after that it fails with the draft kept (lib/reply-action.ts).
+   * the pane again before it reports `sent`. It submits once more only while the box still holds
+   * exactly the sent text; a completion that rewrote it, or text still there after the retry, fails
+   * with the draft kept (lib/reply-action.ts).
    *
    * OPTIONAL; absence means the bridge's ack of the submit key is the last word, as before.
    */

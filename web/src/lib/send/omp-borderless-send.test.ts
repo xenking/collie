@@ -27,8 +27,12 @@ const TEXT = "reply ok @READ";
 
 type Reply = { text: string; submit?: boolean; expected_prompt?: string };
 
-/** A pane whose screen after the n-th submit key is given; the typed text brings the `@` menu up. */
-function fakePane(afterSubmit: string[]) {
+/**
+ * A pane whose screen after the n-th submit key is given; the typed text brings the `@` menu up.
+ * `refuse` names the submit keys (0-based) the bridge answers with 409 prompt_changed, as it does when
+ * the bound prompt is gone by the time the key would go out.
+ */
+function fakePane(afterSubmit: string[], refuse: number[] = []) {
   let screen = capture("empty");
   let submits = 0;
   const replies: Reply[] = [];
@@ -37,38 +41,52 @@ function fakePane(afterSubmit: string[]) {
     http.post<never, Reply>(/\/api\/pane\/[^/]+\/reply$/, async ({ request }) => {
       const body = await request.json();
       replies.push(body);
-      if (body.submit === true && body.text === "") screen = afterSubmit[Math.min(submits++, afterSubmit.length - 1)]!;
-      else screen = capture("autocomplete");
+      if (body.submit === true && body.text === "") {
+        const n = submits++;
+        screen = afterSubmit[Math.min(n, afterSubmit.length - 1)]!;
+        if (refuse.includes(n)) return HttpResponse.json({ ok: false, code: "prompt_changed", error: "prompt changed" }, { status: 409 });
+      } else screen = capture("autocomplete");
       return HttpResponse.json({ ok: true });
     }),
   );
   return replies;
 }
 
+const submitKeys = (replies: Reply[]) => replies.filter((r) => r.submit === true && r.text === "");
+
 const send = () =>
   sendGuardedReply({ paneId: "w1V:p1", agent: "omp", text: TEXT, requestedLines: 200, sleep: async () => {} });
 
 describe("omp 18.10 borderless send: the message must leave the prompt before it is reported sent", () => {
-  it("presses Enter again when the first one only accepted the `@` completion", async () => {
+  it("never submits a completion: the `@` menu rewrote the draft, so it stays unsent with the draft kept", async () => {
     const replies = fakePane([capture("completion-accepted"), capture("submitted")]);
-    expect((await send()).status).toBe("sent");
-    const submits = replies.filter((r) => r.submit === true && r.text === "");
-    expect(submits).toHaveLength(2);
-    // The second Enter is bound to the prompt the retry read, completion included.
-    expect(submits[0]!.expected_prompt).toBe("› reply ok @READ");
-    expect(submits[1]!.expected_prompt).toBe("› reply ok @README.md");
+    expect(await send()).toMatchObject({ status: "error", textDelivered: true });
+    expect(submitKeys(replies)).toHaveLength(1);
   });
 
-  it("keeps the draft and says so when the message is still in the prompt after the retry", async () => {
-    const replies = fakePane([capture("completion-accepted")]);
-    const result = await send();
-    expect(result).toMatchObject({ status: "error", textDelivered: true });
-    expect(replies.filter((r) => r.submit === true && r.text === "")).toHaveLength(2);
+  it("presses Enter again while the box still holds exactly the sent text", async () => {
+    const replies = fakePane([capture("autocomplete"), capture("submitted")]);
+    expect((await send()).status).toBe("sent");
+    const submits = submitKeys(replies);
+    expect(submits).toHaveLength(2);
+    expect(submits[1]!.expected_prompt).toBe("› reply ok @READ");
+  });
+
+  it("keeps the draft when the unchanged text is still in the prompt after the retry", async () => {
+    const replies = fakePane([capture("autocomplete")]);
+    expect(await send()).toMatchObject({ status: "error", textDelivered: true });
+    expect(submitKeys(replies)).toHaveLength(2);
+  });
+
+  it("reports sent when the retry finds its prompt gone because a late repaint emptied the box", async () => {
+    const replies = fakePane([capture("autocomplete"), capture("submitted")], [1]);
+    expect((await send()).status).toBe("sent");
+    expect(submitKeys(replies)).toHaveLength(2);
   });
 
   it("reports sent after one Enter when the prompt is empty again", async () => {
     const replies = fakePane([capture("submitted")]);
     expect((await send()).status).toBe("sent");
-    expect(replies.filter((r) => r.submit === true && r.text === "")).toHaveLength(1);
+    expect(submitKeys(replies)).toHaveLength(1);
   });
 });
