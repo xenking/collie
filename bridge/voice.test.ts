@@ -331,6 +331,7 @@ describe("VoiceBroker remote lease", () => {
       } as Config, { record() {} } as never);
 
       await broker.open(firstBrowser as never);
+      expect(firstBrowser.messages).toContain(JSON.stringify({ kind: "ready", replySpeech: true }));
       await broker.message(firstBrowser as never, JSON.stringify({ kind: "start" }));
       const stt = FakeSonioxSocket.connections[0];
       await broker.message(firstBrowser as never, JSON.stringify({ kind: "end" }));
@@ -392,6 +393,8 @@ describe("VoiceBroker remote lease", () => {
 
       await broker.open(browser as never);
       expect(remoteEvents).toEqual([]);
+      // The socket says what the SERVER decided; the browser's own view of the pane may be stale.
+      expect(browser.messages).toContain(JSON.stringify({ kind: "ready", replySpeech: false }));
       await broker.message(browser as never, JSON.stringify({ kind: "start" }));
       const stt = FakeSonioxSocket.connections[0];
       await broker.message(browser as never, JSON.stringify({ kind: "end" }));

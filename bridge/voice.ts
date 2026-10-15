@@ -683,7 +683,7 @@ export class VoiceBroker {
     if (prior?.attach(ws)) {
       this.#clearReconnectExpiry(session);
       this.#recordConnect(ws);
-      send(ws, { kind: "ready" });
+      send(ws, { kind: "ready", replySpeech: ws.data.replySpeechSupported });
       return;
     }
     this.#clearReconnectExpiry(session);
@@ -704,7 +704,7 @@ export class VoiceBroker {
     this.#relays.set(session, new TurnController(this.cfg, this.audit, ws,
       (text) => this.#setRemote(session, "transcript", text)));
     this.#recordConnect(ws);
-    send(ws, { kind: "ready" });
+    send(ws, { kind: "ready", replySpeech: ws.data.replySpeechSupported });
   }
 
   close(ws: VoiceSocket): void {
