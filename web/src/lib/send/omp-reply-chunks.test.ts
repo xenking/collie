@@ -64,6 +64,10 @@ describe("OMP literal paste transport", () => {
         if (mode === "transport" && calls.length === 2) return new HttpResponse("failure", { status: 500 });
         if (mode.endsWith("dropped-final") && calls.length === ompReplyChunks(message).length) return HttpResponse.json({ ok: true });
         accumulated += call.text;
+        if (call.submit) {
+          shown = idle; // Enter empties the editor
+          return HttpResponse.json({ ok: true });
+        }
         shown = mode === "chip" ? screen("📄 #1") : mode === "dialog" ? "╭── Confirm ──╮\n│ Yes No │\n╰─────────────╯" : screen(accumulated);
         return HttpResponse.json({ ok: true });
       }),

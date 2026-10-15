@@ -36,10 +36,12 @@
 // `draftGhost` rules the `rule` scanner does (markers.ts).
 
 import type { StyledLine } from "../../blocks";
-import { draftGhost, draftPlaceholder, isBlank, lineText, opensBox, rstrip } from "./markers";
+import { BRIDGE_PROMPT_TAIL_LINES, draftGhost, draftPlaceholder, isBlank, lineText, opensBox, rstrip } from "./markers";
 import { ompModalOnScreen } from "./modal";
 
-const PROMPT = /^❯(?: ([\s\S]*))?$/;
+// `›` is this install's own gutter: pi-o-my's statusline-below patch swaps the borderless style's
+// `❯ ` for `› ` (omp/patches/statusline-below.ts), so both glyphs read as the same prompt.
+const PROMPT = /^[❯›](?: ([\s\S]*))?$/;
 /** A wrapped row: the two-space gutter, then the text. `claude` also draws blank draft lines. */
 const CONTINUATION = /^ {2}([\s\S]*)$/;
 const CONTINUATION_TEXT = /^ {2}[\s\S]*\S$/;
@@ -63,7 +65,10 @@ export interface GlyphComposer {
   top: number | null;
   promptStart: number;
   promptEnd: number;
-  status: number;
+  /** The status row; null while an autocomplete menu stands in for it. */
+  status: number | null;
+  /** The last row of the autocomplete menu, when one is open. */
+  menuEnd?: number;
 }
 
 function lastNonBlank(lines: StyledLine[]): number {
@@ -126,9 +131,35 @@ export function locateBorderlessComposer(lines: StyledLine[]): GlyphComposer | n
   return { style: "borderless", top: null, promptStart, promptEnd, status };
 }
 
+/** The selected row of omp's autocomplete menu: U+F054 and a space at column 0. */
+const MENU_SELECTION = /^\uf054 /;
+const MAX_MENU_ROWS = 64;
+
+/**
+ * The `borderless` composer with an autocomplete menu open: the menu REPLACES the status row, so the
+ * tail is the prompt row and then menu rows, contiguous, to the last non-blank row (captured on 18.10.0
+ * for an `@` file menu and for the slash palette). The evidence is the menu's selected row somewhere in
+ * that run and no box among it. The draft is the prompt row alone: a menu's entries and a wrapped
+ * draft's continuation rows are both indented two spaces, so the rows below the prompt cannot be told
+ * apart and a multi-row draft is not read while a menu is up. A menu is the one screen where the status
+ * row is legitimately absent, hence `status: null`.
+ */
+export function locateBorderlessMenuComposer(lines: StyledLine[]): GlyphComposer | null {
+  const end = lastNonBlank(lines);
+  for (let promptStart = end - 1; promptStart >= 0 && end - promptStart <= MAX_MENU_ROWS; promptStart--) {
+    const menu = lines.slice(promptStart + 1, end + 1).map((line) => rstrip(lineText(line)));
+    if (menu.some((row) => row === "" || opensBox(row))) return null;
+    if (!PROMPT.test(rstrip(lineText(lines[promptStart]!)))) continue;
+    if (!menu.some((row) => MENU_SELECTION.test(row))) continue;
+    if (ompModalOnScreen(lines)) return null;
+    return { style: "borderless", top: null, promptStart, promptEnd: promptStart, status: null, menuEnd: end };
+  }
+  return null;
+}
+
 /** Either shape, or null. They never share a tail: one has a bottom rule, the other has none. */
 export function locateGlyphComposer(lines: StyledLine[]): GlyphComposer | null {
-  return locateClaudeComposer(lines) ?? locateBorderlessComposer(lines);
+  return locateClaudeComposer(lines) ?? locateBorderlessComposer(lines) ?? locateBorderlessMenuComposer(lines);
 }
 
 export function stripGlyphChrome(lines: StyledLine[], composer: GlyphComposer): StyledLine[] {
@@ -138,10 +169,16 @@ export function stripGlyphChrome(lines: StyledLine[], composer: GlyphComposer): 
 }
 
 export function extractGlyphStatusLines(lines: StyledLine[], composer: GlyphComposer): StyledLine[] {
-  return [lines[composer.status]!];
+  return composer.status === null ? [] : [lines[composer.status]!];
 }
 
-export function glyphComposerPrompt(lines: StyledLine[], composer: GlyphComposer): string {
+export function glyphComposerPrompt(lines: StyledLine[], composer: GlyphComposer): string | null {
+  // A menu long enough to push the prompt out of the bridge's tail window would 409 every bound write
+  // forever; null is an unbound write instead (pi-shape.ts and chrome.ts decline the same way).
+  if (composer.menuEnd !== undefined) {
+    const below = lines.slice(composer.promptEnd + 1, composer.menuEnd + 1).filter((l) => !isBlank(lineText(l)));
+    if (below.length > BRIDGE_PROMPT_TAIL_LINES - 1) return null;
+  }
   return lines
     .slice(composer.promptStart, composer.promptEnd + 1)
     .map((line) => rstrip(lineText(line)))

@@ -61,8 +61,9 @@ describe("OMP 18.1.13 pi-shaped editor (live captures, 2026-09-07)", () => {
     server.use(
       http.get(/\/api\/pane\/[^/]+$/, () => HttpResponse.json({ paneId: "test:p1", text: screen })),
       http.post<never, { text: string; submit: boolean }>(/\/api\/pane\/[^/]+\/reply$/, async ({ request }) => {
-        calls.push(await request.json());
-        screen = captured;
+        const call = await request.json();
+        calls.push(call);
+        screen = call.submit ? idle : captured; // Enter empties the editor
         return HttpResponse.json({ ok: true });
       }),
     );
@@ -140,8 +141,10 @@ describe("OMP 18.8 pi-shaped editor with the slash palette up (live captures, 20
     server.use(
       http.get(/\/api\/pane\/[^/]+$/, () => HttpResponse.json({ paneId: "test:p1", text: screen })),
       http.post<never, { text: string; submit: boolean }>(/\/api\/pane\/[^/]+\/reply$/, async ({ request }) => {
-        calls.push(await request.json());
-        screen = palette; // the palette is what the pane answers with after the type lands
+        const call = await request.json();
+        calls.push(call);
+        // The palette is what the pane answers with after the type lands; Enter then runs the command.
+        screen = call.submit ? idle : palette;
         return HttpResponse.json({ ok: true });
       }),
     );

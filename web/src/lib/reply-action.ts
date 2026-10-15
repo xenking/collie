@@ -430,7 +430,7 @@ export async function sendGuardedReply(args: GuardedReplyArgs): Promise<ReplyOut
     // box — three stalls in the 2026-09-27 audit trail. A complete echo is the final state, so once
     // the tail is on screen the bound region is stable; token-collapsed sends still route to the
     // adapter's second look below, which is its purpose.
-    if (draftCarriesSend(args.text, draft) && carriesReplyTail(args.text, draft) && (chunks.length === 1 || draft !== previousDraft)) return submitOnly(args, verifiedPrompt, typedAt, settleMs);
+    if (draftCarriesSend(args.text, draft) && carriesReplyTail(args.text, draft) && (chunks.length === 1 || draft !== previousDraft)) return submitOnly(args, adapter, verifiedPrompt, typedAt, settleMs);
     // The adapter gets a second look, and only a second look: a harness can SWALLOW what we typed and
     // paint a token of its own instead (Claude collapses anything past its paste threshold into
     // `[Pasted text #N +M lines]`), so the box never holds our words and the match above structurally
@@ -441,7 +441,7 @@ export async function sendGuardedReply(args: GuardedReplyArgs): Promise<ReplyOut
     // adapter whose token says nothing about its content can tell a token that was already there
     // from the one this send made.
     if (draft !== null && adapter.draftCarriesSend?.(args.text, draft, box.draft)) {
-      return submitOnly(args, verifiedPrompt, typedAt, settleMs);
+      return submitOnly(args, adapter, verifiedPrompt, typedAt, settleMs);
     }
   }
 
@@ -670,6 +670,7 @@ async function oneShot(args: GuardedReplyArgs): Promise<ReplyOutcome> {
  */
 async function submitOnly(
   args: GuardedReplyArgs,
+  adapter: HarnessAdapter,
   expectedPrompt: string | undefined,
   typedAt: number,
   settleMs: number,
@@ -684,24 +685,66 @@ async function submitOnly(
     const wait = Math.min(settleMs, Math.max(0, settleMs - elapsed));
     if (wait > 0) await (args.sleep ?? defaultSleep)(wait);
   }
-  try {
-    const res = await sendReply(args.paneId, "", true, args.scope, expectedPrompt);
-    if (res.ok) return { status: "sent" };
-    // The text is verifiably sitting in the input box and only the submit key failed — same shape as
-    // the bridge's own partial-failure case. Tell the caller not to resend.
-    return {
-      // The bridge's own `reply.not_submitted` case, reached from the client side — so it says it
-      // with the bridge's own catalogued sentence rather than a second copy of the English.
-      status: "error",
-      error:
-        res.code === "prompt_changed"
-          ? t("apiError.prompt_changed")
-          : t("apiError.reply.not_submitted"),
-      textDelivered: true,
-    };
-  } catch (e) {
-    return { status: "error", error: message(e), textDelivered: true };
+  let prompt = expectedPrompt;
+  for (let round = 0; ; round++) {
+    try {
+      const res = await sendReply(args.paneId, "", true, args.scope, prompt);
+      if (!res.ok) {
+        // The text is verifiably sitting in the input box and only the submit key failed — same shape
+        // as the bridge's own partial-failure case. Tell the caller not to resend.
+        return {
+          // The bridge's own `reply.not_submitted` case, reached from the client side — so it says it
+          // with the bridge's own catalogued sentence rather than a second copy of the English.
+          status: "error",
+          error:
+            res.code === "prompt_changed"
+              ? t("apiError.prompt_changed")
+              : t("apiError.reply.not_submitted"),
+          textDelivered: true,
+        };
+      }
+      if (adapter.submitLeftDraft === undefined) return { status: "sent" };
+      // The bridge acked the key; only the screen says whether the harness took it as a submit.
+      const left = await draftLeftBySubmit(adapter, args);
+      if (left === null) return { status: "sent" };
+      if (round >= SUBMIT_RETRIES) {
+        return { status: "error", error: t("apiError.reply.not_submitted"), textDelivered: true };
+      }
+      prompt = left.prompt;
+    } catch (e) {
+      return { status: "error", error: message(e), textDelivered: true };
+    }
   }
+}
+
+/** Submit key presses after the first that a harness may spend on something else (see `submitLeftDraft`). */
+const SUBMIT_RETRIES = 1;
+/** Reads after a submit key before the draft is called stranded; the first is immediate. */
+const SUBMIT_CONFIRM_ATTEMPTS = 4;
+
+/**
+ * Whether the input box still holds the message after a submit key, as the prompt region the NEXT
+ * submit must bind to; null once the box is empty or gone. A read that fails says nothing, so a pane
+ * that cannot be read at all is not held against the send: the bridge already acked the key.
+ */
+async function draftLeftBySubmit(
+  adapter: HarnessAdapter,
+  args: GuardedReplyArgs,
+): Promise<{ prompt: string | undefined } | null> {
+  const sleep = args.sleep ?? defaultSleep;
+  let left: { prompt: string | undefined } | null = null;
+  for (let attempt = 0; attempt < SUBMIT_CONFIRM_ATTEMPTS; attempt++) {
+    if (attempt > 0) await sleep(POLL_DELAY_MS);
+    try {
+      const fresh = await fetchPane(args.paneId, args.requestedLines, args.scope);
+      const lines = splitLines(parseAnsi(fresh.text));
+      if (!adapter.submitLeftDraft!(lines)) return null;
+      left = { prompt: adapter.composerPrompt?.(lines) ?? undefined };
+    } catch {
+      // Retry the read only.
+    }
+  }
+  return left;
 }
 
 function message<TThrown>(e: TThrown): string {

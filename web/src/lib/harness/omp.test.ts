@@ -53,6 +53,9 @@ const allForeignFixtures = [...allClaudeFixtures, ...allCodexFixtures, ...allGro
 const GLYPH_COMPOSER_FIXTURES = allOmpFixtures.filter((name) =>
   /^omp--v18-4-(?:claude|borderless)-/.test(name),
 );
+// omp 18.10.0 borderless captures with this install's `›` gutter (glyph-gutter.test.ts reads them in detail).
+// Composers, so the modal cohort never names them, and their own locator arm is not the 18.4 one.
+const GLYPH_GUTTER_FIXTURES = new Set(allOmpFixtures.filter((name) => name.startsWith("omp--v18-10-borderless-glyph-")));
 const CLAUDE_COMPOSER_FIXTURES = GLYPH_COMPOSER_FIXTURES.filter((name) => name.includes("-claude-"));
 const BORDERLESS_COMPOSER_FIXTURES = GLYPH_COMPOSER_FIXTURES.filter((name) => name.includes("-borderless-"));
 // `omp--menu-dismissed.txt` matches this prefix and is a COMPOSER capture, not a modal, and so is
@@ -154,6 +157,14 @@ const DECLINED = new Set([
   "omp--v18-10-draft-blank-line.txt",
   "omp--v18-10-draft-indented.txt",
   "omp--v18-10-draft-two-lines.txt",
+  "omp--v18-10-borderless-glyph-autocomplete-many.txt",
+  "omp--v18-10-borderless-glyph-autocomplete.txt",
+  "omp--v18-10-borderless-glyph-completion-accepted.txt",
+  "omp--v18-10-borderless-glyph-empty.txt",
+  "omp--v18-10-borderless-glyph-fresh-hint.txt",
+  "omp--v18-10-borderless-glyph-slash-palette.txt",
+  "omp--v18-10-borderless-glyph-submitted.txt",
+  "omp--v18-10-borderless-glyph-working.txt",
   "omp--v18-4-borderless-draft.txt",
   "omp--v18-4-borderless-idle.txt",
   "omp--v18-4-borderless-wrapped.txt",
@@ -248,7 +259,11 @@ describeAdapterConformance(ompAdapter, {
   // the tail than `verifyExpectedPrompt` accepts and 409 every destructive sweep with "The input box
   // changed while clearing it" (pi-shape.ts `piComposerPrompt`). Null means an unbound write, exactly
   // as the boxed shape answers for the same palette sitting under its own composer (chrome.ts).
-  unboundComposerFixtures: ["omp--v18-8-slash-palette.txt", "omp--v18-8-slash-palette-w48.txt"],
+  unboundComposerFixtures: [
+    "omp--v18-8-slash-palette.txt",
+    "omp--v18-8-slash-palette-w48.txt",
+    "omp--v18-10-borderless-glyph-slash-palette.txt",
+  ],
 });
 
 // The corpus pin (mirroring claude/chrome.test.ts's): a newly-captured omp fixture must be filed into
@@ -299,6 +314,14 @@ describe("the omp corpus", () => {
     "omp--v18-10-ask-long.txt",
     "omp--v18-10-ask-revisited.txt",
     "omp--v18-10-ask-single.txt",
+    "omp--v18-10-borderless-glyph-autocomplete-many.txt",
+    "omp--v18-10-borderless-glyph-autocomplete.txt",
+    "omp--v18-10-borderless-glyph-completion-accepted.txt",
+    "omp--v18-10-borderless-glyph-empty.txt",
+    "omp--v18-10-borderless-glyph-fresh-hint.txt",
+    "omp--v18-10-borderless-glyph-slash-palette.txt",
+    "omp--v18-10-borderless-glyph-submitted.txt",
+    "omp--v18-10-borderless-glyph-working.txt",
     "omp--v18-10-draft-blank-line.txt",
     "omp--v18-10-draft-indented.txt",
     "omp--v18-10-draft-two-lines.txt",
@@ -425,6 +448,7 @@ describe("ompBuildBlocks emits nothing but raw, bar the four lifted screens", ()
         "extractInputDraft", // the stranded-draft preview + the type-then-verify half
         "extractStatusLines", // the statusline the strip peels off the mirror
         "newlineSubmits", // the pre-flight's refusal of a multi-line message
+        "submitLeftDraft", // after Enter: is the message still in the box (a menu took the key)
       ].toSorted(),
     );
   });
@@ -462,6 +486,14 @@ const COMPOSER_FIXTURES = [
   "omp--v18-10-draft-blank-line.txt",
   "omp--v18-10-draft-indented.txt",
   "omp--v18-10-draft-two-lines.txt",
+  "omp--v18-10-borderless-glyph-autocomplete-many.txt",
+  "omp--v18-10-borderless-glyph-autocomplete.txt",
+  "omp--v18-10-borderless-glyph-completion-accepted.txt",
+  "omp--v18-10-borderless-glyph-empty.txt",
+  "omp--v18-10-borderless-glyph-fresh-hint.txt",
+  "omp--v18-10-borderless-glyph-slash-palette.txt",
+  "omp--v18-10-borderless-glyph-submitted.txt",
+  "omp--v18-10-borderless-glyph-working.txt",
   "omp--v18-4-borderless-draft.txt",
   "omp--v18-4-borderless-idle.txt",
   "omp--v18-4-borderless-wrapped.txt",
@@ -732,7 +764,9 @@ describe("OMP 18.4 claude and borderless composers", () => {
 
   // The rejection cohorts: both locators decline every omp modal and composer of another shape, and
   // every foreign capture, so the shapes cannot steal one another's panes.
-  const OTHER_OMP = allOmpFixtures.filter((name) => !GLYPH_COMPOSER_FIXTURES.includes(name));
+  const OTHER_OMP = allOmpFixtures.filter(
+    (name) => !GLYPH_COMPOSER_FIXTURES.includes(name) && !GLYPH_GUTTER_FIXTURES.has(name),
+  );
   it.each([...OTHER_OMP, ...allForeignFixtures])("%s: neither new locator claims it", (name) => {
     const lines = fixtureLines(name);
     expect(locateClaudeComposer(lines)).toBeNull();

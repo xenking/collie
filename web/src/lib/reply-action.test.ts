@@ -443,7 +443,8 @@ describe("sendGuardedReply", () => {
     const screen =
       `some output\n\x1b[38;2;74;80;88m╭── statusline ───╮\x1b[0m\n` +
       `\x1b[38;2;74;80;88m╰─ \x1b[0mship it please${suggestion}   \x1b[38;2;74;80;88m ─╯\x1b[0m`;
-    const calls = harness(() => screen);
+    // After the submit key the box is empty again: a draft still on screen would mean it was not sent.
+    const calls = harness(() => (calls.some((c) => c.submit) ? fixtureText("omp--fresh-idle.txt") : screen));
 
     const out = await sendGuardedReply({
       paneId: "w1:p1",
