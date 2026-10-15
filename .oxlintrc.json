@@ -260,6 +260,20 @@
       }
     },
     {
+      // omp-commands loads the installed OMP registry module and reads its untyped exports at this one boundary.
+      "files": [
+        "**/bridge/omp-commands.ts"
+      ],
+      "rules": {
+        "anti-slop/no-known-value-widening": "off",
+        "anti-slop/no-runtime-typeof": "off",
+        "anti-slop/no-unknown-parameters": "off",
+        "anti-slop/no-unknown-returns": "off",
+        "anti-slop/no-unsafe-dictionary-type": "off",
+        "eslint/no-control-regex": "off"
+      }
+    },
+    {
       // voiceRelayResponse is the parser boundary for the localhost daemon's untyped HTTP JSON body.
       "files": [
         "**/bridge/server.ts"

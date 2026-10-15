@@ -74,6 +74,7 @@ async function fetchVocabulary(config: TurnConfig): Promise<SonioxContext> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("voice vocabulary returned an invalid context");
   }
+  // SAFETY: the check above established a non-array object; Soniox owns the context schema and validates it server-side.
   return value as SonioxContext;
 }
 
@@ -817,7 +818,9 @@ export class VoiceBroker {
       body: JSON.stringify(
         kind === "remote-start"
           ? { kind, session, relayUrl: `http://127.0.0.1:${this.cfg.port}/api/voice/omp` }
-          : { kind, session, ...(kind === "transcript" ? { text } : {}) },
+          : kind === "transcript"
+            ? { kind, session, text }
+            : { kind, session },
       ),
     });
     if (!response.ok) throw new Error(`voice control returned ${response.status}: ${(await response.text()).trim()}`);

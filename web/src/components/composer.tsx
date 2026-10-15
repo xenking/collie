@@ -669,7 +669,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const controller = new AbortController();
     void api.fetchVoicePreferences(controller.signal)
       .then((value) => setVoiceRecordingMode(value.recordingMode))
-      .catch((error: unknown) => {
+      .catch((error) => {
         if (!(error instanceof DOMException && error.name === "AbortError")) setStatus(describeThrownError(error), "error");
       });
     return () => controller.abort();

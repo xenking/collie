@@ -647,7 +647,7 @@ describe("solo zero-tax — routes", () => {
       // pane whose adapter raises asks as data takes it, so a solo Herdr bridge answers it the refusal.
       // `send` and `abort` name the turn the phone saw (ADR 0101): writes, forwarded the same way, and
       // only a pane whose adapter takes guarded controls takes them; a Herdr pane gets the refusal.
-      "/^\\/api\\/pane\\/([^/]+)(?:\\/(reply|keys|upload|close|rename|history|chat|changes|files|focus|answer|send|abort))?$/",
+      "/^\\/api\\/pane\\/([^/]+)(?:\\/(reply|keys|upload|close|rename|history|chat|changes|files|commands|focus|answer|send|abort))?$/",
       // Which paths exist under the Files root (ADR 0088), asked in one batch for the pane view's
       // links: a read with the Files gate, one `lstat` per path, not forwarded across a crew link.
       "/^\\/api\\/pane\\/([^/]+)\\/files\\/exist$/",
@@ -777,6 +777,7 @@ describe("solo zero-tax — routes", () => {
       // Realtime Voice uses one browser WebSocket and one localhost-only OMP reply callback.
       "/api/voice/media",
       "/api/voice/omp",
+      "/api/voice/preferences",
       "/api/workspace",
       // The New sheet's branch from a FOLDER (M48, ADR 0093): the plan it shows before Start, and the
       // create. Two SOLO routes, named here rather than exempted. Session-scoped through the gate and

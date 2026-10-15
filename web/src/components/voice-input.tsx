@@ -257,13 +257,14 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
     () => {
       disposedRef.current = false;
       const player = playerRef.current;
+      const cancelledGenerations = cancelledGenerationsRef.current;
       return () => {
         disposedRef.current = true;
         wantsRecordingRef.current = false;
         sttReadyRef.current = false;
         if (holdTimerRef.current !== null) window.clearTimeout(holdTimerRef.current);
         bufferedAudioRef.current = [];
-        cancelledGenerationsRef.current.clear();
+        cancelledGenerations.clear();
         cancelPendingRef.current = false;
         settleHandoff(false);
         releaseRemote();
@@ -759,17 +760,14 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
     if (!finishGesture(true) && recordingMode !== "hold") handleClick();
   }
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      start: () => {
-        void start();
-      },
-      stop,
-      cancel,
-    }),
-    [disabled, recovery, state],
-  );
+  // No deps: start/stop/cancel close over the latest state, so the handle is rebuilt each render.
+  useImperativeHandle(ref, () => ({
+    start: () => {
+      void start();
+    },
+    stop,
+    cancel,
+  }));
 
   function toggle(): void {
     if (recovery === "failed") {

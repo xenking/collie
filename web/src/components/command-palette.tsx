@@ -57,18 +57,18 @@ export function CommandPalette({
     setLiveVersion(undefined);
     setLiveError(false);
     setLoadingLive(true);
-    void api.fetchPaneCommands(paneId, scope).then(
-      ({ commands, version }) => {
+    void (async () => {
+      try {
+        const { commands, version } = await api.fetchPaneCommands(paneId, scope);
         if (!active) return;
         setLiveOmp(commands);
         setLiveVersion(version);
-      },
-      () => {
+      } catch {
         if (active) setLiveError(true);
-      },
-    ).finally(() => {
-      if (active) setLoadingLive(false);
-    });
+      } finally {
+        if (active) setLoadingLive(false);
+      }
+    })();
     return () => {
       active = false;
     };

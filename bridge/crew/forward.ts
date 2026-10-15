@@ -66,7 +66,7 @@ const FORWARDABLE: readonly RegExp[] = [
   // pane, where its receipt lives. Additive-optional (§7.1): a member that predates it answers 404.
   // `send` and `abort` (ADR 0101): a control that names the turn the phone saw, a WRITE to the member
   // that owns the pane, where its receipt lives. Additive-optional the same way.
-  /^pane\/[^/]+(?:\/(?:reply|keys|upload|close|rename|history|chat|changes|files|focus|answer|send|abort))?$/,
+  /^pane\/[^/]+(?:\/(?:reply|keys|upload|close|rename|history|chat|changes|files|commands|focus|answer|send|abort))?$/,
   // One picture under the Files root, as bytes (ADR 0090): off the disk of the member that owns the
   // pane or the space, like the Files read it sits beside. Mirrors `PANE_FILES_IMAGE_ROUTE` and
   // `WORKSPACE_FILES_IMAGE_ROUTE` in bridge/server.ts one-for-one. Additive-optional (§7.1).
@@ -143,8 +143,8 @@ function isWorkspaceRead(route: string): boolean {
 }
 
 /** The pane actions that only read, as bridge/server.ts's `isPaneReadAction` lists them. */
-function isPaneRead(action: string | undefined): action is undefined | "history" | "chat" | "changes" | "files" {
-  return action === undefined || action === "history" || action === "chat" || action === "changes" || action === "files";
+function isPaneRead(action: string | undefined): action is undefined | "history" | "chat" | "changes" | "files" | "commands" {
+  return action === undefined || action === "history" || action === "chat" || action === "changes" || action === "files" || action === "commands";
 }
 
 /** The inverse of {@link crewRouteFor}, for the peer dispatching a crew route into its own routes. */

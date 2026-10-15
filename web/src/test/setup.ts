@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
-import { afterEach, beforeEach, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
+import { JSDOM } from "jsdom";
 
 import { server } from "./msw";
 import { __resetConnectionHealth } from "@/lib/connection-health";
@@ -13,6 +14,12 @@ import { __resetAuthedUrls } from "@/lib/authed-url";
 import { __resetStore } from "@/lib/store";
 import { __resetChatTail } from "@/lib/chat-tail";
 import { resetFoldersCacheForTests } from "@/lib/folders";
+
+// Node 25 exposes a disabled process-level localStorage; use jsdom's native Storage in test globals.
+const storageWindow = new JSDOM("", { url: "http://localhost" }).window;
+globalThis.Storage = storageWindow.Storage;
+globalThis.localStorage = storageWindow.localStorage;
+afterAll(() => storageWindow.close());
 
 // One MSW server for all tests; tests add per-case overrides with `server.use(...)`. It LIVES in
 // `./msw.ts`, which touches no document, so the pure-logic project can load it without this file

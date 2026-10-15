@@ -198,18 +198,17 @@ function worktreeRefusal<T>(err: T): MuxRefusalOutcome {
 }
 
 /** Herdr's reaper metadata for a parked pane, omitted by older servers. */
-type HerdrDisplayFields = { display_agent?: unknown };
+type HerdrDisplayFields = { display_agent?: string | null };
 
 /** The OMP pane badge is a display state, not a second harness identity. */
 function muxAgent(raw: WirePane["agent"]): string {
-  const value = typeof raw === "string" ? raw.trim() : "";
+  const value = raw?.trim() ?? "";
   return /^omp\s+\(sleeping\)$/iu.test(value) ? "omp" : value || "shell";
 }
 
 /** Parked OMP titles carry age metadata; keep only the conversation title. */
-function displayAgentTitle(raw: unknown): string | undefined {
-  if (typeof raw !== "string") return undefined;
-  const value = raw.trim();
+function displayAgentTitle(raw: string | null | undefined): string | undefined {
+  const value = raw?.trim();
   if (!value) return undefined;
   return (value.match(/^\d+(?:s|m|h|d|w|y)\s*·\s*(.+)$/u)?.[1] ?? value).trim() || undefined;
 }
@@ -673,6 +672,7 @@ function toMuxPane(
   // Herdr's sleeping badge is a display state, not a separate harness. Normalize it before the
   // journal and grammar registries see it, while preserving the raw value below for title metadata.
   const agent = muxAgent(raw.agent);
+  // SAFETY: `display_agent` is an optional reaper field that older Herdr servers omit; it is read only by displayAgentTitle.
   const display = raw as WirePane & HerdrDisplayFields;
   // Built mutable and returned readonly: every optional field below is ASSIGNED rather than
   // conditionally spread, so absent stays absent and each condition reads as the one rule it is.
@@ -690,7 +690,7 @@ function toMuxPane(
     agent,
     status: raw.agent_status,
   };
-  if (typeof raw.agent === "string" && /^omp\s+\(sleeping\)$/i.test(raw.agent)) pane.sleeping = true;
+  if (/^omp\s+\(sleeping\)$/i.test(raw.agent ?? "")) pane.sleeping = true;
   // Optional fields are ASSIGNED, never conditionally spread: absent stays absent, and each
   // condition below stays readable as the one rule it encodes.
   //

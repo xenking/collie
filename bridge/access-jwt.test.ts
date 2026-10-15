@@ -557,7 +557,13 @@ test("server.ts consults the Access gate before the deposed page and the routes"
   // ADR 0081 says the gate checks every request, including each poll, because the bridge holds no
   // stream open. A WebSocket upgrade or an event stream would be checked once, at connect, and keep
   // running past the token's expiry: adding one must revisit the ADR, and this line fails first.
-  expect(src).not.toMatch(/\.upgrade\(|websocket\s*:|text\/event-stream/);
+  // The ONE socket is the fork's OMP Voice media path (`/api/voice/media`): the upgrade request goes
+  // through the Access gate and the paired-device write gate, and a session is bounded by the voice
+  // broker's own timeouts. Any second upgrade, or an event stream, still fails here.
+  expect(src).not.toMatch(/text\/event-stream/);
+  expect(src.match(/\.upgrade\(/g)).toHaveLength(1);
+  expect(src.match(/websocket\s*:/g)).toHaveLength(1);
+  expect(src).toContain('pathname === "/api/voice/media"');
 });
 
 describe("DOOR_PRESETS", () => {

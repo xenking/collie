@@ -59,6 +59,8 @@ const NOT_REACHED_BY_WINDOWS: readonly Allowed[] = [
   { file: "bridge/worktree-branch.ts", pattern: "splitOnSlash", count: 1, why: "the same branch name, cut into its components" },
   { file: "bridge/config.ts", pattern: "splitOnSlash", count: 1, why: "COLLIE_BASE_PATH is a URL mount, always slashes" },
   { file: "bridge/crew/forward.ts", pattern: "splitOnSlash", count: 3, why: "crew route names, URL paths" },
+  { file: "bridge/omp-commands.ts", pattern: "startsWithSlash", count: 1, why: "an OMP slash-command name (`/help`), never a path" },
+  { file: "bridge/omp-commands.ts", pattern: "splitOnSlash", count: 1, why: "the same slash-command name, cut on `/`" },
   { file: "bridge/files-view.ts", pattern: "startsWithSlash", count: 1, why: "the wire's relative path, `/`-separated on every host; joined with host.path" },
   { file: "bridge/files-view.ts", pattern: "splitOnSlash", count: 1, why: "the same wire path, cut into names before host.path.join" },
   { file: "bridge/crew/peer-client.ts", pattern: "urlPathname", count: 1, why: "an HTTP route, never a file" },
