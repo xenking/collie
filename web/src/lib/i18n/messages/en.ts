@@ -268,6 +268,10 @@ export const en = {
   "settings.display.rawTerminal.label": "Raw terminal",
   "settings.display.rawTerminal.hint":
     "Shows the plain mirror — no tappable prompt buttons, no chrome or status strips. Use it when a dialog renders wrong and you want to drive it by hand from Keys.",
+  "settings.display.voiceResult.label": "Voice result",
+  "settings.display.voiceResult.hint.send": "Send automatically",
+  "settings.display.voiceResult.hint.insert": "Insert into draft",
+  "settings.display.voiceResult.aria": "Send voice automatically",
   "settings.display.noInvert.label": "Render this pane natively",
   "settings.display.noInvert.hint":
     "Skips the light-theme inversion for this pane only. Turn it on when an agent is on a LIGHT theme and the mirror renders it dark; leave it off when the pane looks right.",

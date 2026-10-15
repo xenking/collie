@@ -243,6 +243,10 @@ export const de: Dictionary = {
   "settings.display.rawTerminal.label": "Rohes Terminal",
   "settings.display.rawTerminal.hint":
     "Zeigt den reinen Terminal-Puffer ohne Buttons, Rahmen oder Statusleisten. Gedacht für falsch dargestellte TUI-Dialoge zur manuellen Tastensteuerung.",
+  "settings.display.voiceResult.label": "Sprachergebnis",
+  "settings.display.voiceResult.hint.send": "Automatisch senden",
+  "settings.display.voiceResult.hint.insert": "In den Entwurf einfügen",
+  "settings.display.voiceResult.aria": "Sprache automatisch senden",
   "settings.display.noInvert.label": "Dieses Pane nativ darstellen",
   "settings.display.noInvert.hint":
     "Überspringt die Invertierung im hellen Theme nur für dieses Pane. Aktiviere es, wenn ein Agent ein HELLES Theme nutzt und der Spiegel ihn dunkel darstellt; lass es aus, wenn das Pane richtig aussieht.",

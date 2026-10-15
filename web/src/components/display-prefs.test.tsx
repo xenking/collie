@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { DisplayPrefsContent, type PaneViewControl } from "./display-prefs";
@@ -95,5 +95,42 @@ describe("DisplayPrefsContent", () => {
     expect(screen.getByRole("radio", { name: "Chat" })).toBeDisabled();
     expect(screen.getByText("No session. The terminal stays here.")).toBeInTheDocument();
     expect(screen.getByLabelText("Wrap lines")).toBeInTheDocument();
+  });
+});
+
+describe("DisplayPrefsContent voice result", () => {
+  it("labels the voice-result switch in the active language", async () => {
+    // Fresh modules so the component and the locale store share one copy of `@/lib/i18n`.
+    vi.resetModules();
+    vi.doMock("@/lib/stt", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/stt")>()),
+      useVoiceCapability: () => true,
+      useHandsFree: () => false,
+    }));
+    const [{ DisplayPrefsContent: Fresh }, { __resetLocale, setLocale, whenLocaleReady }] = await Promise.all([
+      import("./display-prefs"),
+      import("@/lib/i18n"),
+    ]);
+    __resetLocale();
+    await act(async () => {
+      setLocale("de");
+      await whenLocaleReady("de");
+    });
+    render(
+      <Fresh
+        prefs={PREFS}
+        setWrap={vi.fn()}
+        stepFontSize={vi.fn()}
+        setRawTerminal={vi.fn()}
+        setTapToFocus={vi.fn()}
+        mirrorNative={false}
+        setMirrorNative={vi.fn()}
+        setExpandClippedReply={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("switch", { name: "Sprache automatisch senden" })).toBeInTheDocument();
+    expect(screen.getByText("In den Entwurf einfügen")).toBeInTheDocument();
+    __resetLocale();
+    vi.doUnmock("@/lib/stt");
   });
 });

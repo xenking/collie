@@ -230,6 +230,10 @@ export const zh: Dictionary = {
   "settings.display.rawTerminal.label": "原始终端",
   "settings.display.rawTerminal.hint":
     "仅显示纯终端镜像，隐藏提示按钮与状态栏。适用于对话框渲染异常时通过按键手动操作。",
+  "settings.display.voiceResult.label": "语音结果",
+  "settings.display.voiceResult.hint.send": "自动发送",
+  "settings.display.voiceResult.hint.insert": "插入草稿",
+  "settings.display.voiceResult.aria": "自动发送语音",
   "settings.display.noInvert.label": "以原始配色显示此窗格",
   "settings.display.noInvert.hint":
     "仅对此窗格跳过浅色主题的反色。当代理使用浅色主题而镜像显示为深色时开启；显示正常时保持关闭。",

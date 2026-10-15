@@ -238,6 +238,10 @@ export const ja: Dictionary = {
   "settings.display.rawTerminal.label": "未加工ターミナル",
   "settings.display.rawTerminal.hint":
     "プロンプトボタンやステータス表示を除いた素の出力を表示します。ダイアログの表示崩れを手動で制御する際に使用します。",
+  "settings.display.voiceResult.label": "音声の結果",
+  "settings.display.voiceResult.hint.send": "自動で送信",
+  "settings.display.voiceResult.hint.insert": "下書きに挿入",
+  "settings.display.voiceResult.aria": "音声を自動で送信",
   "settings.display.noInvert.label": "このペインをそのまま表示",
   "settings.display.noInvert.hint":
     "このペインだけライトテーマの反転を行いません。エージェントがライトテーマで、ミラーが暗く表示される場合にオンにしてください。表示が正しい場合はオフのままにします。",

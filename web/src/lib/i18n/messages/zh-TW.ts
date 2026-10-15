@@ -229,6 +229,10 @@ export const zhTW: Dictionary = {
   "settings.display.rawTerminal.label": "原始終端機",
   "settings.display.rawTerminal.hint":
     "僅顯示純終端機鏡像，隱藏提示按鈕與狀態列。適用於對話框呈現異常時透過按鍵手動操作。",
+  "settings.display.voiceResult.label": "語音結果",
+  "settings.display.voiceResult.hint.send": "自動傳送",
+  "settings.display.voiceResult.hint.insert": "插入草稿",
+  "settings.display.voiceResult.aria": "自動傳送語音",
   "settings.display.noInvert.label": "以原始配色顯示此窗格",
   "settings.display.noInvert.hint":
     "僅對此窗格略過淺色主題的反色。當代理使用淺色主題而鏡像顯示為深色時開啟；顯示正常時保持關閉。",

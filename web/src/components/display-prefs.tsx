@@ -334,15 +334,15 @@ export function DisplayPrefsContent({
       )}
       {voiceEnabled && (
         <Row
-          label="Voice result"
-          hint={handsFree ? "Send automatically" : "Insert into draft"}
+          label={t("settings.display.voiceResult.label")}
+          hint={t(handsFree ? "settings.display.voiceResult.hint.send" : "settings.display.voiceResult.hint.insert")}
           htmlFor="pref-voice-result"
           control={
             <Switch
               id="pref-voice-result"
               checked={handsFree}
               onCheckedChange={setHandsFreeEnabled}
-              aria-label="Send voice automatically"
+              aria-label={t("settings.display.voiceResult.aria")}
             />
           }
         />

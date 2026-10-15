@@ -241,6 +241,10 @@ export const es: Dictionary = {
   "settings.display.rawTerminal.label": "Terminal sin formato",
   "settings.display.rawTerminal.hint":
     "Muestra la sesion directa sin botones de interfaz ni barras. Util si un dialogo falla y requiere control manual mediante Teclas.",
+  "settings.display.voiceResult.label": "Resultado de voz",
+  "settings.display.voiceResult.hint.send": "Enviar automáticamente",
+  "settings.display.voiceResult.hint.insert": "Insertar en el borrador",
+  "settings.display.voiceResult.aria": "Enviar la voz automáticamente",
   "settings.display.noInvert.label": "Mostrar este panel de forma nativa",
   "settings.display.noInvert.hint":
     "Omite la inversión del tema claro solo en este panel. Actívalo cuando un agente use un tema CLARO y el espejo lo muestre oscuro; déjalo desactivado si el panel se ve bien.",
