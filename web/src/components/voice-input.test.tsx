@@ -10,11 +10,16 @@ import { Composer } from "./composer";
 
 import { pcm16, VoiceInput, type VoiceState } from "./voice-input";
 
+interface ReadyMessage {
+  kind: "ready";
+  replySpeech?: boolean;
+}
+
 class FakeSocket {
   static readonly OPEN = 1;
   static instances: FakeSocket[] = [];
   static autoReady = true;
-  static readyMessage: { kind: "ready"; replySpeech?: boolean } = { kind: "ready" };
+  static readyMessage: ReadyMessage = { kind: "ready" };
   readonly send = vi.fn();
   readyState = FakeSocket.OPEN;
   binaryType = "blob";
