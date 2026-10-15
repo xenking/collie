@@ -389,6 +389,22 @@ describe("Composer — hands-free", () => {
     await waitFor(() => expect(box).toHaveValue("typed by hand and this"));
     expect(replies).toBe(0);
   });
+
+  it("keeps the transcript in the draft when the hands-free send fails", async () => {
+    const user = userEvent.setup();
+    setHandsFreeEnabled(true);
+    server.use(
+      configHandler(CONFIG_WITH_STT),
+      sttHandler("ship it"),
+      http.post(/\/api\/pane\/[^/]+\/reply$/, () => HttpResponse.json({ error: "bridge down" }, { status: 500 })),
+    );
+    renderComposer();
+    const recorder = await startRecording(user);
+    act(() => recorder.finish());
+
+    // The words were never confirmed in the pane, so losing them with the caption would lose them.
+    await waitFor(() => expect(screen.getByPlaceholderText(/type a reply/i)).toHaveValue("ship it"));
+  });
 });
 
 describe("Composer — a refused transcription", () => {

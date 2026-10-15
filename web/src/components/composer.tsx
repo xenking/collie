@@ -764,7 +764,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const mayHandsFree =
       handsFree && draftEmpty && noEchoRef.current === null && !locked && !offline && !dialogPresent;
     if (mayHandsFree) {
-      void send(transcript, false);
+      void sendTranscript(transcript);
       return;
     }
     insertTranscript(transcript);
@@ -773,10 +773,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   async function acceptVoiceTranscript(transcript: string): Promise<boolean> {
     const draftEmpty = inputValueRef.current.trim() === "" && attachmentsRef.current.length === 0;
     if (handsFree && draftEmpty && noEchoRef.current === null && !locked && !offline && !dialogPresent) {
-      return send(transcript, false);
+      return sendTranscript(transcript);
     }
     insertTranscript(transcript);
     return false;
+  }
+
+  /** A hands-free send that fails keeps the words in the draft, as a typed send keeps its draft. */
+  async function sendTranscript(transcript: string): Promise<boolean> {
+    const sent = await send(transcript, false);
+    if (!sent && inputValueRef.current.trim() === "") insertTranscript(transcript);
+    return sent;
   }
 
   /** Splice a transcript into the draft AT THE CARET (the field is where the operator left it, and
