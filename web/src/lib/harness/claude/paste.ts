@@ -38,6 +38,78 @@
 const PLACEHOLDER = /\[Pastedtext#\d+(?:\+(\d+)lines)?\]/g;
 
 /**
+ * Claude's token for an image file whose path arrived in a paste, whitespace-stripped. How Claude
+ * picks those paths is {@link liftedPaste}.
+ */
+const IMAGE_TOKEN = /\[Image#\d+\]/g;
+
+/**
+ * The shape of the path Collie's upload route hands back (`bridge/server.ts`): an absolute
+ * `<stateDir>/uploads/<pane>-<base36 time>-<8 hex>.<ext>`, with a POSIX or a Windows root. The
+ * composer swaps a chip's marker for that path where the marker stood (`composeLine`), so it is the
+ * only image path Collie ever sends. A name merely ending `.png` in a sentence is not this shape.
+ */
+const UPLOAD_PATH_TAIL = String.raw`[\\/]uploads[\\/][A-Za-z0-9_-]+-[0-9a-z]+-[0-9a-f]{8}\.(?:png|jpe?g|gif|webp)`;
+const UPLOAD_ROOT = String.raw`(?:/|[A-Za-z]:[\\/])`;
+/** A whole piece of a paste that is one upload path; the directories may hold spaces (a Windows
+ *  profile name). */
+const UPLOAD_PIECE = new RegExp(`^${UPLOAD_ROOT}.*${UPLOAD_PATH_TAIL}$`, "i");
+/** Where Claude cuts a paste into pieces: at each newline, and at a space that comes right before
+ *  an absolute path. */
+const PIECE_CUT = new RegExp(`\\r?\\n| (?=${UPLOAD_ROOT})`);
+
+/**
+ * What Claude keeps of a paste after it takes the image paths out. Claude cuts the paste at each
+ * newline and at each space before an absolute path. When some pieces are image files, it attaches
+ * each one as an `[Image #N]` and keeps the other pieces, joined by newlines, as the paste. When no
+ * piece is an image, the paste stays as it was sent.
+ *
+ * Live-probed 2026-10-14 (Claude Code 2.1.299, a 1,400-character paste with six newlines):
+ *   `<text> P`          → `[Image #2][Pasted text #3 +6 lines]`
+ *   `<text> P P`        → `[Image #7] [Image #8][Pasted text #9 +6 lines]`, the 2026-10-14
+ *                         minibuch send that stalled, because only one trailing path was counted
+ *   `<text> /usr/x P`   → `[Image #14][Pasted text #15 +7 lines]`, the kept pieces gain a newline
+ *   `<300 chars> P\n<rest>` and `<300 chars> P P\n<rest>` → one or two images, `+7 lines`
+ *   `P <text>`, `P P <text>` → no image, or one: the piece `P <text>` is not a path
+ *   `<text> P word`, `<300 chars> P <rest>` → no image
+ *
+ * Only Collie's own upload paths count. Claude also takes other image files it finds on disk, and
+ * a token for one of those makes the send unprovable, which stalls it rather than guessing.
+ */
+export function liftedPaste(sent: string): { images: number; text: string } {
+  const pieces = sent.split(PIECE_CUT);
+  const kept = pieces.filter((piece) => !UPLOAD_PIECE.test(piece.trim()));
+  const images = pieces.length - kept.length;
+  return images === 0 ? { images, text: sent } : { images, text: kept.join("\n") };
+}
+
+/** How many upload image paths in a send Claude lifts into an {@link IMAGE_TOKEN}. */
+export function liftableImagePaths(sent: string): number {
+  return liftedPaste(sent).images;
+}
+
+/**
+ * Claude collapses one paste longer than this into a token; this many or fewer insert literally.
+ * Live-probed 2026-10-03 (Claude Code 2.1.288), bracketed and bare alike: 800 literal, 801 a token.
+ */
+const PASTE_COLLAPSE_CHARS = 800;
+
+/**
+ * Whether a reply is long enough to send as ONE bracketed paste (`HarnessAdapter.bracketedPaste`).
+ *
+ * Bare, a long send reaches Claude as several PTY reads (~1 KB each on macOS); Claude makes each read
+ * over {@link PASTE_COLLAPSE_CHARS} its own token, and a short final read then wipes the earlier
+ * tokens, so only the END of the message survives, and that tail verifies, so Enter submits it.
+ * Probed 2026-10-03 (herdr 0.9.0): 12,029 chars sent bare, 787 received; framed, all 12,029.
+ *
+ * At or under the limit no read can collapse, so nothing can be lost, and the send stays bare. That
+ * keeps a short reply literal in the box, and keeps a lone image path a path rather than an image.
+ */
+export function collapsesAsPaste(text: string): boolean {
+  return text.length > PASTE_COLLAPSE_CHARS;
+}
+
+/**
  * Below this, a single-line send is short enough that Claude would have inserted it literally, so a
  * token on screen is somebody else's. Sits comfortably above the ~400-char threshold we observed —
  * that threshold is unversioned Claude-internal behaviour, so the gate is deliberately pessimistic:
@@ -70,6 +142,11 @@ interface Scan {
 
 function stripWhitespace(s: string): string {
   return s.replace(/\s+/g, "");
+}
+
+/** A whitespace-stripped draft with Claude's image tokens taken out, and how many there were. */
+function liftImages(stripped: string) {
+  return { draft: stripped.replace(IMAGE_TOKEN, ""), images: stripped.match(IMAGE_TOKEN)?.length ?? 0 };
 }
 
 /** Split a whitespace-stripped draft into its placeholder tokens and the literal text around them. */
@@ -126,18 +203,29 @@ function scan(stripped: string): Scan {
  * and rejecting a shape we cannot read would convert working sends into permanent stalls, which is the
  * worse failure of the two.
  *
+ * An `[Image #N]` token beside the paste is Claude having lifted an image path out of it. The tokens
+ * must then match {@link liftedPaste} exactly: as many images as it finds, and every rule above runs
+ * against the paste it says Claude kept, not against the send.
+ *
  * Anything inconsistent returns false and the caller keeps today's behaviour: no submit key, draft
  * kept, "didn't reach the input box". Guessing here would fire Enter at a screen we cannot read.
  */
 export function pasteCarriesSend(sent: string, draft: string): boolean {
-  const d = stripWhitespace(draft);
-  const s = stripWhitespace(sent);
+  const { draft: d, images } = liftImages(stripWhitespace(draft));
+  const lift = liftedPaste(sent);
+  if (images > 0 && images !== lift.images) return false;
+  // A send that goes as one bracketed paste and carries upload paths Claude will lift is not proven
+  // until the image tokens are on screen: read before them, the token alone would let Enter go before
+  // the photos are attached. Wait for the next read rather than judge the paste as sent.
+  if (images === 0 && lift.images > 0 && collapsesAsPaste(sent)) return false;
+  const pasted = images === 0 ? sent : lift.text;
+  const s = stripWhitespace(pasted);
   const { tokens, lines, fragments, trailing } = scan(d);
   if (tokens === 0) return false;
 
-  const newlines = countNewlines(sent);
-  if (newlines === 0 && sent.length < MIN_COLLAPSIBLE_LENGTH) return false;
+  if (countNewlines(sent) === 0 && sent.length < MIN_COLLAPSIBLE_LENGTH) return false;
 
+  const newlines = countNewlines(pasted);
   if (lines > newlines) return false;
   if (fragments.length === 0) return lines === newlines;
 
@@ -167,7 +255,7 @@ export function pasteCarriesSend(sent: string, draft: string): boolean {
  * what the screen says); only the take-over affordance stands down.
  */
 export function isPastePlaceholderOnly(draft: string): boolean {
-  const { tokens, fragments } = scan(stripWhitespace(draft));
+  const { tokens, fragments } = scan(liftImages(stripWhitespace(draft)).draft);
   return tokens > 0 && fragments.length === 0;
 }
 

@@ -1,15 +1,27 @@
 import type { Page, Route } from "@playwright/test";
 
 import type { Locale } from "@/lib/i18n/locale";
+import type { MachineAlerts } from "@/lib/types";
 import { TOUR_STORAGE_KEY, TOUR_VERSION } from "@/lib/tour";
 import {
+  fixtureChangeDiff,
+  fixtureChanges,
+  fixtureCommit,
+  fixtureCommitDiff,
   fixtureCrewSnapshot,
   fixtureCrewStatus,
+  fixtureFileImage,
+  fixtureFileRead,
+  fixtureFilesDir,
+  FIXTURE_FILES_UNKNOWN,
+  fixtureNewSpace,
+  fixtureNewTab,
   fixtureSnapshot,
   fixtureTranscript,
   paneTextWithDraft,
   recordReply,
 } from "@/test/handlers";
+import { censusFor, fixtureMachines, fixtureMachinesSolo, historyFor } from "@/test/machine-fixtures";
 
 // The `app` target's API. The shipped bundle is served off disk by a static server, so nothing
 // answers `/api/*` unless this module does.
@@ -43,15 +55,96 @@ interface ReplyBody {
   readonly submit?: boolean;
 }
 
+/** `POST /api/workspace`'s body, as `lib/api.ts`'s `createWorkspace` posts it. */
+interface CreateSpaceBody {
+  readonly label?: string;
+  readonly cwd?: string;
+}
+
+/** `POST /api/folders/star`'s body, as `lib/api.ts`'s `starFolder` posts it. */
+interface StarFolderBody {
+  readonly folder: string;
+  readonly starred: boolean;
+}
+
+/** The home the stub's multiplexer opens a blank create in — the fixture new space's own folder. */
+const STUB_HOME = fixtureNewSpace.pane.cwd;
+
+/**
+ * The folder list the stub keeps, standing in for the bridge's `folders.json` (#289,
+ * `bridge/folders.ts`). ONE PER PAGE, built by {@link installApiStub}, so no case inherits another's
+ * Recent. It keeps the bridge's rules in small: a create that named a folder records it at the top
+ * of Recent, never home and never a favourite; a star moves a Recent folder to Favourites, an unstar
+ * moves it back; a star on a folder in neither list is the bridge's 409. The bounds are the bridge's
+ * business and are pinned there, not re-typed here.
+ */
+class FolderWorld {
+  private recent: string[] = [];
+  private favourites: string[] = [];
+
+  body() {
+    return { recent: [...this.recent], favourites: [...this.favourites], home: STUB_HOME };
+  }
+
+  /** A create that worked: the folder the multiplexer reported, when the operator named one. */
+  record(typed: string, reported: string): void {
+    if (typed.trim() === "" || reported === STUB_HOME || this.favourites.includes(reported)) return;
+    this.recent = [reported, ...this.recent.filter((f) => f !== reported)];
+  }
+
+  /** `true` when the star was taken (or changed nothing), `false` for the bridge's `folders.unknown`. */
+  star(folder: string, starred: boolean): boolean {
+    if (starred) {
+      if (this.favourites.includes(folder)) return true;
+      if (!this.recent.includes(folder)) return false;
+      this.recent = this.recent.filter((f) => f !== folder);
+      this.favourites = [...this.favourites, folder];
+      return true;
+    }
+    if (!this.favourites.includes(folder)) return true;
+    this.favourites = this.favourites.filter((f) => f !== folder);
+    this.recent = [folder, ...this.recent];
+    return true;
+  }
+}
+
 /**
  * Answer the one request. Split out of the route so the dispatch reads as a table and so an
  * unmatched path is a loud 501 rather than a silent fall-through to the static server, which would
  * hand the app `index.html` for a JSON fetch and fail somewhere far away from the cause.
  */
-async function answer(route: Route, path: string): Promise<void> {
+async function answer(route: Route, path: string, folders: FolderWorld): Promise<void> {
   const method = route.request().method();
 
   if (path === "/api/snapshot") return fulfillJson(route, fixtureSnapshot);
+
+  // The Changes view (ADR 0065): the list, or with `?repo=&path=` one file's diff. Asked by pane or
+  // by workspace, the answer is the same list.
+  if (/^\/api\/(?:pane|workspace)\/[^/]+\/changes$/.test(path)) {
+    const q = new URL(route.request().url()).searchParams;
+    const repo = q.get("repo");
+    const file = q.get("path");
+    if (q.get("view") === "commit") {
+      return fulfillJson(route, repo !== null && file !== null ? fixtureCommitDiff(repo, file) : fixtureCommit);
+    }
+    if (repo !== null && file !== null) return fulfillJson(route, fixtureChangeDiff(repo, file));
+    return fulfillJson(route, fixtureChanges);
+  }
+
+  // The Files view (ADR 0083): a folder (`?dir=`, none for the root) or one file (`?path=`).
+  if (/^\/api\/(?:pane|workspace)\/[^/]+\/files$/.test(path)) {
+    const q = new URL(route.request().url()).searchParams;
+    const file = q.get("path");
+    const found = file !== null ? fixtureFileRead(file) : fixtureFilesDir(q.get("dir") ?? "");
+    return found === null ? fulfillJson(route, FIXTURE_FILES_UNKNOWN, 404) : fulfillJson(route, found);
+  }
+
+  // One picture under the Files root, as bytes (ADR 0090).
+  if (/^\/api\/(?:pane|workspace)\/[^/]+\/files\/image$/.test(path)) {
+    const bytes = fixtureFileImage(new URL(route.request().url()).searchParams.get("path") ?? "");
+    if (bytes === null) return fulfillJson(route, FIXTURE_FILES_UNKNOWN, 404);
+    return route.fulfill({ status: 200, contentType: "image/png", body: Buffer.from(bytes) });
+  }
 
   if (/^\/api\/pane\/[^/]+\/history$/.test(path)) {
     return fulfillJson(route, {
@@ -87,6 +180,39 @@ async function answer(route: Route, path: string): Promise<void> {
     });
   }
 
+  // A new tab (the tab strip's "+", a workspace heading's "+"): the fresh shell pane, whichever
+  // machine the `?host=` names. A case that cares where the create went reads the request itself.
+  if (path === "/api/tab" && method === "POST") return fulfillJson(route, fixtureNewTab);
+
+  // A new space: the fixture's fresh shell pane, opened where the create asked — a blank field is
+  // home — and reported back the way a multiplexer reports it. A create that named a folder then
+  // lands at the top of Recent, exactly as the bridge records it.
+  if (path === "/api/workspace" && method === "POST") {
+    // SAFETY: the body is the app's own — `lib/api.ts`'s `createWorkspace` is the only caller and it
+    // posts `{ label?, cwd? }`. Both fields are optional there, so a body with neither is a create in
+    // home, which is what the bridge reads it as too.
+    const body = route.request().postDataJSON() as CreateSpaceBody;
+    const typed = body.cwd ?? "";
+    const reported = typed.trim() === "" ? STUB_HOME : typed.trim();
+    folders.record(typed, reported);
+    return fulfillJson(route, { ...fixtureNewSpace, pane: { ...fixtureNewSpace.pane, cwd: reported } });
+  }
+
+  // The new-space sheet's folder list (#289), from the page's own FolderWorld.
+  if (path === "/api/folders" && method === "GET") return fulfillJson(route, folders.body());
+  if (path === "/api/folders/star" && method === "POST") {
+    // SAFETY: as above — `lib/api.ts`'s `starFolder` is the only caller and posts `{ folder, starred }`.
+    const body = route.request().postDataJSON() as StarFolderBody;
+    if (!folders.star(body.folder, body.starred)) {
+      return fulfillJson(
+        route,
+        { error: `${body.folder} is not in Recent, so it cannot be starred`, code: "folders.unknown", detail: { folder: body.folder } },
+        409,
+      );
+    }
+    return fulfillJson(route, folders.body());
+  }
+
   // The DEFAULT world is solo, so the census refuses exactly as a non-lead bridge does. A case that
   // wants a crew overrides this route with `fixtureCrewStatus`.
   if (path === "/api/crew") {
@@ -96,11 +222,21 @@ async function answer(route: Route, path: string): Promise<void> {
       404,
     );
   }
+  // The machines census: a solo lead with one row, its day of history, and the alert POST echoing the
+  // body it was given (the bridge answers the rules as stored). A case that wants a crew, or that
+  // wants the rules to stick, registers its own route after `installApiStub` (see `installMachinesWorld`).
+  if (path === "/api/machines") return fulfillJson(route, censusFor(fixtureMachinesSolo, new URL(route.request().url())));
+  if (/^\/api\/machines\/[^/]+\/history$/.test(path)) return fulfillJson(route, historyFor(new URL(route.request().url())));
+  if (/^\/api\/machines\/[^/]+\/alerts$/.test(path) && method === "POST") {
+    // SAFETY: as in `installMachinesWorld`, the body is the app's own `MachineAlerts`.
+    return fulfillJson(route, { alerts: route.request().postDataJSON() as MachineAlerts });
+  }
   if (path === "/api/config") return fulfillJson(route, { push: false, vapidPublicKey: "" });
   if (path === "/api/launchers") return fulfillJson(route, { launchers: [], home: "" });
-  // Nothing paired, nothing enforced — a fresh install.
+  // Nothing paired on a fresh install, and pairing is always on (ADR 0086). The stub answers every
+  // other read without a token, so the cases need not pair first: it stands in for a paired phone.
   if (path === "/api/devices" || path === "/api/devices/revoke") {
-    return fulfillJson(route, { enforced: false, current: null, devices: [] });
+    return fulfillJson(route, { enforced: true, current: null, devices: [] });
   }
   if (path === "/api/notifications/prefs") {
     return fulfillJson(route, { blocked: true, done: false, updates: true });
@@ -148,8 +284,9 @@ export interface ApiStubOptions {
  */
 export async function installApiStub(page: Page, options: ApiStubOptions = {}): Promise<void> {
   if (options.tour !== "fresh") await seedTourSeen(page);
+  const folders = new FolderWorld();
   await page.route("**/api/**", async (route) => {
-    await answer(route, new URL(route.request().url()).pathname);
+    await answer(route, new URL(route.request().url()).pathname, folders);
   });
 }
 
@@ -191,6 +328,36 @@ export async function installCrewWorld(page: Page): Promise<void> {
 }
 
 /**
+ * Turn the default solo machines census into the crew's four machines, with alert rules that STICK:
+ * a POST to a machine's alerts replaces that machine's rules in the census the next read returns, the
+ * way the bridge stores them. Returns the bodies posted, in order, for a case that asserts on them.
+ *
+ * Call it AFTER {@link installApiStub}: Playwright checks the newest handler first.
+ */
+export async function installMachinesWorld(page: Page): Promise<{ posted: { id: string; body: unknown }[] }> {
+  const posted: { id: string; body: unknown }[] = [];
+  const machines = structuredClone(fixtureMachines);
+  await page.route(
+    (url) => url.pathname === "/api/machines",
+    (route) => fulfillJson(route, censusFor(machines, new URL(route.request().url()))),
+  );
+  await page.route(
+    (url) => /^\/api\/machines\/[^/]+\/alerts$/.test(url.pathname),
+    async (route) => {
+      const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/")[3] ?? "");
+      // SAFETY: the body is the app's own: `lib/api.ts`'s `setMachineAlerts` is the only caller and it
+      // posts a `MachineAlerts` object.
+      const body = route.request().postDataJSON() as MachineAlerts;
+      posted.push({ id, body });
+      const row = machines.machines.find((m) => m.id === id);
+      if (row) row.alerts = body;
+      return fulfillJson(route, { alerts: body });
+    },
+  );
+  return { posted };
+}
+
+/**
  * Fill a message's `{slot}`s, the way the app's own `t()` does.
  *
  * The runtime's `interpolate` (`lib/i18n/index.ts`) is module-private and reads the locale out of
@@ -219,4 +386,16 @@ export async function pinLocale(page: Page, locale: Locale): Promise<void> {
     },
     [LOCALE_STORAGE_KEY, locale],
   );
+}
+
+/**
+ * Turn the device's Changes segment (the changesOnly pref) on before the first navigation, so the Changes screen's body
+ * is the list of changes rather than the folder tree, its default since 2026-10-06 (ADR 0083). For a
+ * case that tests the list itself. Written only while nothing is stored, so a reload keeps whatever
+ * the page wrote since.
+ */
+export async function seedChangesOnly(page: Page): Promise<void> {
+  await page.addInitScript((key) => {
+    if (window.localStorage.getItem(key) === null) window.localStorage.setItem(key, JSON.stringify({ changesOnly: true }));
+  }, "collie:dash-prefs:v1");
 }

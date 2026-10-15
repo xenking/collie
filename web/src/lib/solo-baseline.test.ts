@@ -61,6 +61,9 @@ const SNAPSHOT_KEYS = {
   ts: true,
   // Present on the type since M5/02, absent from every solo body — see the section header.
   servers: true,
+  // Not a crew dimension: present only while the mux is down for a refused durable token (M50 spec
+  // 14), so a healthy solo body carries no such key and no golden byte moved.
+  muxFault: true,
 } satisfies Record<keyof SnapshotResponse, true>;
 
 const SESSION_SUMMARY_KEYS = {
@@ -109,10 +112,20 @@ const AGENT_VIEW_KEYS = {
   // Also not a crew dimension: the pane's prompt-cache reading (M28/02), computed on the machine the
   // pane lives on and absent until its agent has taken one turn. A 1.8.x peer omits it.
   cache: true,
+  // Not a crew dimension: the model the pane's agent is on, from the same probe as `cache`, and
+  // absent until that agent has taken one turn. An older bridge or peer omits it.
+  model: true,
   // Not crew dimensions: the operator's name for this pane's one-pane tab, and the pane's position in
   // its tab. Computed on the machine the pane lives on; an older peer omits both.
   soleTabName: true,
   tabPosition: true,
+  // Not a crew dimension: what the checkout holding the pane's folder is on, read off the disk of
+  // the machine the pane lives on. An older bridge or peer omits it.
+  gitHead: true,
+  // Not crew dimensions: a durable program's open asks and newest turn (ADR 0100, ADR 0101), present
+  // only on a pane with no screen and absent from an older bridge or peer.
+  asks: true,
+  turnId: true,
 } satisfies Record<keyof AgentView, true>;
 
 const DEVICE_AUTH_KEYS = {
@@ -147,6 +160,9 @@ const UPDATE_INFO_KEYS = {
   // band is read next. Optional here: a bridge older than the fields sends neither.
   dismissedVersion: true,
   dismissedCrewVersion: true,
+  // When the crew notice was closed (1.21.1). Optional, and absent until a crew close is made, so a
+  // solo payload carries no such key.
+  dismissedCrewAt: true,
   // The peer legs of a run this machine has no record of, and that run's settle stamp (M20/09,
   // M20/01). Both optional and both ABSENT on a solo install: a machine with no crew has no legs,
   // so the solo payload is byte-identical to what it was.
@@ -169,6 +185,7 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
       "agents",
       "bridge",
       "device",
+      "muxFault",
       "notifications",
       "servers",
       "sessions",
@@ -202,15 +219,18 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
     expect(AGENT_VIEW_KEYS.session).toBe(true);
     expect(Object.keys(AGENT_VIEW_KEYS).toSorted()).toEqual([
       "agent",
+      "asks",
       "cache",
       "cwd",
       "focused",
+      "gitHead",
       "hasSession",
       "hint",
       "host",
       "kind",
       "lastActiveAt",
       "lastSeenAt",
+      "model",
       "paneId",
       "paneLabel",
       "readableLines",
@@ -223,6 +243,7 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
       "tabPosition",
       "terminalTitle",
       "terminalTitleStale",
+      "turnId",
       "workspaceId",
       "workspaceLabel",
       "workspaceNumber",
@@ -234,6 +255,7 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
       "current",
       // The two bands the operator can close (M17/08) — optional here, because a bridge older than
       // the fields sends neither.
+      "dismissedCrewAt",
       "dismissedCrewVersion",
       "dismissedVersion",
       "installKind",

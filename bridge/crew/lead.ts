@@ -1,6 +1,7 @@
 import type { JsonValue } from "../json.ts";
 import type { SnapshotView } from "../sessions.ts";
-import type { MuxConfig, SnapshotResponse } from "../types.ts";
+import { parsePeerMachineStats } from "../machine-parse.ts";
+import type { MachineSample, MuxConfig, SnapshotResponse } from "../types.ts";
 import { forwardToPeer, type ForwardDeps, type ForwardTransport } from "./forward.ts";
 import {
   mergeSnapshot,
@@ -29,6 +30,7 @@ import {
   type CrewUpdateRow,
 } from "../update-action.ts";
 import { UpdateTurns, type PeerLeg, type TurnMember } from "./follow.ts";
+import type { UpdateRun } from "../update-run.ts";
 
 // The lead's side of the crew, assembled: sweep the peers, remember the last-good body, merge.
 //
@@ -222,6 +224,15 @@ export interface CrewLeadDeps {
   /** Called for a member the registry has dropped (`leave`/revocation/rotation) — see PeerNotifier.forget. */
   readonly onPeerGone?: (memberId: string) => void;
   /**
+   * A member's own load sample, read off the answer this sweep just parsed (ADR 0084), with this
+   * lead's receipt time (§10.2: a peer's clock is never trusted).
+   *
+   * Called only when the answer CARRIED a sample that parsed: an absent or malformed field is "not
+   * reported" and calls nothing, so the lead keeps the last sample it had and its age says how old
+   * it is. Optional, so a lead built without the machine watch sweeps exactly as before.
+   */
+  readonly onMachineStats?: (memberId: string, sample: MachineSample, at: number) => void;
+  /**
    * A member answered §18.10's named `lead_conflict`: **it follows somebody else now.**
    *
    * This is the fast path of §18.12's delivery — best-effort and time-boxed, because it only works
@@ -293,6 +304,12 @@ export interface FollowDistribution {
    * boot would keep a whole crew waiting for a restart.
    */
   readonly leadRelease: () => string | null;
+  /**
+   * This lead's own run record, resolved, or null. The queue reads it to tell a lead still taking
+   * the release from one whose update rolled back and will never state the target (A1). Optional:
+   * a caller that passes none leaves the queue to its wall clock and its run bound.
+   */
+  readonly leadRun?: () => Pick<UpdateRun, "state" | "runId" | "to"> | null;
   /** The in-memory queue. Never persisted — a lead restart re-derives it and re-grants. */
   readonly turns: UpdateTurns;
   /** `enrolledAt` per member, the trust store's own ordering. Read through the store each sweep. */
@@ -537,6 +554,11 @@ export class CrewLead {
           // the same cast and the same reason as `foldPeerMemory`'s. `parsePeerPreflight` re-checks
           // every field, and anything half-formed reads as `null`, which is unknown and blocks.
           this.deps.registry.recordPreflight(memberId, parsePeerPreflight(outcome.value as JsonValue));
+          // ADR 0084: that member's own load, off the same answer, stamped on THIS lead's clock.
+          // SAFETY: the same cast and the same reason as the line above; `parsePeerMachineStats`
+          // re-checks every field and answers `null` for anything it cannot trust.
+          const load = this.deps.onMachineStats === undefined ? null : parsePeerMachineStats(outcome.value as JsonValue);
+          if (load !== null) this.deps.onMachineStats?.(memberId, load, this.now());
         }
         const previous = this.memory.get(memberId);
         const next = foldPeerMemory(previous, outcome, this.now());
@@ -616,7 +638,10 @@ export class CrewLead {
       const kind = state.preflight?.installKind;
       return kind === undefined ? turnMember : { ...turnMember, installKind: kind };
     });
-    if (follow.turns.observe(members, this.now()).released) this.resweep();
+    // What this lead states about itself gates every grant: a turn is handed out only while that is
+    // the run's own target, so a member can never be sent to an intermediate release (§20).
+    const lead = { release: follow.leadRelease(), run: follow.leadRun?.() ?? null };
+    if (follow.turns.observe(members, this.now(), lead).released) this.resweep();
   }
 
   /**
@@ -939,7 +964,11 @@ export class CrewLead {
     req: Request,
     url: URL,
     resolved: { readonly link: CrewLink; readonly state: PeerState },
-    opts: { readonly audit?: ForwardDeps["audit"]; readonly device?: string | null } = {},
+    opts: {
+      readonly audit?: ForwardDeps["audit"];
+      readonly device?: string | null;
+      readonly mask?: ForwardDeps["mask"];
+    } = {},
   ): Promise<Response> {
     return forwardToPeer(req, url, {
       link: resolved.link,
@@ -1005,6 +1034,14 @@ export class CrewLead {
    */
   updateSettledAt(): number | null {
     return this.deps.follow?.turns.settledAt() ?? null;
+  }
+
+  /**
+   * Whether the crew run this lead drives is still open, which refuses a second confirm (A5). It
+   * dials nobody.
+   */
+  updateRunOpen(): boolean {
+    return this.deps.follow?.turns.open(this.now()) ?? false;
   }
 
   /**

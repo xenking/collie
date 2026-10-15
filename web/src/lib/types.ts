@@ -142,14 +142,68 @@ export interface AgentView {
    * all, and a 1.8.x peer simply omits it — every one of those renders as nothing.
    */
   cache?: PaneCache;
+  /**
+   * The model this pane's agent is on, in the harness's own words. Mirrors `PaneWire.model` in
+   * bridge/types.ts. **Absent, never a placeholder**, and text only: read it through `modelLabel`
+   * (lib/model-label.ts), which shortens it and drops anything that is not a name.
+   */
+  model?: string;
+  /**
+   * What the checkout holding this pane's folder is on. Mirrors `PaneWire.gitHead` in bridge/types.ts.
+   *
+   * **Absent, never a placeholder**: a folder in no checkout, a reading the bridge has not taken yet,
+   * an older bridge and an older crew member all send no key, and every one of those renders exactly
+   * what it rendered before the field existed. Read it through `paneGitHead` (lib/git-head.ts), which
+   * also drops a malformed one from a peer. Text only, never markup: a branch name is the repo's.
+   */
+  gitHead?: GitHead;
+  /**
+   * The open asks a person may answer on this pane, as data, oldest first (ADR 0100). Mirrors
+   * `PaneWire.asks` in bridge/types.ts. Every open ask is listed (the bridge caps at 50); the card
+   * list shows the first five and folds the rest (lib/ask.ts `shownAsks`). **Absent on every pane with
+   * a screen**, on an older bridge and on an older crew member, which all read as "no asks as data
+   * here". An empty list is a real answer. Text only, never markup: every string came from a program.
+   */
+  asks?: Ask[];
+  /**
+   * The newest turn of a pane that has no screen (ADR 0101). A send or an abort names it, so a stale
+   * name is refused instead of landing on a turn the person never saw. Absent on a pane with a
+   * screen. Sent back unchanged, never shown.
+   */
+  turnId?: string;
 }
 
-export function paneDisplayName(pane: AgentView): string {
-  if (pane.paneLabel) return pane.paneLabel;
-  if (pane.sessionName) return pane.sessionName;
-  if (pane.terminalTitle && !pane.terminalTitleStale) return pane.terminalTitle;
-  return pane.kind === "shell" ? "shell" : pane.agent;
+/** What a person may choose on an ask. Mirrors `AskOption` in bridge/types.ts. */
+export interface AskOption {
+  id: string;
+  label: string;
+  effect: "allow" | "allow-always" | "deny" | "cancel";
 }
+
+/** The tool call an ask is about. Mirrors `AskTool` in bridge/types.ts. */
+export interface AskTool {
+  name: string;
+  summary: string;
+  output?: string;
+}
+
+/** One open ask, as the card draws it. Mirrors `Ask` in bridge/types.ts; ids are never shown. */
+export interface Ask {
+  id: string;
+  kind: string;
+  toolCallId: string;
+  revision: number;
+  title: string;
+  itemId: string;
+  options: AskOption[];
+  reason?: string;
+  tool?: AskTool;
+  /** Present when the bridge cut or changed the program's title or reason. Such an ask offers no "Always allow". */
+  cleaned?: true;
+}
+
+/** What a checkout is on: a branch by name, or a detached head at a full object name. */
+export type GitHead = { kind: "branch"; name: string } | { kind: "detached"; sha: string };
 
 /**
  * One rule as the pane sheet reads it. Mirrors `CacheRuleWire` in bridge/types.ts.
@@ -238,6 +292,8 @@ export interface WorkspaceView {
   repoRoot?: string;
   /** Whether this space is a linked worktree of `repoRoot`, not the repo's own checkout. */
   isWorktree?: boolean;
+  /** The space's own folder, when the multiplexer keeps one (herdr worktree, tmux session_path). */
+  folder?: string;
   /**
    * Which member of the crew this space lives on — the same tag a pane and a session carry.
    *
@@ -261,6 +317,9 @@ export interface TabView {
 }
 
 export type BridgeStatus = "connected" | "disconnected";
+
+/** Why the multiplexer is down, when the bridge can name it (mirrors MuxFault in bridge/types.ts). */
+export type MuxFault = "token-refused";
 
 /**
  * Per-device authorisation for this client (mirrors DeviceAuth in bridge/types.ts). Present in the
@@ -292,6 +351,13 @@ export interface PairedDeviceWire {
   label: string;
   createdAt: number;
   lastSeenAt: number;
+  /**
+   * When the token stops working (epoch ms), or null for no expiry (M46 spec 01). Optional on this
+   * side so a fixture or an older answer without it reads as "no expiry".
+   */
+  expiresAt?: number | null;
+  /** True once `expiresAt` has passed. The device stays listed until it is revoked. */
+  expired?: boolean;
   /** True for the device making the request — i.e. the one you're reading this on. */
   current: boolean;
 }
@@ -305,6 +371,11 @@ export interface DevicesResponse {
   enforced: boolean;
   /** The label this request's token authenticated as, or null when it authenticated as nobody. */
   current: string | null;
+  /**
+   * True when this request's token belongs to a paired device whose expiry passed — so a cold open
+   * can say "pairing expired" without first failing a write. Absent reads as false.
+   */
+  currentExpired?: boolean;
   devices: PairedDeviceWire[];
 }
 
@@ -460,6 +531,106 @@ export interface CrewMemberStatus {
 }
 
 /**
+ * One reading of a machine's load (mirrors `MachineSample` in the bridge's machine-stats module).
+ * Fractions run 0 to 1, bytes are plain numbers, and the optional fields are absent where the
+ * platform gives no counter: `load1` on Windows, `rxBps` and `txBps` where there are no interface
+ * counters. Absent means "not reported", never zero.
+ */
+export interface MachineSample {
+  /** Busy fraction of all cores since the previous sample. */
+  cpu: number;
+  cores: number;
+  /** Bytes in use, not counting reclaimable cache where the platform says so. */
+  memUsed: number;
+  memTotal: number;
+  load1?: number;
+  rxBps?: number;
+  txBps?: number;
+  /** The filesystems holding home, the root and the state folder, one per device. Absent: not reported. */
+  disks?: MachineDisk[];
+}
+
+/**
+ * One filesystem, in bytes. `used / total` is `df`'s Use%, and `total - used` is what a normal process
+ * can still write. `mount` is the label to show: `/var/home`, `/`, `C:`.
+ */
+export interface MachineDisk {
+  mount: string;
+  used: number;
+  total: number;
+}
+
+/** One alert rule: fire when the value stays at or above `above` (0.5 to 0.99) for `forMin` minutes (5 to 120). */
+export interface MachineAlertRule {
+  above: number;
+  forMin: number;
+}
+
+/** The rules of one machine. A missing key means no rule for that metric. */
+export interface MachineAlerts {
+  cpu?: MachineAlertRule;
+  mem?: MachineAlertRule;
+  disk?: MachineAlertRule;
+}
+
+/** The metrics an alert can watch. Disk is judged on the fullest filesystem. */
+export type MachineMetric = "cpu" | "mem" | "disk";
+
+/**
+ * One machine in `GET /api/machines`. `sample` is absent for a machine that does not report load
+ * yet (an older member) and for one that has not answered; `sampledAt` is stamped by the lead on
+ * receipt, on the same clock as the answer's `ts`.
+ */
+export interface MachineRow {
+  id: string;
+  name: string;
+  isLead: boolean;
+  health: "reachable" | "unreachable" | "incompatible" | "conflicted";
+  sample?: MachineSample;
+  sampledAt?: number;
+  alerts: MachineAlerts;
+  /** Episodes open now. */
+  firing: MachineMetric[];
+  /** The last complete minutes for the small charts; only when asked for with `?spark=N`. */
+  spark?: MachineSpark;
+}
+
+/**
+ * One value per complete minute, oldest first; the newest is the minute before the one the answer's
+ * `ts` falls in. Fractions to two places, `null` for a minute with no reading.
+ */
+export interface MachineSpark {
+  stepMs: number;
+  cpu: (number | null)[];
+  mem: (number | null)[];
+}
+
+/**
+ * The machines census. Served by a lead and by a solo collie (one row, `isLead` true); a peer
+ * answers 404 `crew.not_lead`. `ts` is the answering bridge's clock: every age on the page is
+ * measured against it, never against `Date.now()`.
+ */
+export interface MachinesResponse {
+  ts: number;
+  machines: MachineRow[];
+}
+
+/**
+ * One minute of history: `[t, cpuAvg, cpuMax, memFrac, rxBps | null, txBps | null, diskFrac | null]`.
+ * `t` is epoch ms on the answering bridge's clock. The network pair is `null` where the platform gave
+ * no counters. `diskFrac` is the fullest filesystem's fraction: `null` for a minute with no disk
+ * reading, and absent from a bridge older than the field.
+ */
+export type MachineHistoryPoint = [number, number, number, number, number | null, number | null, (number | null)?];
+
+/** `GET /api/machines/:id/history`: oldest first, at most 1440 points, a gap is a missing minute. */
+export interface MachineHistoryResponse {
+  ts: number;
+  stepMs: number;
+  points: MachineHistoryPoint[];
+}
+
+/**
  * Version / upgrade status for the running Collie (mirrors UpdateInfo in bridge/types.ts). Optional
  * on the snapshot — an older bridge omits it entirely, which the client treats as "no info" (the
  * update banner renders nothing). `latest` is null when the newest upstream release isn't known.
@@ -534,6 +705,13 @@ export interface UpdateInfo {
    * offer above: they are about different machines. Absent on an older bridge.
    */
   dismissedCrewVersion?: string | null;
+  /**
+   * When that crew close was made, epoch ms on the bridge's clock (1.21.1). Absent when none was, on
+   * an older bridge, and on a close written before the stamp: all three read as "the close covers
+   * every run of that version". A crew run that settles AFTER the stamp is a new run, and its failure
+   * may be named again.
+   */
+  dismissedCrewAt?: number | null;
   /**
    * The release ahead changes the crew wire, and by how much — absent when it does not (M27/06).
    *
@@ -757,8 +935,37 @@ export interface PreflightReport {
  * REFUSES an update rather than allowing one. `crew` is optional because a bridge older than the
  * crew-wide check omits it; that reads the same as "no peer rows" on the phone.
  */
+/** One CHANGELOG group of a release, as its bullets' bold leads. The leads are the release's own
+ *  English, quoted, never translated; `name` is one of Added, Changed, Fixed, Packaging, Docs. */
+export interface ReleaseNotesGroup {
+  name: string;
+  leads: string[];
+}
+
+/** What one release changed (1.21.1). `url` is its GitHub release page. */
+export interface ReleaseNotes {
+  version: string;
+  url: string;
+  groups: ReleaseNotesGroup[];
+}
+
+/** `GET /api/update/check`'s `releaseNotes` (1.21.1). */
+export interface UpdateNotes {
+  /** The running version's notes, or null when the host could not read them. */
+  current: ReleaseNotes | null;
+  /** Each release in the delta that published notes, oldest first, like `newerVersions`. Releases
+   *  before 1.21.1 published none, so a delta of only those lists nothing. */
+  offered: ReleaseNotes[];
+}
+
 export interface UpdateCheckResponse extends UpdateInfo {
   preflight: PreflightReport | null;
+  /**
+   * What the releases changed (1.21.1). Only on this route, never on the snapshot: a list of
+   * sentences is the Updates page's, and the snapshot is polled by every open client. Absent on an
+   * older bridge, which reads as nothing to list.
+   */
+  releaseNotes?: UpdateNotes;
   /**
    * Every peer's version and preflight (M16/03). Absent on a solo install, and absent on a bridge
    * that predates the crew-wide check. Both read as "no peer rows", which is the same screen.
@@ -772,11 +979,22 @@ export interface UpdateStartResponse {
   /** The version the bridge is installing. */
   to: string;
   major: boolean;
+  /**
+   * The record as the bridge read it BEFORE the start. On a lead that has updated before it is the
+   * LAST run's record, not this one's: the new run writes its own a beat later.
+   */
   run: UpdateRun | null;
+  /**
+   * The id of the run this confirm began, the one its record will carry. Absent on a bridge older
+   * than the field, which reads as "no id to key on".
+   */
+  runId?: string;
 }
 
 export interface SnapshotResponse {
   bridge: BridgeStatus;
+  /** Present only while `bridge` is `disconnected` for a cause the phone words. Absent on an older bridge. */
+  muxFault?: MuxFault;
   /** Per-device authorisation for the requesting client; absent when the feature is off. */
   device?: DeviceAuth;
   agents: AgentView[];
@@ -831,6 +1049,46 @@ export interface PaneCommandsResponse {
 }
 
 /**
+ * One hunk of a unified diff, exactly as the harness that wrote the file reported it. Each line
+ * already carries its own marker — `" "`, `"+"` or `"-"`. Mirrors `bridge/journal/tool-call.ts`.
+ */
+export interface Hunk {
+  header: string;
+  lines: string[];
+}
+
+/**
+ * One question an agent put to the operator. Mirrors `bridge/journal/tool-call.ts`. Field names
+ * follow opencode's `question` tool; Claude Code's `multiSelect` arrives here as `multiple`.
+ */
+export interface ToolQuestion {
+  header?: string;
+  question: string;
+  multiple: boolean;
+  options: readonly { label: string; description?: string }[];
+}
+
+/**
+ * What a tool call did, in the shape the thing it did suggests. Mirrors
+ * `bridge/journal/tool-call.ts`, where the reasoning for the nine kinds lives.
+ *
+ * Every branch's FIRST field is the one a person would name the call by, so a row can be drawn from
+ * `kind` plus one field. A tool outside the nine is not an error, it is `other`, which still carries
+ * a name and a summary.
+ */
+export type ToolCall =
+  | { kind: "edit"; path: string; added: number; removed: number; diff?: Hunk[]; created?: boolean }
+  | { kind: "execute"; command: string; description?: string; exitCode?: number }
+  | { kind: "read"; path: string; range?: [number, number] }
+  | { kind: "search"; query: string; where?: string; hits?: number }
+  | { kind: "fetch"; url: string }
+  | { kind: "delete" | "move"; path: string; to?: string }
+  | { kind: "task"; agent: string; summary: string }
+  /** The agent asked the operator to choose. One entry per question the call carried. `answers[i]` is the list of chosen labels for question `i`, present only once the call completed with answers. */
+  | { kind: "question"; name: string; summary: string; questions: readonly ToolQuestion[]; answers?: readonly (readonly string[])[] }
+  | { kind: "other"; name: string; summary: string };
+
+/**
  * One renderable piece of a transcript turn. Mirrors `bridge/transcript.ts` (wire types are
  * hand-mirrored across the two sides, as with every other response here).
  */
@@ -842,7 +1100,29 @@ export type TranscriptPart =
       kind: "tool";
       name: string;
       summary: string;
-      result?: { text: string; truncated?: boolean; isError?: boolean; imageUrl?: string };
+      /**
+       * The harness's own id for this call, where it has one (Claude's `tool_use_id`). Kept so a
+       * later result addresses one call rather than the newest one, and so a view can key a card on
+       * it.
+       */
+      id?: string;
+      /**
+       * The same call, structured. ADDITIVE and OPTIONAL: `name` and `summary` stay authoritative
+       * for anything that already reads them, and an adapter not yet taught to fill this leaves it
+       * absent.
+       */
+      call?: ToolCall;
+      result?: {
+        text: string;
+        truncated?: boolean;
+        isError?: boolean;
+        imageUrl?: string;
+        /**
+         * The person refused the call. NOT the same as `isError`: nothing went wrong, somebody said
+         * no, and a view that draws the two alike tells the reader a lie about their own session.
+         */
+        denied?: boolean;
+      };
     };
 
 /**
@@ -855,7 +1135,168 @@ export interface TranscriptEntry {
   ts: string;
   role: "user" | "assistant" | "summary" | "note";
   parts: TranscriptPart[];
+  /**
+   * The agent rewound past this turn, so it is not on the session's current branch. HIDE IT.
+   *
+   * Only pi sets it: pi keeps every branch in one log and each row names its parent, so the reader
+   * can tell. Absent on every other harness and absent when false. The reader keeps the turn rather
+   * than dropping it, because a page cursor still has to resolve its uuid, so hiding is this side's
+   * job (`bridge/journal/types.ts` carries the long reasoning).
+   */
+  abandoned?: true;
 }
+
+/** A file's state against HEAD, staged and unstaged together (ADR 0065). `?` = untracked. */
+export type ChangeStatus = "M" | "A" | "D" | "R" | "?";
+
+/** One changed file. `path` is relative to its repo's top level; an untracked folder ends in `/`. */
+export interface ChangedFile {
+  path: string;
+  oldPath?: string;
+  status: ChangeStatus;
+  added: number;
+  removed: number;
+  binary: boolean;
+}
+
+/** One repo with changes. `relPath` is its id (`.`, `..`, `sub/dir`), `name` its folder's name. */
+export interface ChangedRepo {
+  relPath: string;
+  name: string;
+  files: ChangedFile[];
+}
+
+export type ChangesUnavailableReason = "no-pane" | "no-workspace" | "no-folder" | "no-git";
+
+/**
+ * A Changes list. `root` is the workspace folder it was read from. `depthLimited`: discovery stopped
+ * at the asked depth with a repo one level further down. Mirrors bridge/types.ts.
+ */
+export type ChangesList =
+  | { available: false; reason: ChangesUnavailableReason }
+  | {
+      available: true;
+      root: string;
+      repos: ChangedRepo[];
+      truncated: boolean;
+      depthLimited?: boolean;
+      /** Repos with nothing uncommitted and a commit to show. Absent when none, or from an older bridge. */
+      clean?: CleanRepo[];
+    };
+
+/** A repo with no uncommitted changes and a HEAD commit: what "Show last commit" is offered for. */
+export interface CleanRepo {
+  relPath: string;
+  name: string;
+}
+
+/** The commit a commit view shows: the repo's HEAD at the time of the read. Mirrors bridge/types.ts. */
+export interface CommitInfo {
+  hash: string;
+  shortHash: string;
+  subject: string;
+  author: string;
+  /** Author time, Unix seconds. */
+  time: number;
+}
+
+/** The last commit of one repo (ADR 0065, the commit view). Mirrors bridge/types.ts. */
+export type ChangeCommit =
+  | { available: false; reason: ChangesUnavailableReason | "unknown-repo" | "no-commit" }
+  | { available: true; repo: string; name: string; commit: CommitInfo; files: ChangedFile[]; truncated: boolean };
+
+/** One file's diff as raw unified text. Mirrors bridge/types.ts. */
+export type ChangeDiff =
+  | { available: false; reason: ChangesUnavailableReason | "unknown-repo" | "unknown-path" }
+  | {
+      available: true;
+      repo: string;
+      path: string;
+      oldPath?: string;
+      status: ChangeStatus;
+      binary: boolean;
+      directory: boolean;
+      truncated: boolean;
+      diff: string;
+    };
+
+/** One file of the last commit. `hash` names the commit it was read from. Mirrors bridge/types.ts. */
+export type ChangeCommitDiff =
+  | { available: false; reason: ChangesUnavailableReason | "unknown-repo" | "unknown-path" | "no-commit" }
+  | (Extract<ChangeDiff, { available: true }> & { hash: string });
+
+/** Which workspace a Changes answer covers. Present whenever the bridge found the workspace. */
+export interface ChangesWorkspace {
+  workspaceId?: string;
+  workspaceLabel?: string;
+}
+
+/**
+ * GET /api/pane/:id/changes — the list for the pane's workspace. `paneRepo` is the listed repo that
+ * holds the pane's folder. Mirrors bridge/types.ts.
+ */
+export type PaneChangesResponse = { paneId: string; paneRepo?: string } & ChangesWorkspace & ChangesList;
+/** GET /api/pane/:id/changes?repo=&path= — one file's diff. Mirrors bridge/types.ts. */
+export type PaneChangeDiffResponse = { paneId: string } & ChangesWorkspace & ChangeDiff;
+/** GET /api/workspace/:id/changes — the same list, asked by workspace. */
+export type WorkspaceChangesResponse = { workspaceId: string; workspaceLabel?: string } & ChangesList;
+/** GET /api/workspace/:id/changes?repo=&path= — the same diff, asked by workspace. */
+export type WorkspaceChangeDiffResponse = { workspaceId: string; workspaceLabel?: string } & ChangeDiff;
+
+/** Either Changes list, as the view reads it. Only the pane form carries `paneRepo`. */
+export type ChangesResponse = ChangesWorkspace & { paneRepo?: string } & ChangesList;
+/** Either diff, as the view reads it. */
+export type ChangeDiffResponse = ChangesWorkspace & ChangeDiff;
+/** GET …/changes?view=commit&repo= — the repo's last commit, asked by pane or by workspace. */
+export type ChangeCommitResponse = ChangesWorkspace & ChangeCommit;
+/** GET …/changes?view=commit&repo=&path= — one file of that commit. */
+export type ChangeCommitDiffResponse = ChangesWorkspace & ChangeCommitDiff;
+
+/** What one row of a folder listing is. `link` is any symlink: listed, never followed (ADR 0083). */
+export type FileEntryKind = "dir" | "file" | "link";
+
+/**
+ * One row of a folder listing. `size` is in bytes and present for files only. `ignored` is `true`
+ * when git ignores the entry; absent means not ignored or not known, and a member that predates the
+ * field never sends it. Mirrors bridge/types.ts.
+ */
+export interface FileEntry {
+  name: string;
+  kind: FileEntryKind;
+  size?: number;
+  ignored?: true;
+}
+
+/**
+ * One folder of the Changes root, not recursive (ADR 0083). `dir` and every path below use `/`, never
+ * start with `/`, and `""` is the root. `truncated`: the folder held more entries than the cap.
+ */
+export type FilesListing =
+  | { available: false; reason: ChangesUnavailableReason }
+  | { available: true; root: string; dir: string; entries: FileEntry[]; truncated: boolean };
+
+/**
+ * One text file under the Changes root. `text` is `""` when `binary`; it is cut at the cap with
+ * `truncated: true`, and `size` is the whole file's bytes either way.
+ */
+export type FileRead =
+  | { available: false; reason: ChangesUnavailableReason }
+  | {
+      available: true;
+      root: string;
+      path: string;
+      size: number;
+      /** The file's modification time, epoch ms. With `size` it is the version a held picture is keyed on (ADR 0090). Absent from an older bridge. */
+      mtimeMs?: number;
+      binary: boolean;
+      truncated: boolean;
+      text: string;
+    };
+
+/** GET …/files and GET …/files?dir= — a folder, asked by pane or by workspace. */
+export type FilesListResponse = ChangesWorkspace & FilesListing;
+/** GET …/files?path= — one file, asked by pane or by workspace. */
+export type FileReadResponse = ChangesWorkspace & FileRead;
 
 /**
  * GET /api/pane/:id/history — real conversation history, read from the agent's own session log.
@@ -879,6 +1320,112 @@ export type PaneHistoryResponse =
     };
 
 /**
+ * One turn of a live window, plus WHERE it sits. Mirrors `ChatEntry` in bridge/journal/live.ts.
+ *
+ * `seq` is assigned once by the bridge and never reassigned, which is what lets a client hold one
+ * list and merge an answer into it by `uuid` without asking where a changed turn moved to. It starts
+ * at 1,000,000, not at zero: a thread grows at both ends and a `?before=` page numbers DOWN.
+ */
+export interface ChatEntry extends TranscriptEntry {
+  seq: number;
+}
+
+/**
+ * What one live window answers (ADR 0073). Three positions, each doing one job:
+ *
+ *  - `gen` — WHICH NUMBERING. A different one from the one held means replace, never merge.
+ *  - `rev` — WHEN. Send it back as `?after=<gen>:<rev>` and the next answer is what moved since.
+ *  - `seq` — WHERE, on each entry. A turn that changed in place keeps it.
+ *
+ * Mirrors `ChatWindowBody` in bridge/journal/live.ts.
+ */
+export interface ChatWindowBody {
+  page: "live";
+  gen: number;
+  rev: number;
+  /** The newest `seq` the window holds. Below `oldest` when the window is empty. */
+  head: number;
+  /** The oldest `seq` the LIVE window holds. Older turns come off disk, through `?before=`. */
+  oldest: number;
+  /** Turns exist before `oldest`. What drives "load older". */
+  hasOlder: boolean;
+  /** Added and changed turns together, oldest first, keyed by `uuid` and positioned by `seq`. */
+  upserts: ChatEntry[];
+  /**
+   * What the operator typed that the agent has not started on yet, oldest first. STATE, not turns:
+   * the WHOLE list arrives every answer, and a client replaces rather than merges it. Empty for every
+   * harness but Claude Code, which is the only one that records a queue.
+   *
+   * Optional here and required on the bridge, on purpose: a member one release behind answers a body
+   * without it, and that reads as "nothing waiting" rather than as a broken answer (ADR 0073 point 7,
+   * the route is additive-optional over a crew link).
+   */
+  queued?: string[];
+  /**
+   * The keys that deliver {@link queued} now, in the neutral key spelling, declared by the bridge
+   * for this session's harness. Absent for every harness that has no such key and from a bridge one
+   * release behind, and both read as "no Send now button". Mirrors `ChatWindowBody` in
+   * bridge/journal/live.ts.
+   */
+  sendQueuedNow?: string[];
+  /**
+   * The operator's newest prompt the live window holds, even when the first page left it out. STATE
+   * like {@link queued}: whole on every answer, replaced rather than merged. Absent when the window
+   * holds no prompt and from a bridge one release behind, and both read as "not known". Mirrors
+   * `ChatWindowBody` in bridge/journal/live.ts.
+   */
+  lastPrompt?: ChatPrompt;
+}
+
+/** The operator's newest prompt, capped by the bridge. Mirrors `ChatPrompt` in bridge/journal/live.ts. */
+export interface ChatPrompt {
+  uuid: string;
+  ts: string;
+  text: string;
+  truncated?: boolean;
+}
+
+/**
+ * A `?before=` page: older turns off disk, numbered into the same `gen` the live window uses. It
+ * cannot say where the live tail got to, so it does not pretend to — no `rev`, no `head`, no
+ * `oldest`. Mirrors `ChatOlderBody` in bridge/journal/live.ts.
+ */
+export interface ChatOlderBody {
+  page: "older";
+  gen: number;
+  upserts: ChatEntry[];
+  /** Turns exist before `upserts[0]` too. */
+  hasOlder: boolean;
+}
+
+/** Either answer, discriminated by `page`. Mirrors `ChatBody` in bridge/journal/live.ts. */
+export type ChatBody = ChatWindowBody | ChatOlderBody;
+
+/** `?after=<gen>:<rev>` — the revision the client holds, in the numbering it holds it in. */
+export interface ChatAfter {
+  gen: number;
+  rev: number;
+}
+
+/** `?before=<seq>:<uuid>` — the oldest turn the client holds, by both of its names. */
+export interface ChatBefore {
+  seq: number;
+  uuid: string;
+}
+
+/**
+ * GET /api/pane/:id/chat — what moved in this pane's session since the cursor sent (ADR 0073).
+ *
+ * `available: false` is an ordinary answer for a pane with nothing to show: a shell, an agent that
+ * named no session, a log that cannot be read. **A 404 is a different fact and must never be drawn
+ * like one:** the route is additive-optional over the crew link, so a member one release behind has
+ * no route at all, and the honest reading there is "update this machine". Mirrors bridge/types.ts.
+ */
+export type PaneChatResponse =
+  | { paneId: string; available: false; reason: "disabled" | "no-session" | "no-log" }
+  | ({ paneId: string; available: true } & ChatBody);
+
+/**
  * `error` is the bridge's English sentence and stays what a client displays when it has nothing
  * better; `code` + `detail` are the machine half, which `lib/api-error-message.ts` turns into the
  * operator's language. `code` was once only ever `"prompt_changed"` — it now names any catalogued
@@ -893,6 +1440,8 @@ export type ActionResponse =
       textDelivered?: boolean;
       code?: ApiErrorCode;
       detail?: ApiErrorDetail;
+      /** On a 409 `prompt_changed` only: the bridge's reason code for the refusal. */
+      reason?: string;
     };
 
 export type UploadResponse =
@@ -910,7 +1459,10 @@ export interface CreatedPane {
 
 /** Result of creating a new tab/space — on success `pane` is the fresh shell to navigate into. */
 export type CreateResponse =
-  | { ok: true; pane: CreatedPane }
+  // `replayed`: the answer to a launch whose request id the bridge already held (ADR 0091). The pane
+  // is the one the first request made; nothing new was started. `noPrompts`: the answer to a fresh
+  // one-off `run` says whether its line carries a flag known to skip permission prompts (ADR 0095).
+  | { ok: true; pane: CreatedPane; replayed?: true; noPrompts?: boolean }
   | { ok: false; error: string; code?: ApiErrorCode; detail?: ApiErrorDetail };
 
 /**
@@ -1033,7 +1585,7 @@ export interface MuxConfig {
    * bridge/mux/capabilities.ts.
    *
    * **Absent on any bridge older than the field, and absent reads as `push`** — the same fail-open
-   * direction the capabilities take (lib/mux-capability.ts). Read it through `useTopologyLatency()`
+   * direction the capabilities take (lib/mux-capability.ts). Read it through `muxTopologyLatency()`
    * rather than here, so that rule lives in exactly one place.
    */
   topologyLatency?: MuxTopologyLatency;
@@ -1103,7 +1655,97 @@ export interface Launcher {
    * shortened under home (`shortenHome`) wherever the row's folder is displayed.
    */
   cwd?: string;
+  /** `launchers.toml` or a phone (ADR 0094). Absent from an older bridge: read as the operator's. */
+  source?: "operator" | "added";
+  /** An added row's id, for rename and remove. */
+  id?: string;
+  /** `agent` when a harness reads the row; absent or `command` for a plain line. */
+  kind?: "agent" | "command";
+  /** The harness that reads an agent row. */
+  harness?: string;
+  /** The line skips permission prompts: badge it, and confirm once per device before it starts. */
+  noPrompts?: boolean;
+  /** Added rows: the pairing label of the device that added it, when, and how. */
+  addedBy?: string;
+  addedAt?: number;
+  addedAs?: "recipe" | "text";
 }
+
+/** One option chip of a recipe. Mirrors `RecipeOptionWire` in bridge/types.ts. */
+export interface RecipeOption {
+  id: string;
+  /** The chip's words: the CLI's own vocabulary, never translated. */
+  label: string;
+  /** What the option appends to the line, for a preview; the bridge builds the real line. */
+  args: string;
+  /** Options sharing a group exclude each other. */
+  group?: string;
+  /** The option makes the agent act without asking. */
+  noPrompts?: true;
+}
+
+/** One harness's recipe. Mirrors `RecipeWire` in bridge/types.ts. */
+export interface Recipe {
+  harness: string;
+  label: string;
+  binary: string;
+  options: RecipeOption[];
+}
+
+/** What "Add your own" needs about one machine. Mirrors `LaunchersAdding` in bridge/types.ts. */
+export interface LaunchersAdding {
+  /** `[phone] adds` in that machine's `launchers.toml`: phone rows may be added and may start. */
+  adds: boolean;
+  /** `[phone] free_text`: a line typed by hand may be added and may start. Off by default. */
+  freeText: boolean;
+  /** `[phone] run`: a one-off line may run there, and a `recentRuns` entry may run again. On by default (ADR 0095). */
+  run: boolean;
+  /** The absolute path of that machine's `launchers.toml`, written or not. */
+  file: string;
+  count: number;
+  max: number;
+  recipes: Recipe[];
+  /** Added rows that do not start there now. The same rows are in `items`, unavailable. */
+  off: { id: string; label: string; command: string; kind: "agent" | "command"; harness?: string; reason: "adds_off" | "free_text_off" }[];
+}
+
+/** Why an item does not start on that machine now. Mirrors `LauncherItem.reason` in bridge/types.ts. */
+export type LauncherItemReason = "not_found" | "adds_off" | "free_text_off";
+
+/**
+ * One thing the New page may start on ONE machine, with its availability there (ADR 0094). Mirrors
+ * `LauncherItem` in bridge/types.ts. An unavailable item is a disabled option with its reason; the
+ * reasons a whole machine has (not taking writes, an older Collie) are the phone's own to add.
+ */
+export interface LauncherItem {
+  /** `harness:<id>`, `row:<command>` or `shell`. Stable per machine. */
+  key: string;
+  /** What `startLaunch` sends for it. */
+  start: { harness: string } | { command: string } | { shell: true } | { starter: string };
+  group: "agents" | "commands";
+  label: string;
+  harness?: string;
+  command?: string;
+  cwd?: string;
+  /** `program`: a starter the durable program offers (ADR 0102). */
+  source: "builtin" | "operator" | "added" | "program";
+  noPrompts: boolean;
+  /** False on a starter: it takes no text, so the page shows no prompt field for it. Absent on every other item. */
+  takesPrompt?: false;
+  /** Whether it may start on a new branch: agents and the shell, never a command row. */
+  branch: boolean;
+  available: boolean;
+  reason?: LauncherItemReason;
+  id?: string;
+  addedBy?: string;
+  addedAt?: number;
+  addedAs?: "recipe" | "text";
+}
+
+/** POST /api/launchers/added and /rename. Mirrors `AddedLauncherResponse` in bridge/types.ts. */
+export type AddedLauncherResponse =
+  | { ok: true; row: Launcher; replayed?: true }
+  | { ok: false; error: string; code?: ApiErrorCode; detail?: ApiErrorDetail };
 
 /**
  * GET /api/launchers — the rows for ONE host (a crew has one file per member), read live off its
@@ -1113,6 +1755,78 @@ export interface Launcher {
  */
 export interface LaunchersResponse {
   launchers: Launcher[];
+  home: string;
+  /**
+   * The agents this host starts by id, and whether each binary is on its login PATH (ADR 0091).
+   * Mirrors `harnesses` in bridge/types.ts. ABSENT from a bridge older than 1.19.0, which starts
+   * none by id: the New page then offers no agents for that machine and says why.
+   */
+  harnesses?: HarnessInfo[];
+  /** "Add your own" for that machine (ADR 0094). Absent from a bridge older than 1.19.0: offer no add. */
+  adding?: LaunchersAdding;
+  /** Every agent, row and the shell, each with its availability there (ADR 0094). Absent from an older bridge. */
+  items?: LauncherItem[];
+  /**
+   * The one-off lines run on that machine, newest first, at most twelve (ADR 0095). Mirrors
+   * `recentRuns` in bridge/types.ts. Listed while `[phone] run` is off too, each then unavailable.
+   * Absent from an older bridge: offer no history.
+   */
+  recentRuns?: RecentRun[];
+}
+
+/** One line in a machine's one-off command history. Mirrors `RecentRunWire` in bridge/types.ts. */
+export interface RecentRun {
+  /** The line, exactly as it ran. Running it again is `startRun(line, …)`. */
+  line: string;
+  /** The folder it last ran in, absolute, or `null` for home. */
+  cwd: string | null;
+  /** Epoch ms of the last run. */
+  at: number;
+  /** The line skips permission prompts: badge it, and confirm once per device before it runs. */
+  noPrompts: boolean;
+  available: boolean;
+  /** `run_off`: the operator turned one-off runs off on that machine. */
+  reason?: "run_off";
+}
+
+/**
+ * POST /api/launch/check: what a typed one-off line would be, before it runs (ADR 0095, amendment).
+ * A read. `problem` is the character rule's refusal (and then `noPrompts` is false). Mirrors
+ * `LaunchCheckResponse` in bridge/types.ts.
+ */
+export interface LaunchCheckResponse {
+  ok: true;
+  /** The line carries a flag known to skip permission prompts: confirm once per device before it runs. */
+  noPrompts: boolean;
+  problem?: "empty" | "too_long" | "forbidden_character";
+}
+
+/** POST /api/launch/recent/remove and /clear. Mirrors `RecentRunsResponse` in bridge/types.ts. */
+export type RecentRunsResponse =
+  | { ok: true; removed: number }
+  | { ok: false; error: string; code?: ApiErrorCode; detail?: ApiErrorDetail };
+
+/** One agent a host can start by id. Mirrors `HarnessInfo` in bridge/types.ts. */
+export interface HarnessInfo {
+  /** The id `POST /api/launch` takes as `harness`, and the brand key `AgentIcon` draws. */
+  id: string;
+  /** What the page calls it. */
+  label: string;
+  /** Whether the binary was found on that host's login PATH. */
+  found: boolean;
+}
+
+/**
+ * GET /api/folders, and the answer to POST /api/folders/star — ONE host's folder list for the
+ * New page (#289), read off that machine's own `folders.json`. `recent` is newest first (at
+ * most eight, only folders a space was created in), `favourites` in starred order (at most twelve),
+ * and the two never overlap. `home` is that host's home dir, never an entry, for shortening a folder
+ * to `~/…` without the client knowing which machine answered. A host on an older version answers
+ * 404, which the page reads as "no list" and never as an error.
+ */
+export interface FoldersResponse {
+  recent: string[];
+  favourites: string[];
   home: string;
 }
 
@@ -1153,6 +1867,11 @@ export interface BridgeConfig {
   /** Realtime Soniox voice conversation path. Absent when not configured. */
   voice?: boolean;
   /**
+   * The Whistle model on the host (ADR 0096). Mirrors `WhistleStatus` in bridge/types.ts. **Absent
+   * is an older bridge, or a crew member's own answer**, and Settings then offers no setup tap.
+   */
+  whistle?: WhistleStatus;
+  /**
    * What this collie accepts as an attachment. Mirrors `UploadCapability` in bridge/types.ts.
    *
    * **Absent is a bridge older than the field**, and the phone reads that as the contract that
@@ -1160,6 +1879,12 @@ export interface BridgeConfig {
    * mid-upgrade operator sees the old picker rather than an empty one.
    */
   upload?: UploadCapability;
+  /**
+   * Whether the bridge masks secret shapes before text reaches this phone (`COLLIE_REDACT`). The
+   * phone only SHOWS this and never sets it: a switch on the phone would let any paired or stolen
+   * phone unmask. **Absent is an older bridge** (or a member-scoped read), shown as unknown.
+   */
+  redact?: boolean;
 }
 
 /**
@@ -1186,6 +1911,107 @@ export interface SttCapability {
   available: boolean;
   /** Operator-facing prose when it could not. Absent when it could. */
   reason?: string;
+  /**
+   * What the phone must upload. Present only for the `whistle` provider (ADR 0096 Decision 4):
+   * `wav-16k` is 16 kHz mono 16-bit little-endian PCM WAV, and nothing else is accepted. Absent means
+   * the recording as the browser made it.
+   */
+  input?: "wav-16k";
+  /**
+   * The longest recording this provider takes, in milliseconds. Present only when it differs from
+   * the phone's 5-minute default: the `whistle` provider takes 4 minutes, because a WAV is about four
+   * times the size of a compressed recording and the 8 MiB upload cap stays.
+   */
+  maxDurationMs?: number;
+}
+
+/** Where the host's copy of the Whistle model stands (ADR 0096 Decision 2). */
+export type WhistleState = "absent" | "downloading" | "ready" | "failed";
+
+/**
+ * The Whistle model on the host and the host engine's switch, as `GET /api/stt/whistle` and
+ * `/api/config` report them. Mirrors `WhistleStatus` in bridge/types.ts.
+ */
+export interface WhistleStatus {
+  state: WhistleState;
+  /** Exact size of the pinned model, for the button and the bar. Always present. */
+  bytes: number;
+  /** Present while downloading: the bytes received so far. */
+  received?: number;
+  /** Present only when state is "ready": the held file's sha256, lowercase hex, a hash this build accepts. */
+  sha256?: string;
+  /** Present only when state is "ready" and the manifest names it: the Hugging Face revision the file came from. */
+  revision?: string;
+  /** Present only when state is "ready" and the manifest names it: when the host fetched the file, an ISO 8601 time. */
+  fetchedAt?: string;
+  /** Present when state is "failed": operator-facing prose, no paths. */
+  reason?: string;
+  /** True when the host STT provider is `whistle`. */
+  hostEngine: boolean;
+  /** True when another provider is configured, so Settings cannot turn the host engine on. */
+  hostTaken: boolean;
+}
+
+/**
+ * Why Settings may not switch the host to one choice (ADR 0097). Mirrors `SttHostSwitchReason` in
+ * bridge/types.ts, where each word is explained.
+ */
+export type SttHostSwitchReason =
+  | "env"
+  | "terminal"
+  | "unreadable"
+  | "not-ready"
+  | "codex-missing"
+  | "codex-signed-out"
+  | "codex-other-login"
+  | "codex-unknown";
+
+/** Whether one choice may be made from Settings, and if not, why. */
+export interface SttHostSwitch {
+  ok: boolean;
+  /** Absent when `ok`. */
+  reason?: SttHostSwitchReason;
+}
+
+/** The three choices Settings offers for the host's speech provider. */
+export type SttHostChoice = "whistle" | "codex" | "off";
+
+/**
+ * What the host's speech settings name, by name only. Never a path, an argument other than one model
+ * file's name, a key, or a URL's path. Mirrors `SttHostSetup` in bridge/types.ts.
+ */
+export interface SttHostSetup {
+  /** `local-cli`: the command's basename (`whistle-stt`, `whisper-cli`). */
+  command?: string;
+  /** `local-cli`: a model file's name. `openai-compatible`: the model. `whistle`: the pinned version, seven characters. */
+  model?: string;
+  /** `openai-compatible`: the service's host, with its port when it has one (`api.groq.com`). */
+  endpoint?: string;
+}
+
+/**
+ * The host's speech provider, as `GET /api/stt/host` and `PUT /api/stt/host` report it (ADR 0097).
+ * Mirrors `SttHostStatus` in bridge/types.ts.
+ */
+export interface SttHostStatus {
+  /** `whistle`, `codex`, `openai-compatible`, `local-cli`, or `none`. A name this app does not know is shown as is. */
+  provider: string;
+  available: boolean;
+  /** The host's own words when it cannot serve a request. English: it comes from the host. */
+  reason?: string;
+  /** For `codex` only: `honest`, or `codex-cli`, the fallback that wears the Codex CLI's headers. */
+  identity?: "honest" | "codex-cli";
+  /** Where the provider is named: the host's `stt.json`, the host's environment, or nowhere. */
+  configuredBy: "file" | "env" | "none";
+  switchable: Record<SttHostChoice, SttHostSwitch>;
+  /** The `codex` binary whose sign-in would pay, named in the consent. Present when the host found one. */
+  codexBin?: string;
+  /** The paired device that last changed the option from Settings, by its pairing label. Absent on an older host, or when it was last set elsewhere. */
+  changedBy?: string;
+  /** When that device changed it, an ISO 8601 time. Present exactly when `changedBy` is. */
+  changedAt?: string;
+  /** What the settings name: the command, the model, the service's host. Absent on an older host, or when they name nothing. */
+  setup?: SttHostSetup;
 }
 
 /**
@@ -1202,6 +2028,9 @@ export interface NotifyPrefs {
   /** Push before an agent pane's prompt cache expires. Default off, and it covers EVERY pane — the
    *  panes watched one by one from their own settings sheet keep warning either way (ADR 0042). */
   cache: boolean;
+  /** Push when a machine's CPU or memory stays above one of its alert rules (ADR 0084). Default on:
+   *  a rule is something the operator set on purpose, so this switch only silences them all at once. */
+  machines: boolean;
 }
 
 /**
@@ -1250,24 +2079,57 @@ export function statusLabel(status: AgentStatus): string {
   return t(`status.label.${status}`);
 }
 
-/** One Git worktree of the repo a space sits in. Mirrors `WorktreeView` in bridge/types.ts. */
-export interface WorktreeView {
-  path: string;
-  branch: string | null;
-  /** The space showing it, or `null` when nothing does — which is what hides its Remove row. */
-  openWorkspaceId: string | null;
-  /** `false` for the repo's own checkout: listed for context, never removable. */
-  linked: boolean;
-  prunable: boolean;
+/**
+ * The same status in the PAST tense, for a herd drawn from the saved copy (M46 spec 10): a cached
+ * row says what the pane was doing when the phone last heard, never what it is doing now.
+ */
+export function statusLabelPast(status: AgentStatus): string {
+  return t(`status.past.${status}`);
 }
 
-/** GET /api/workspace/:id/worktrees */
-export type WorktreeListResponse =
-  | { ok: true; worktrees: WorktreeView[] }
+/**
+ * Where a new worktree's branch starts (ADR 0089, amended): the repo's default branch, which the
+ * bridge resolves, or a named ref (the page sends the pane's own branch). Mirrors
+ * `WorktreeBaseRequest` in bridge/worktree-base.ts.
+ */
+export type WorktreeBaseChoice = { kind: "default" } | { kind: "ref"; ref: string };
+
+/**
+ * GET /api/worktree/plan — what a branch from a folder would be, before Start (ADR 0093). Mirrors
+ * `WorktreePlanResponse` in bridge/types.ts. `branchValid`, `defaultTarget` and `parentTarget` are
+ * there only when the query named a branch (and a parent).
+ */
+export type WorktreePlanResponse =
+  | {
+      ok: true;
+      repoRoot: string;
+      defaultBranch: string | null;
+      currentBranch: string | null;
+      remembered?: { base: "default" | "current"; folder: "default" | "parent"; parent?: string };
+      branchValid?: boolean;
+      defaultTarget?: { path: string; exists: boolean };
+      parentTarget?:
+        | { ok: true; path: string }
+        | { ok: false; error: string; code?: ApiErrorCode; detail?: ApiErrorDetail };
+    }
   | { ok: false; error: string; code?: ApiErrorCode; detail?: ApiErrorDetail };
 
-/** POST /api/workspace/:id/worktree[/open] — `alreadyOpen` is an answer, never a failure. */
-export type WorktreeOpenResponse =
-  | { ok: true; pane: CreatedPane; alreadyOpen: boolean }
+/** Where a new branch's folder goes (ADR 0093): Herdr's own place, or a child of a parent folder. */
+export type WorktreeFolderChoice = { kind: "default" } | { kind: "parent"; parent: string };
+
+/**
+ * POST /api/worktree — the new space, and whether the launcher was typed into it
+ * (ADR 0089). Mirrors `WorktreeCreateResponse` in bridge/types.ts. A launcher that failed after the
+ * create is still `ok: true`: the worktree exists, `pane` is where it is.
+ */
+export type WorktreeCreateResponse =
+  | {
+      ok: true;
+      pane: CreatedPane;
+      alreadyOpen: false;
+      launcherStarted: boolean;
+      launcherError?: string;
+      replayed?: true;
+    }
   | { ok: false; error: string; code?: ApiErrorCode; detail?: ApiErrorDetail };
 

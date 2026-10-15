@@ -16,6 +16,8 @@
 //    hands back a path the operator pastes; the multiplexer is not involved, so it cannot decline it.
 //    It is host-local for every adapter because a mux adapter is host-local by rule (ADR 0011).
 
+import { formatMuxKey, parseMuxKey } from "./keys.ts";
+
 /**
  * Every capability an adapter may declare, in Collie's words.
  *
@@ -81,7 +83,7 @@ export const MUX_CAPABILITY_ROUTES = {
   gridScrollback:
     "GET /api/pane/:id?lines=N — a read that reaches behind the viewport, which is what makes the mirror's 'Load older' meaningful (see MuxPane.readableLines).",
   agentDetection:
-    "GET /api/snapshot — the split into `agents` and `shellPanes` and the triage sort (STATUS_RANK) both need the mux to say which agent a pane holds and how it is doing.",
+    "GET /api/snapshot — the split into `agents` and `shellPanes` and every status mark (needs you, working) both need the mux to say which agent a pane holds and how it is doing.",
   agentSessionRef:
     "GET /api/pane/:id/history — the journal keys an on-disk log off the session an agent named. Without this, history is absent, not empty (bridge/journal/registry.ts).",
   typeText: "POST /api/pane/:id/reply — step one, the literal text.",
@@ -95,11 +97,11 @@ export const MUX_CAPABILITY_ROUTES = {
   closeTab: "POST /api/tab/:id/close — a bulk pane-close.",
   createSpace: "POST /api/workspace — a new space, opening a fresh shell.",
   listWorktrees:
-    "GET /api/workspace/:id/worktrees — the worktrees of the repo that space sits in, so the sheet can show them. Absent ⇒ no worktree section at all, which is the honest degrade: without the list there is nothing to open and nothing to remove.",
+    "No route asks it since 1.20.0: the space-scoped list (GET /api/workspace/:id/worktrees) lost its last caller when the New sheet moved to GET /api/worktree/plan (ADR 0093), and was removed. Kept on the port for the conformance set.",
   createWorktree:
-    "POST /api/workspace/:id/worktree — a new branch in a new worktree, opened as its own space.",
+    "POST /api/worktree — a new branch in a new worktree, from the folder the New sheet names, opened as its own space (ADR 0093). Absent ⇒ no branch row on the New page or in the pane sheet.",
   openWorktree:
-    "POST /api/workspace/:id/worktree/open — show a worktree that already exists on disk. Idempotent: a worktree already open answers with the space showing it rather than refusing.",
+    "No route asks it since 1.20.0 (POST /api/workspace/:id/worktree/open had no caller and was removed). Kept on the port: show a worktree that already exists on disk, idempotently, as the conformance set checks.",
   pushTopologyEvents:
     "bridge/event-poker.ts — panes/tabs/spaces appearing, closing or being renamed arrive as a push, so the snapshot poll can idle. Absent ⇒ the adapter polls to keep the same promise, and the poker learns nothing.",
   pushPaneEvents:
@@ -228,6 +230,30 @@ export function supportsCapability(
   capability: MuxCapability,
 ): boolean {
   return declaration.supports[capability];
+}
+
+/**
+ * Whether this multiplexer can deliver EVERY key of a sequence, as the keys it names.
+ *
+ * False when `sendKeys` is not declared at all, when a key is not a neutral spelling, or when a key
+ * is declared unsupported — as the whole chord (`ctrl+Enter`) or as its base key (Herdr's `PageUp`
+ * refuses `shift+PageUp` too, keys.ts there). One undeliverable key makes the whole sequence
+ * undeliverable: the keys of a sequence mean something together, and its front half alone is a
+ * different action.
+ *
+ * This is how a surface that offers a key as a button (the chat answer's `sendQueuedNow`) asks the
+ * pane's multiplexer, as a capability fact rather than by its name.
+ */
+export function keysDeliverable(
+  declaration: Pick<MuxCapabilityDeclaration, "supports" | "unsupportedKeys">,
+  keys: readonly string[],
+): boolean {
+  if (!declaration.supports.sendKeys) return false;
+  const refused = new Set(declaration.unsupportedKeys);
+  return keys.every((spelling) => {
+    const parsed = parseMuxKey(spelling);
+    return parsed !== null && !refused.has(formatMuxKey(parsed)) && !refused.has(parsed.key);
+  });
 }
 
 /** The declared capabilities, sorted — for the config surface (M10/06), the matrix and tests. */

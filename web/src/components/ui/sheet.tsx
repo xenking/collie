@@ -9,6 +9,15 @@ import { useLocale } from "@/hooks/use-locale";
 // Minimal modal focus handling (no deps, no full trap): on open move focus into the panel so
 // keyboard / screen-reader users land inside the dialog; on close restore focus to whatever was
 // focused before it opened. The panel must carry tabIndex={-1} to be a focus target.
+//
+// BOTH focus calls pass `preventScroll: true`, and that is the fix for a page that jumped when a
+// sheet opened (M48 spec 03, seen in the keys playground). A bare `focus()` asks the browser to
+// scroll the focused element into view, and this panel is focused on the very frame it mounts, while
+// its slide-in keyframe still holds it a full height below the screen. The browser then scrolls the
+// nearest scroll container to reach it, and that container is the content BEHIND the sheet (any
+// ancestor that clips with `overflow` and moves a `fixed` child with `transform`). A modal that
+// opens must not move the page under its scrim. The restore on close has the same flaw in reverse:
+// the opener may have been scrolled out of view while the sheet was open.
 export function useDialogFocus(open: boolean, panelRef: React.RefObject<HTMLElement | null>) {
   React.useEffect(() => {
     if (!open) return;
@@ -16,12 +25,48 @@ export function useDialogFocus(open: boolean, panelRef: React.RefObject<HTMLElem
     // is the optional `focus()`, which is what makes it an HTMLElement in practice. The optional
     // call is what covers the case where it isn't one (an SVG element, say).
     const previouslyFocused = document.activeElement as HTMLElement | null;
-    panelRef.current?.focus();
+    panelRef.current?.focus({ preventScroll: true });
     return () => {
-      previouslyFocused?.focus?.();
+      previouslyFocused?.focus?.({ preventScroll: true });
     };
   }, [open, panelRef]);
 }
+
+// HOW MANY BOTTOM SHEETS ARE OPEN, for the one thing that has to know: the dashboard's floating New
+// button hides itself while any sheet is up (DESIGN.md §1, ui/fab.tsx). A module-level count behind
+// `useSyncExternalStore`, because the button and the sheets share no ancestor that could pass the
+// fact down, and a sheet may be mounted from any component. Counts `open` only: a peeking panel
+// (`pull > 0`) is a finger still dragging, not an open sheet.
+let openSheets = 0;
+const sheetListeners = new Set<() => void>();
+function bumpOpenSheets(by: 1 | -1): void {
+  openSheets += by;
+  for (const listener of sheetListeners) listener();
+}
+function subscribeOpenSheets(listener: () => void): () => void {
+  sheetListeners.add(listener);
+  return () => {
+    sheetListeners.delete(listener);
+  };
+}
+
+/** True while at least one `BottomSheet` is open anywhere in the app. */
+export function useAnySheetOpen(): boolean {
+  return React.useSyncExternalStore(
+    subscribeOpenSheets,
+    () => openSheets > 0,
+    () => false,
+  );
+}
+
+/**
+ * The bottom clearance of a TALL sheet whose last control must be reachable when scrolled to the end:
+ * 24px plus the safe area, so the home indicator never sits on it. The panel's own default is 16px plus
+ * the safe area, which is right for a short sheet that ends in a row of text; a tall editor ends in a
+ * button, and a thumb needs air under it. Passed as the sheet's `className`, so it replaces the default
+ * rather than stacking on it.
+ */
+export const TALL_SHEET_CLEARANCE = "pb-[calc(env(safe-area-inset-bottom)_+_1.5rem)]";
 
 // A minimal bottom sheet — no Radix, no portals, no extra deps. Renders nothing when closed.
 // Dismisses on backdrop tap or Escape. Animations come from tw-animate-css (already imported).
@@ -77,10 +122,20 @@ export function BottomSheet({
   // tree's point of view either way; the dialog role below is only meaningful once `open` is true.
   const peeking = !open && pull > 0;
   // Remembers whether the LAST render was a peek, so the render where `open` flips true can tell
-  // "this is a drag continuing into an open" from "this open had nothing before it" and skip the
-  // slide-in entrance in the former case.
+  // "this is a drag continuing into an open" from "this open had nothing before it". That one render
+  // takes the 180ms glide below; it is true for that render only.
   const wasPeeking = React.useRef(false);
+  // Whether the CURRENT open began as a peek, held until the sheet closes. The entrance classes read
+  // this, not `continuingFromPeek`: that is true for one render only, so the next re-render of the
+  // open sheet (a poll, a keyboard resize) added `animate-in`, which restarts the keyframe at
+  // translateY(100%) — the sheet dropped out of view and slid back in.
+  const openedFromPeek = React.useRef(false);
   useDialogFocus(open, panelRef);
+  React.useEffect(() => {
+    if (!open) return;
+    bumpOpenSheets(1);
+    return () => bumpOpenSheets(-1);
+  }, [open]);
 
   // Backdrop dismiss requires press AND release on the backdrop itself (the Radix
   // outside-pointerdown rule) — NOT just whatever the browser happens to synthesize a `click` on. A
@@ -157,6 +212,8 @@ export function BottomSheet({
   // fresh open from a drag continuing into one. Updated for the NEXT render right after.
   const continuingFromPeek = open && wasPeeking.current;
   wasPeeking.current = peeking;
+  openedFromPeek.current = open && (openedFromPeek.current || continuingFromPeek);
+  const skipEntrance = openedFromPeek.current;
 
   if (!open && !peeking) return null;
 
@@ -188,7 +245,7 @@ export function BottomSheet({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col justify-end"
+      className="fixed inset-x-0 top-0 z-50 flex h-(--app-h) flex-col justify-end"
       role={peeking ? undefined : "dialog"}
       aria-modal={peeking ? undefined : true}
       aria-labelledby={!peeking && title ? titleId : undefined}
@@ -207,7 +264,7 @@ export function BottomSheet({
         tabIndex={-1}
         className={cn(
           "absolute inset-0 bg-black/50",
-          !peeking && !continuingFromPeek && "duration-200 animate-in fade-in",
+          !peeking && !skipEntrance && "duration-200 animate-in fade-in",
         )}
         style={peeking ? { opacity: Math.min(1, pull / 120) * 0.5 } : undefined}
         onPointerDown={() => {
@@ -245,7 +302,7 @@ export function BottomSheet({
           // The slide-in entrance plays on a fresh open only. A peek has no entrance (it's tracking
           // the finger, not animating), and a drag that continues into an open gets its own 180ms
           // transform transition above rather than restarting from the keyframe's own 100%.
-          !peeking && !continuingFromPeek && "duration-200 animate-in slide-in-from-bottom",
+          !peeking && !skipEntrance && "duration-200 animate-in slide-in-from-bottom",
           "pb-[calc(env(safe-area-inset-bottom)_+_1rem)]",
           className,
         )}
@@ -282,118 +339,6 @@ export function BottomSheet({
         </div>
         <div className="px-4 py-3">{children}</div>
       </div>
-    </div>
-  );
-}
-
-// A left-edge drawer — same no-deps approach as BottomSheet, but slides in from the side and fills
-// the viewport height with a scrollable body. Used for the thread sidebar (TUI-style switcher).
-interface SideSheetProps {
-  open: boolean;
-  onClose: () => void;
-  title?: string;
-  /** Optional action(s) rendered in the header, to the left of the close (✕) button. */
-  headerAction?: React.ReactNode;
-  children: React.ReactNode;
-  footer?: React.ReactNode;
-  className?: string;
-}
-
-export function SideSheet({
-  open,
-  onClose,
-  title,
-  headerAction,
-  children,
-  footer,
-  className,
-}: SideSheetProps) {
-  useLocale();
-  const panelRef = React.useRef<HTMLDivElement>(null);
-  const titleId = React.useId();
-  useDialogFocus(open, panelRef);
-
-  // Backdrop dismiss requires press AND release on the backdrop itself (the Radix
-  // outside-pointerdown rule) — NOT just whatever the browser happens to synthesize a `click` on. A
-  // long-press that opens this sheet has its finger still down at the moment the sheet mounts; the
-  // browser's release click then lands on whatever is now under the finger, which is the backdrop —
-  // and without this guard that click would immediately close the sheet it just opened. Arming only
-  // on a backdrop `pointerdown` means a click that originated elsewhere (e.g. the pill's release)
-  // never dismisses.
-  const backdropArmed = React.useRef(false);
-  React.useEffect(() => {
-    if (open) backdropArmed.current = false;
-  }, [open]);
-
-  React.useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  if (!open) return null;
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={title ? titleId : undefined}
-    >
-      <div
-        ref={panelRef}
-        tabIndex={-1}
-        className={cn(
-          // Same ground and same edge as the bottom sheet above, for the same reason — one panel
-          // surface app-wide, raised off the page rather than painted in the page's own colour.
-          "relative z-10 flex h-full w-[86%] max-w-sm flex-col border-r border-rule bg-card shadow-2xl duration-200 animate-in slide-in-from-left",
-          className,
-        )}
-      >
-        <div className="flex shrink-0 items-center justify-between border-b border-rule bg-card/95 px-4 py-3 backdrop-blur-md [padding-top:calc(env(safe-area-inset-top)_+_0.75rem)]">
-          <span id={title ? titleId : undefined} className="text-sm font-semibold">
-            {title}
-          </span>
-          <div className="flex items-center gap-1">
-            {headerAction}
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8"
-              onClick={onClose}
-              aria-label={translate("common.closeAria")}
-            >
-              <X className="size-4" />
-            </Button>
-          </div>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{children}</div>
-        {footer && (
-          <div className="shrink-0 border-t border-rule px-3 py-2 pb-[calc(env(safe-area-inset-bottom)_+_0.5rem)]">
-            {footer}
-          </div>
-        )}
-      </div>
-      {/* Backdrop: dismisses on tap but hidden from assistive tech — the header ✕ is the accessible
-          "Close", so the drawer isn't announced with a giant duplicate close target. Dismiss fires
-          only when the pointer went DOWN on the backdrop too — see backdropArmed above. */}
-      <button
-        type="button"
-        aria-hidden="true"
-        tabIndex={-1}
-        className="flex-1 bg-black/50 duration-200 animate-in fade-in"
-        onPointerDown={() => {
-          backdropArmed.current = true;
-        }}
-        onClick={() => {
-          if (!backdropArmed.current) return;
-          backdropArmed.current = false;
-          onClose();
-        }}
-      />
     </div>
   );
 }

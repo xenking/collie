@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { hostFor } from "./host.ts";
 import {
   defaultSocketPath,
   envBool,
@@ -27,17 +28,20 @@ const KEYS = [
   "COLLIE_READ_LINES",
   "COLLIE_TRANSCRIPT",
   "COLLIE_TRANSCRIPT_ROOT",
+  "COLLIE_REDACT",
   "COLLIE_CODEX_ROOT",
   "COLLIE_PI_ROOT",
   "COLLIE_OPENCODE_ROOT",
   "COLLIE_GROK_ROOT",
   "COLLIE_HERMES_ROOT",
+  "COLLIE_OPENCLAW_ROOT",
   // Each harness's own home var participates in journal-root resolution, so the suite must own them
   // too — otherwise a developer with CODEX_HOME set gets different results than CI.
   "CODEX_HOME",
   "PI_CODING_AGENT_DIR",
   "XDG_DATA_HOME",
   "GROK_HOME",
+  "OPENCLAW_STATE_DIR",
   "COLLIE_SUBMIT_KEYS",
   "COLLIE_TRUSTED_USER",
   "COLLIE_TRUSTED_USER_OPTIONAL",
@@ -92,11 +96,12 @@ describe("loadConfig", () => {
     expect(cfg.transcript).toBe(true);
     // One root by default, and it is a list of one rather than a special case (issue #92).
     expect(cfg.journalRoots.claude).toHaveLength(1);
-    expect(cfg.journalRoots.claude[0]).toEndWith("/.claude/projects");
+    expect(cfg.journalRoots.claude[0]).toBe(join(homedir(), ".claude", "projects"));
     // OpenCode keeps ONE sqlite database at the top of its XDG data dir — no per-session files.
     expect(cfg.journalRoots.opencode).toEqual([join(homedir(), ".local", "share", "opencode")]);
     expect(cfg.journalRoots.grok).toEqual([join(homedir(), ".grok", "sessions")]);
     expect(cfg.journalRoots.hermes).toEqual([join(homedir(), ".hermes")]);
+    expect(cfg.journalRoots.openclaw).toEqual([join(homedir(), ".openclaw")]);
     expect(cfg.submitKeys).toEqual(["Enter"]);
     expect(cfg.trustedUser).toBe("");
     expect(cfg.trustedUserOptional).toBe(false);
@@ -166,6 +171,19 @@ describe("loadConfig", () => {
     expect(loadConfig().transcript).toBe(true);
   });
 
+  test("COLLIE_REDACT masks secrets by default and turns off with off/0/false/no", () => {
+    expect(loadConfig().redact).toBe(true);
+    for (const off of ["off", "0", "false", "no", "OFF"]) {
+      process.env.COLLIE_REDACT = off;
+      expect(loadConfig().redact).toBe(false);
+    }
+    process.env.COLLIE_REDACT = "on";
+    expect(loadConfig().redact).toBe(true);
+    // A typo must not quietly turn the mask off.
+    process.env.COLLIE_REDACT = "banana";
+    expect(loadConfig().redact).toBe(true);
+  });
+
   // COLLIE_TRANSCRIPT_ROOT predates the per-harness split and meant Claude's root — it keeps meaning
   // exactly that, so an existing deployment's env survives the change untouched.
   test("COLLIE_TRANSCRIPT_ROOT relocates the CLAUDE journal root", () => {
@@ -213,10 +231,10 @@ describe("loadConfig", () => {
     process.env.XDG_DATA_HOME = "/srv/share";
     process.env.GROK_HOME = "/srv/grok";
     const cfg = loadConfig();
-    expect(cfg.journalRoots.codex).toEqual(["/srv/codex/sessions"]);
-    expect(cfg.journalRoots.pi).toEqual(["/srv/pi/sessions"]);
-    expect(cfg.journalRoots.opencode).toEqual(["/srv/share/opencode"]);
-    expect(cfg.journalRoots.grok).toEqual(["/srv/grok/sessions"]);
+    expect(cfg.journalRoots.codex).toEqual([join("/srv/codex", "sessions")]);
+    expect(cfg.journalRoots.pi).toEqual([join("/srv/pi", "sessions")]);
+    expect(cfg.journalRoots.opencode).toEqual([join("/srv/share", "opencode")]);
+    expect(cfg.journalRoots.grok).toEqual([join("/srv/grok", "sessions")]);
   });
 
   test("an explicit COLLIE_* root beats the harness's home var", () => {
@@ -228,6 +246,13 @@ describe("loadConfig", () => {
   test("COLLIE_HERMES_ROOT relocates Hermes state.db", () => {
     process.env.COLLIE_HERMES_ROOT = "/srv/hermes";
     expect(loadConfig().journalRoots.hermes).toEqual(["/srv/hermes"]);
+  });
+
+  test("OpenClaw's state folder follows OPENCLAW_STATE_DIR, and the Collie override wins", () => {
+    process.env.OPENCLAW_STATE_DIR = "/srv/openclaw-state";
+    expect(loadConfig().journalRoots.openclaw).toEqual(["/srv/openclaw-state"]);
+    process.env.COLLIE_OPENCLAW_ROOT = "/srv/a,/srv/b";
+    expect(loadConfig().journalRoots.openclaw).toEqual(["/srv/a", "/srv/b"]);
   });
 
   // The operator's rows sit beside their .env, and the launcher hands us that dir precisely so the
@@ -422,19 +447,19 @@ describe("isLoopbackBindHost", () => {
 
 describe("defaultSocketPath", () => {
   test("unix default lives under ~/.config/herdr", () => {
-    expect(defaultSocketPath("linux", {}, "/home/u")).toBe(join("/home/u", ".config", "herdr", "herdr.sock"));
-    expect(defaultSocketPath("darwin", {}, "/Users/u")).toBe(join("/Users/u", ".config", "herdr", "herdr.sock"));
+    expect(defaultSocketPath(hostFor("linux"), {}, "/home/u")).toBe("/home/u/.config/herdr/herdr.sock");
+    expect(defaultSocketPath(hostFor("darwin"), {}, "/Users/u")).toBe("/Users/u/.config/herdr/herdr.sock");
   });
 
   test("win32 default honours APPDATA", () => {
-    expect(defaultSocketPath("win32", { APPDATA: "C:\\Users\\u\\AppData\\Roaming" }, "C:\\Users\\u")).toBe(
-      join("C:\\Users\\u\\AppData\\Roaming", "herdr", "herdr.sock"),
+    expect(defaultSocketPath(hostFor("win32"), { APPDATA: "C:\\Users\\u\\AppData\\Roaming" }, "C:\\Users\\u")).toBe(
+      "C:\\Users\\u\\AppData\\Roaming\\herdr\\herdr.sock",
     );
   });
 
   test("win32 falls back to <home>/AppData/Roaming when APPDATA is unset", () => {
-    expect(defaultSocketPath("win32", {}, "C:\\Users\\u")).toBe(
-      join("C:\\Users\\u", "AppData", "Roaming", "herdr", "herdr.sock"),
+    expect(defaultSocketPath(hostFor("win32"), {}, "C:\\Users\\u")).toBe(
+      "C:\\Users\\u\\AppData\\Roaming\\herdr\\herdr.sock",
     );
   });
 });

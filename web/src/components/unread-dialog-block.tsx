@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
-import type { StyledLine, UnreadDialogModel } from "@/lib/blocks";
+import { lineText, type StyledLine, type UnreadDialogModel } from "@/lib/blocks";
 import { keyLabel } from "@/lib/key-queue";
 import { OptionGroupCaption, PromptPanel } from "@/components/option-button";
 import { RawMirror } from "@/components/raw-mirror";
@@ -20,6 +20,9 @@ export interface UnreadDialogBlockProps {
   onAction: (key: string) => void | Promise<void>;
   /** Read-only device or a gone pane: everything renders (for context) but can't be pressed. */
   disabled?: boolean;
+  /** The device's Wrap lines setting, so the whole-pane mirror wraps or pans as the pane mirror
+   *  does (#372). Default false: it pans, as RawMirror does. */
+  wrap?: boolean;
 }
 
 // The UNREAD-DIALOG CARD — one declared key over a screen Collie could not read (.adr/0053).
@@ -34,21 +37,53 @@ export interface UnreadDialogBlockProps {
 // operator has to read when nothing else is understood, so unlike the four cards that fully replace
 // their region this one never hides it. Same treatment as menu-block.tsx: React text nodes only, and
 // the agent's own terminal colours (MIRROR_SPACE / MIRROR_INVERT, ADR 0002), via the shared
-// RawMirror. PromptPanel's own Terminal toggle (ADR 0056) still applies on top, for a decluttered
-// view with the key control put away.
+// RawMirror, wrapped or panned by the device's Wrap lines setting like the pane mirror. PromptPanel's
+// own Terminal toggle (ADR 0056) still applies on top, for a decluttered view with the key control put
+// away, and that view's mirror keeps the same setting.
 //
 // DESIGN.md §2: the in-flight state recolours the button and changes NOTHING else — no spinner child
 // appears, no border is added, no padding moves. The border is reserved in the base string and the
 // pending state only repaints it, so the card the operator is reading does not shift under the tap.
 // DESIGN.md §6: `min-h-11` is the 44px tap floor, stated as a floor and never a fixed height.
-export function UnreadDialogBlock({ cancel, lines, onAction, disabled }: UnreadDialogBlockProps) {
+// ARM, THEN SEND (#339). The declared key is sent on the SECOND tap. A screen this card could not
+// read may be a question dialog whose Escape ends the whole turn (opencode's `esc dismiss`), and
+// the first tap must not be able to do that. The first tap only arms: the button's words change
+// (never its size), and it disarms by itself after ARM_MS. The wording names "Dismiss" only when
+// the screen's own rows print `esc dismiss`; otherwise it names the key, never a verb.
+export const ARM_MS = 4000;
+const NAMES_A_DISMISS = /\besc\s+dismiss\b/i;
+
+export function UnreadDialogBlock({ cancel, lines, onAction, disabled, wrap }: UnreadDialogBlockProps) {
   useLocale();
   const [sending, setSending] = useState(false);
   const locked = disabled || sending;
+  // The arm belongs to ONE dialog: it records the identity it was armed for, so a new dialog (other
+  // key, other rows, or another pane reusing this instance) is never armed by the old one's tap.
+  const identity = `${cancel.key}\n${lines.map(lineText).join("\n")}`;
+  const [armedFor, setArmedFor] = useState<string | null>(null);
+  const armed = armedFor === identity;
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const caption = t("unreadDialog.caption");
+  const dismissWording = lines.some((l) => NAMES_A_DISMISS.test(lineText(l)));
+
+  useEffect(() => () => clearTimeout(timer.current), []);
+  // A card that stops being pressable (read-only device, gone pane) also stops being armed.
+  useEffect(() => {
+    if (!disabled) return;
+    clearTimeout(timer.current);
+    setArmedFor(null);
+  }, [disabled]);
 
   async function press() {
     if (locked) return;
+    if (!armed) {
+      setArmedFor(identity);
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => setArmedFor(null), ARM_MS);
+      return;
+    }
+    clearTimeout(timer.current);
+    setArmedFor(null);
     setSending(true);
     try {
       await onAction(cancel.key);
@@ -57,10 +92,14 @@ export function UnreadDialogBlock({ cancel, lines, onAction, disabled }: UnreadD
     }
   }
 
+  const armedLabel = dismissWording
+    ? t("unreadDialog.confirmDismiss")
+    : t("unreadDialog.confirmKey", { key: keyLabel(cancel.key) });
+
   return (
     // rawMode (ADR 0056 counsel fix): this card always shows the mirror by default (below), so
     // its control only puts the button away — never a swap from nothing.
-    <PromptPanel ariaLabel={caption} raw={lines} rawMode="declutter">
+    <PromptPanel ariaLabel={caption} raw={lines} rawMode="declutter" wrap={wrap}>
       <OptionGroupCaption>{caption}</OptionGroupCaption>
 
       <button
@@ -70,13 +109,19 @@ export function UnreadDialogBlock({ cancel, lines, onAction, disabled }: UnreadD
         onClick={press}
         className={cn(
           "font-content flex min-h-11 w-full items-center justify-center rounded-lg border px-3 py-2 text-sm font-medium text-foreground transition-colors disabled:opacity-60",
-          sending ? "border-primary bg-primary/25" : "border-primary/60 bg-primary/15 active:bg-primary/25",
+          sending || armed
+            ? "border-primary bg-primary/25"
+            : "border-primary/60 bg-primary/15 active:bg-primary/25",
         )}
       >
-        {keyLabel(cancel.key)}
+        {armed ? armedLabel : keyLabel(cancel.key)}
       </button>
+      {/* A live region on the button itself is unreliable; this one announces the armed wording. */}
+      <span role="status" className="sr-only">
+        {armed ? armedLabel : ""}
+      </span>
 
-      <RawMirror lines={lines} />
+      <RawMirror lines={lines} wrap={wrap} />
     </PromptPanel>
   );
 }

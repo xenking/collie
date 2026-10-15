@@ -1,5 +1,5 @@
 import { ChevronRight, KeyRound, Lock } from "lucide-react";
-import { Link } from "react-router";
+import { Link, useLocation } from "react-router";
 
 import { Collapse } from "@/components/ui/collapse";
 import { Notice } from "@/components/ui/notice";
@@ -65,11 +65,15 @@ type Gate = "pairing" | "device";
 // "none", because that latch is a real change and dropping the region would make it silent.
 export function ReadOnlyBanner({ device }: { device: DeviceAuth | undefined }) {
   useLocale();
-  const { refused } = usePairing();
+  const { refused, expired } = usePairing();
   // The scope rides the link like every other navigation in the app (lib/nav.ts): Settings' own back
   // button goes to `homePath(scope)`, so a scope-less link here would strand the operator on the
   // lead's dashboard after they paired. The banner is never mounted outside the router.
   const scope = useScope();
+  // A step down into Settings, so it records where from like every down move: Settings' back arrow
+  // then steps back here instead of stacking a dashboard on top (ADR 0067).
+  const { pathname, search } = useLocation();
+  const from = `${pathname}${search}`;
 
   // The pairing latch is checked FIRST and outranks the device gate: both can be true at once, and
   // only the pairing one names a remedy the phone can actually carry out.
@@ -104,7 +108,7 @@ export function ReadOnlyBanner({ device }: { device: DeviceAuth | undefined }) {
         // `block` is layout, not styling: an inline anchor around the strip's block root sizes to
         // its own line box, which is the same fault the primitive's `w-full` note describes. The
         // accessible name is the sentence inside; the chevron is decorative and says so.
-        <Link to={pairedDevicesPath(scope)} className="block">
+        <Link to={pairedDevicesPath(scope)} state={{ from }} className="block">
           <Notice
             variant="strip"
             tone="caution"
@@ -112,7 +116,8 @@ export function ReadOnlyBanner({ device }: { device: DeviceAuth | undefined }) {
             icon={<KeyRound />}
             action={<ChevronRight aria-hidden className="size-3.5 opacity-70" />}
           >
-            {t("space.readOnly.notPaired")}
+            {/* An expired pairing names its own remedy: "pair again", not "pair" (M46 spec 01). */}
+            {expired ? t("space.readOnly.expired") : t("space.readOnly.notPaired")}
           </Notice>
         </Link>
       ) : gate === "device" ? (

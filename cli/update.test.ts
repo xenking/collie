@@ -1,4 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { X509Certificate } from "node:crypto";
+import { join } from "node:path";
+
+import { peerStore } from "../bridge/crew/fixtures.ts";
+import { crewRuntimePath, formatMarker, markerFor } from "../bridge/crew/staleness.ts";
+import { serializeTrustStore } from "../bridge/crew/trust-store.ts";
+import { hostFor } from "../bridge/host.ts";
 
 import {
   BINARY,
@@ -12,11 +19,13 @@ import {
   type FakeLinkFs,
   fakeLinkFs,
   HOME,
+  posixKey,
   ROOT,
   type Scripted,
   type SeededFiles,
 } from "./fakes.ts";
 import type { Net } from "./sys.ts";
+import { collieBinary } from "./unit.ts";
 import { crewTurnStart, parseUpdateRun, STALE_AFTER_MS, UPDATE_RUN_SCHEMA } from "../bridge/update-run.ts";
 import {
   boundTail,
@@ -31,9 +40,10 @@ import {
   scrubSecrets,
 } from "./update-run.ts";
 import { EXIT } from "./io.ts";
+import { WINDOWS_CHECKOUT_SENTENCE } from "./install-kind.ts";
 import { stagingLogPath, tailOf } from "../bridge/staging-log.ts";
 import type { JsonObject } from "../bridge/json.ts";
-import { latestUpdateInMajor } from "../bridge/update.ts";
+import { latestUpdateInMajor, parseReleaseManifest } from "../bridge/update.ts";
 import {
   type ApplyArgs,
   applyArgv,
@@ -42,6 +52,8 @@ import {
   cmdApplyUpdate,
   cmdUpdate,
   isManagedCheckout,
+  smoke,
+  smokeReason,
   majorVerdict,
   nextMajorRelease,
   parseApiTags,
@@ -59,6 +71,31 @@ import {
   wantsRunId,
   wantsToTag,
 } from "./update.ts";
+
+// The fakes model a POSIX box and every fixture here is spelled that way (`/opt/collie`, `/inst`), but
+// the code under test builds its paths with `join`, which hands back `\opt\collie\cli\main.ts` on
+// Windows. `fakeFiles` and `fakeLinkFs` already fold every path through `posixKey`; `posixExec` does
+// the same for the exec seam, so a recorded call line and a scripted answer's prefix are POSIX
+// whichever way the host spells a path. Where a test compares a string the CODE built (a run
+// record's recovery command, an operator-facing sentence), it builds the expected value with `join`
+// instead, because that string really does carry the host's separators. Off Windows `posixKey`
+// returns its input, so nothing here changes what Linux and macOS record.
+const posixArg = (s: string): string => (s.includes("\\") ? posixKey(s) : s);
+
+function posixExec(scripted: Scripted = {}): FakeExec {
+  const inner = fakeExec(scripted);
+  const args = (a: readonly string[]): string[] => a.map(posixArg);
+  return {
+    ...inner,
+    capture: (tool, a, ...rest) => inner.capture(posixArg(tool), args(a), ...rest),
+    inherit: (tool, a) => inner.inherit(posixArg(tool), args(a)),
+    runIn: (tool, a, cwd, pathPrefix, ...rest) =>
+      inner.runIn(posixArg(tool), args(a), posixArg(cwd), pathPrefix === undefined ? undefined : posixArg(pathPrefix), ...rest),
+    runLogged: (command, opts) =>
+      inner.runLogged(args(command), { ...opts, cwd: posixArg(opts.cwd), logPath: posixArg(opts.logPath) }),
+    spawnDetached: (command, opts) => inner.spawnDetached(args(command), { ...opts, logPath: posixArg(opts.logPath) }),
+  };
+}
 
 // `update` against fakes. The shell suite proves the git grammar against REAL throwaway repos
 // (scripts/collie-cli.test.sh) — what is proved here is the branching: one predicate, two strategies,
@@ -124,6 +161,7 @@ const deadNet: Net = {
   getJson: () => Promise.resolve({ ok: false, failure: { status: null, message: "no network in tests" } }),
   download: () => Promise.resolve({ ok: false, failure: { status: null, message: "no network in tests" } }),
   probe: () => Promise.resolve({ ok: false, failure: { status: null, message: "no network in tests" } }),
+  tlsCertificate: () => Promise.resolve({ ok: false, failure: { status: null, message: "no network in tests" } }),
 };
 
 /** `git symbolic-ref -q HEAD` answering non-zero is what "detached, i.e. Herdr-managed" means. */
@@ -155,7 +193,7 @@ function harness(
   > = {},
 ): Harness {
   const io = capture();
-  const exec = fakeExec({
+  const exec = posixExec({
     ...over,
     answers: [...(over.answers ?? []), ["/fake/bun --version", { stdout: "1.4.0\n" }], ...ORIGIN],
   });
@@ -179,7 +217,7 @@ function harness(
       files,
       link,
       net: { ...deadNet, getJson: (url) => (url.includes("/api/health") ? health() : deadNet.getJson(url)) },
-      platform: "linux",
+      host: hostFor("linux"),
       arch: "x64",
       restart: () => {
         h.restarts++;
@@ -197,10 +235,10 @@ const gitRuns = (exec: FakeExec): string[] =>
 
 describe("one predicate, both decisions", () => {
   test("no branch means Herdr-managed", () => {
-    expect(isManagedCheckout(fakeExec({ answers: MANAGED }), ROOT)).toBe(true);
-    expect(isManagedCheckout(fakeExec({ answers: LINKED }), ROOT)).toBe(false);
+    expect(isManagedCheckout(posixExec({ answers: MANAGED }), ROOT)).toBe(true);
+    expect(isManagedCheckout(posixExec({ answers: LINKED }), ROOT)).toBe(false);
     // git missing entirely reads as managed, and `updateCheckout` refuses before it matters.
-    expect(isManagedCheckout(fakeExec({ absent: ["git"] }), ROOT)).toBe(true);
+    expect(isManagedCheckout(posixExec({ absent: ["git"] }), ROOT)).toBe(true);
   });
 });
 
@@ -741,6 +779,15 @@ describe("_apply-update", () => {
     expect(h.io.stderr.join("\n")).toContain("the checkout advanced but the build failed");
     expect(h.io.stdout.join("\n")).not.toContain("update complete");
   });
+
+  // This path has no health gate of its own (ADR 0006), so the restart's code is the whole verdict:
+  // a failed one must not end on `✓ update complete`, and `update` then records no `pass` either.
+  test("a failed restart stops before the ✓", async () => {
+    const h = harness({ answers: [...LINKED, ...SHALLOW], restart: EXIT.FAIL });
+    expect(await cmdApplyUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.restarts).toBe(1);
+    expect(h.io.stdout.join("\n")).not.toContain("update complete");
+  });
 });
 
 describe("update", () => {
@@ -926,6 +973,26 @@ describe("update", () => {
     expect(built(h)).toBe(true);
   });
 
+  // On Windows a checkout's update is refused before anything else since M43 spec 08 (it needs bash
+  // to build, and its task relaunched the clone's own build after a staged update). These two cases
+  // pinned that the intact-install check named `bin/collie.exe` there; the refusal comes first now,
+  // whatever is on disk, and builds nothing.
+  test("Windows: a checkout is refused before the intact-install check, whichever binary is there", async () => {
+    for (const exe of [true, false]) {
+      const h = noop();
+      h.deps.host = hostFor("win32");
+      stamp(h, "0.32.0");
+      if (exe) {
+        h.files.entries.delete(BINARY);
+        h.files.entries.set(`${BINARY}.exe`, { text: "" });
+      }
+      expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+      expect(built(h)).toBe(false);
+      expect(h.restarts).toBe(0);
+      expect(h.io.stderr).toEqual([`error: ${WINDOWS_CHECKOUT_SENTENCE}`]);
+    }
+  });
+
   test("nothing to take but the bundle is of another version: build anyway", async () => {
     const h = noop();
     stamp(h, "0.31.1");
@@ -1022,6 +1089,128 @@ describe("update", () => {
     expect(h.io.stdout.join("\n")).not.toContain("NEW MAJOR");
   });
 
+
+  // ── One update at a time on this machine ───────────────────────────────────
+  // 2026-10-14: two detached updaters for one run built into one tree. The in-place path took no lock
+  // and wrote its record only at the very end, so the second runner found nothing to stop it.
+
+  const LOCK = `${STATE}/update.lock`;
+  const MANAGED_UPDATE: Scripted["answers"] = [
+    ...MANAGED,
+    [`${GIT} ls-remote --tags ${TAG_REMOTE}`, { stdout: LS_REMOTE }],
+    [`${GIT} rev-parse HEAD`, { stdout: "a1a1a1a1\n" }],
+    ...SHALLOW,
+  ];
+  const APPLY = `${ROOT}$ PATH=/fake:$PATH /fake/bun ${ROOT}/cli/main.ts _apply-update`;
+
+  test("an in-place run refuses while another updater holds the lock, and fetches nothing", async () => {
+    const h = harness({ installed: "0.31.1", answers: MANAGED_UPDATE });
+    h.files.write(LOCK, JSON.stringify({ pid: 999, at: NOW }));
+    h.deps.exec.processCommand = (pid) => (pid === 999 ? "collie update" : null);
+    expect(await cmdUpdate(h.deps, ["--to-tag", "v0.32.0", "--run-id", "r-1"])).toBe(EXIT.FAIL);
+    expect(h.io.stderr.join("\n")).toContain("another update is in flight");
+    expect(h.io.stderr.join("\n")).toContain("This update does not start a second one. Wait for it to finish.");
+    expect(gitRuns(h.exec)).toEqual([]);
+    expect(h.exec.calls.some((c) => c.includes("_apply-update"))).toBe(false);
+    // The other runner's lock is left exactly as it was.
+    expect(JSON.parse(h.files.read(LOCK) ?? "{}").pid).toBe(999);
+  });
+
+  test("an in-place run refuses beside a live in-flight record another process wrote", async () => {
+    const h = harness({ installed: "0.31.1", answers: MANAGED_UPDATE });
+    const record = reduce(
+      reduce(idleRun(NOW), { kind: "begin", from: "0.31.1", to: "0.32.0", pid: 999, runId: "r-1" }, NOW),
+      { kind: "stage" },
+      NOW,
+    );
+    h.files.write(`${STATE}/update.json`, `${JSON.stringify(record)}\n`);
+    h.deps.exec.processCommand = (pid) => (pid === 999 ? "collie update" : null);
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.io.stderr.join("\n")).toContain("another update is in flight");
+    expect(gitRuns(h.exec)).toEqual([]);
+    expect(h.files.read(LOCK)).toBeNull();
+  });
+
+  test("a young lock whose updater is gone says when it clears and where to remove it", async () => {
+    const h = harness({ installed: "0.31.1", answers: MANAGED_UPDATE });
+    h.files.write(LOCK, JSON.stringify({ pid: 999, at: NOW - 1_000 }));
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    const said = h.io.stderr.join("\n");
+    expect(said).toMatch(/If that update is gone, the lock clears at \d\d:\d\d, or remove .*update\.lock\./);
+    expect(said).not.toContain("Wait for it to finish");
+    expect(said.slice(said.indexOf("This update"))).not.toContain("—");
+  });
+
+  test("a lock another runner wrote between the check and the take is not ours: refuse, leave it", async () => {
+    const h = harness({ installed: "0.31.1", answers: MANAGED_UPDATE });
+    const write = h.files.write.bind(h.files);
+    h.files.write = (path, text, mode) => {
+      write(path, text, mode);
+      // The rival's write lands just after ours and wins. Matched by name, not by `=== LOCK`: on
+      // Windows the code joins the path with backslashes.
+      if (path.endsWith("update.lock")) write(path, JSON.stringify({ pid: 999, at: NOW }), mode);
+    };
+    h.deps.exec.processCommand = (pid) => (pid === 999 ? "collie update" : null);
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.io.stderr.join("\n")).toContain("This update does not start a second one.");
+    expect(gitRuns(h.exec)).toEqual([]);
+    expect(JSON.parse(h.files.read(LOCK) ?? "{}").pid).toBe(999);
+  });
+
+  test("the run does not remove a lock another pid wrote while it worked", async () => {
+    const h = harness({ installed: "0.31.1", answers: MANAGED_UPDATE });
+    const runIn = h.deps.exec.runIn.bind(h.deps.exec);
+    h.deps.exec.runIn = (...a) => {
+      h.files.write(LOCK, JSON.stringify({ pid: 999, at: NOW }));
+      return runIn(...a);
+    };
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(JSON.parse(h.files.read(LOCK) ?? "{}").pid).toBe(999);
+  });
+
+  test("an in-place run holds the lock while it works and drops it when it succeeds", async () => {
+    const h = harness({ installed: "0.31.1", answers: MANAGED_UPDATE });
+    const seen: (number | null)[] = [];
+    const runIn = h.deps.exec.runIn.bind(h.deps.exec);
+    h.deps.exec.runIn = (...a) => {
+      // The child is a separate process; the lock on disk is the PARENT's, and the child does not read it.
+      seen.push(JSON.parse(h.files.read(LOCK) ?? "null")?.pid ?? null);
+      return runIn(...a);
+    };
+    expect(await cmdUpdate(h.deps, ["--run-id", "r-1"])).toBe(EXIT.OK);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((pid) => pid === FAKE_PID)).toBe(true);
+    expect(h.files.read(LOCK)).toBeNull();
+  });
+
+  test("an in-place run drops the lock when the apply child fails", async () => {
+    const h = harness({ installed: "0.31.1", answers: [...MANAGED_UPDATE, [APPLY, { code: 1 }]] });
+    expect(await cmdUpdate(h.deps, ["--run-id", "r-1"])).toBe(EXIT.FAIL);
+    expect(h.exec.calls).toContain(APPLY);
+    expect(h.files.read(LOCK)).toBeNull();
+  });
+
+  test("an in-place run drops the lock when the checkout will not advance", async () => {
+    const h = harness({ answers: [[`${GIT} rev-parse --show-prefix`, { code: 128 }]] });
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.files.read(LOCK)).toBeNull();
+  });
+
+  test("an in-place no-op drops the lock too", async () => {
+    const h = noop();
+    stamp(h, "0.32.0");
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(built(h)).toBe(false);
+    expect(h.files.read(LOCK)).toBeNull();
+  });
+
+  test("a lock whose updater is gone and long stale does not block an in-place run", async () => {
+    const h = harness({ installed: "0.31.1", answers: MANAGED_UPDATE });
+    h.files.write(LOCK, JSON.stringify({ pid: 999, at: NOW - STALE_AFTER_MS - 1 }));
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(h.files.read(LOCK)).toBeNull();
+  });
+
 });
 
 // ── The fork guard (M14/02 amendment §1) ─────────────────────────────────────
@@ -1099,8 +1288,13 @@ describe("platformId", () => {
     expect(platformId("linux", "arm64")).toBe("linux-arm64");
     expect(platformId("darwin", "arm64")).toBe("macos-arm64");
     expect(platformId("darwin", "x64")).toBe("macos-x64");
-    expect(platformId("win32", "x64")).toBeNull();
     expect(platformId("linux", "riscv64")).toBeNull();
+  });
+
+  test("Windows is x64 only: Windows on ARM gets the honest refusal", () => {
+    expect(platformId("win32", "x64")).toBe("windows-x64");
+    expect(platformId("win32", "arm64")).toBeNull();
+    expect(platformId("win32", "ia32")).toBeNull();
   });
 });
 
@@ -1139,6 +1333,8 @@ interface BinaryOptions {
   downloadFailure?: { status: number | null; message: string };
   restart?: number;
   smoke?: { pre?: boolean; post?: boolean };
+  /** The laid candidate's whole answer to `version`, when a case needs more than a wrong word. */
+  smokeAnswer?: Partial<import("./sys.ts").ExecResult>;
   /** What `<root>/current/bin/collie version` answers — the post-flip check reads it. */
   currentSays?: string;
   env?: Record<string, string | undefined>;
@@ -1184,7 +1380,10 @@ function binaryHarness(over: BinaryOptions = {}): Harness {
   const answers: NonNullable<Scripted["answers"]> = [
     // Not a git checkout: the whole point of this shape.
     [`git -C ${BROOT} rev-parse --show-prefix`, { code: 1 }],
-    [`/inst/versions/${NEW}/bin/collie version`, { stdout: over.smoke?.pre === false ? "boom\n" : `${NEW}\n` }],
+    [
+      `/inst/versions/${NEW}/bin/collie version`,
+      over.smokeAnswer ?? { stdout: over.smoke?.pre === false ? "boom\n" : `${NEW}\n` },
+    ],
     [
       `${INST}/current/bin/collie version`,
       { stdout: over.smoke?.post === false ? "boom\n" : `${over.currentSays ?? NEW}\n` },
@@ -1199,7 +1398,7 @@ function binaryHarness(over: BinaryOptions = {}): Harness {
   };
   for (const v of over.others ?? []) seed[`${INST}/versions/${v}/bin/collie`] = "OLDER BINARY";
   const files = fakeFiles(seed);
-  const exec = fakeExec({
+  const exec = posixExec({
     answers: [...answers, ...(over.answers ?? [])],
     logged: over.logged,
     // The client's own output goes where the runner's would have — the file `--status` points at.
@@ -1209,6 +1408,7 @@ function binaryHarness(over: BinaryOptions = {}): Harness {
   const health = healthNet(over.health, NEW);
   const net: Net = {
     probe: () => Promise.resolve({ ok: false, failure: { status: null, message: "no probe in this case" } }),
+    tlsCertificate: () => Promise.resolve({ ok: false, failure: { status: null, message: "no probe in this case" } }),
     getJson: (url) => {
       if (url.includes("/api/health")) return health();
       if (url.includes("api.github.com")) {
@@ -1253,7 +1453,7 @@ function binaryHarness(over: BinaryOptions = {}): Harness {
       files,
       link,
       net,
-      platform: "linux",
+      host: hostFor("linux"),
       arch: "x64",
       restart: () => {
         h.restarts++;
@@ -1264,6 +1464,41 @@ function binaryHarness(over: BinaryOptions = {}): Harness {
   };
   return h;
 }
+
+/**
+ * {@link binaryHarness} on a Windows host: the binary is `collie.exe`, and a rename moves the junction
+ * the link seam holds, as `rename(2)` moves a link on a real disk (see `legacyClone` below).
+ */
+function windowsBinaryHarness(over: BinaryOptions = {}): Harness {
+  const exe = (at: string, rest: string): string => `${at}/bin/collie.exe ${rest}`;
+  const h = binaryHarness({
+    ...over,
+    answers: [
+      [exe(`${INST}/versions/${NEW}`, "version"), { stdout: `${NEW}\n` }],
+      [exe(`${INST}/current`, "version"), { stdout: `${over.currentSays ?? "0.9.0"}\n` }],
+      [exe(`${INST}/current`, "hooks status --check"), { code: EXIT.OK }],
+      ...(over.answers ?? []),
+    ],
+  });
+  h.deps.host = hostFor("win32");
+  for (const v of over.others ?? []) h.files.write(`${INST}/versions/${v}/bin/collie.exe`, "OLDER BINARY");
+  h.files.write(`${BROOT}/bin/collie.exe`, "OLD BINARY");
+  const rename = h.files.rename;
+  h.files.rename = (from, to) => {
+    rename(from, to);
+    const moved = h.link.entries.get(from);
+    if (moved === undefined) return;
+    h.link.entries.delete(from);
+    h.link.entries.set(to, moved);
+  };
+  return h;
+}
+
+/** What `current` names in the link seam, in the POSIX spelling the fixtures use. */
+const currentTarget = (h: Harness): string | null => {
+  const probe = h.link.entries.get(`${INST}/current`);
+  return probe?.kind === "symlink" ? posixKey(probe.target) : null;
+};
 
 /**
  * The DETACHED RUNNER, driven directly — `collie update` stages and hands off to exactly this
@@ -1283,6 +1518,35 @@ const BINARY_APPLY: Omit<ApplyArgs, "handoff"> = {
 };
 
 describe("collie update on a binary install", () => {
+  test("reads the tag list past its first page: the newest release at position 120 of 130 is still found", async () => {
+    // GitHub pages /tags at 100. The repository had 92 tags on 2026-10-03; the next ones must not vanish.
+    const order = [
+      ...Array.from({ length: 119 }, (_, i) => `v0.${i + 1}.0`),
+      `v${NEW}`,
+      "v1.2.0-rc.1",
+      ...Array.from({ length: 9 }, (_, i) => `v0.${i + 200}.0`),
+    ];
+    const h = binaryHarness();
+    const { getJson } = h.deps.net;
+    const asked: string[] = [];
+    h.deps.net = {
+      ...h.deps.net,
+      getJson: (url, opts) => {
+        if (!url.includes("/tags?")) return getJson(url, opts);
+        asked.push(url);
+        const page = Number(/[?&]page=(\d+)/.exec(url)?.[1] ?? "1");
+        return Promise.resolve({ ok: true as const, value: apiTags(...order.slice((page - 1) * 100, page * 100)) });
+      },
+    };
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(asked).toEqual([
+      "https://api.github.com/repos/AltanS/collie/tags?per_page=100",
+      "https://api.github.com/repos/AltanS/collie/tags?per_page=100&page=2",
+    ]);
+    // The stable one, as before: the newer rc is still a prerelease and is not taken.
+    expect(h.files.ops).toContain(`mv ${INST}/.staging/x/${PAYLOAD} ${INST}/versions/${NEW}`);
+  });
+
   test("lays the version down, then hands the swap to the detached updater with systemd-run", async () => {
     const h = binaryHarness({ others: ["0.9.0"] });
     expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
@@ -1298,6 +1562,108 @@ describe("collie update on a binary install", () => {
     // The state file says `staging`, so a bridge that comes up now reports a run in flight.
     expect(JSON.parse(h.files.read(`${STATE}/update.json`) ?? "{}").state).toBe("staging");
     expect(h.exec.ran[0]?.command[0]).toBe("systemd-run");
+  });
+
+  test("a rehearsal mirror on loopback answers every release request, and the update says so", async () => {
+    const h = binaryHarness({ others: ["0.9.0"], env: { COLLIE_UPDATE_MIRROR: "http://127.0.0.1:8899/", GH_TOKEN: "t" } });
+    const asked: string[] = [];
+    const { getJson, download } = h.deps.net;
+    h.deps.net = {
+      ...h.deps.net,
+      getJson: (url) => {
+        asked.push(url);
+        return url.includes("/repos/")
+          ? Promise.resolve({ ok: true as const, value: apiTags("v1.0.0", `v${NEW}`) })
+          : getJson(url);
+      },
+      download: (url, dest) => {
+        asked.push(url);
+        return download(url, dest);
+      },
+    };
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    const base = "http://127.0.0.1:8899";
+    expect(asked).toEqual([
+      `${base}/repos/AltanS/collie/tags?per_page=100`,
+      `${base}/AltanS/collie/releases/download/v${NEW}/collie-${NEW}.manifest.json`,
+      `${base}/AltanS/collie/releases/download/v${NEW}/${PAYLOAD}.tar.gz`,
+    ]);
+    expect(h.io.stderr.join("\n")).toContain(`WARNING: COLLIE_UPDATE_MIRROR is set. This is a test seam: releases come from ${base}`);
+  });
+
+  test("every request to the mirror refuses a redirect; with no mirror the requests are the ones they were", async () => {
+    const record = (h: Harness) => {
+      const seen: { url: string; opts: unknown }[] = [];
+      const { getJson, download } = h.deps.net;
+      h.deps.net = {
+        ...h.deps.net,
+        getJson: (url, opts) => {
+          seen.push({ url, opts });
+          return url.includes("/repos/") && !url.includes("api.github.com")
+            ? Promise.resolve({ ok: true as const, value: apiTags("v1.0.0", `v${NEW}`) })
+            : getJson(url, opts);
+        },
+        download: (url, dest, opts) => {
+          seen.push({ url, opts });
+          return download(url, dest, opts);
+        },
+      };
+      return seen;
+    };
+    const mirrored = binaryHarness({ others: ["0.9.0"], env: { COLLIE_UPDATE_MIRROR: "http://127.0.0.1:8899" } });
+    const viaMirror = record(mirrored);
+    expect(await cmdUpdate(mirrored.deps)).toBe(EXIT.OK);
+    expect(viaMirror.map((r) => r.opts)).toEqual([{ redirect: "error" }, { redirect: "error" }, { redirect: "error" }]);
+
+    // Unset: the same three URLs as always, and no options at all, so `fetch` gets what it always got.
+    const plain = binaryHarness({ others: ["0.9.0"] });
+    const viaGithub = record(plain);
+    expect(await cmdUpdate(plain.deps)).toBe(EXIT.OK);
+    expect(viaGithub).toEqual([
+      { url: "https://api.github.com/repos/AltanS/collie/tags?per_page=100", opts: undefined },
+      { url: `https://github.com/AltanS/collie/releases/download/v${NEW}/collie-${NEW}.manifest.json`, opts: undefined },
+      { url: `https://github.com/AltanS/collie/releases/download/v${NEW}/${PAYLOAD}.tar.gz`, opts: undefined },
+    ]);
+  });
+
+  test("the checksum is checked on the mirror path too: a mismatch lays nothing down", async () => {
+    const h = binaryHarness({ env: { COLLIE_UPDATE_MIRROR: "http://127.0.0.1:8899" }, digest: "9c1a04".padEnd(64, "0") });
+    const { getJson } = h.deps.net;
+    h.deps.net = {
+      ...h.deps.net,
+      getJson: (url, opts) =>
+        url.includes("/repos/") ? Promise.resolve({ ok: true as const, value: apiTags("v1.0.0", `v${NEW}`) }) : getJson(url, opts),
+    };
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.io.stderr.join("\n")).toContain(`checksum mismatch for ${PAYLOAD}.tar.gz`);
+    expect(h.files.ops.some((op) => op.includes(`${INST}/versions/${NEW}`))).toBe(false);
+    expect(h.link.ops).toEqual([]);
+  });
+
+  test("a mirror that is not this machine's loopback stops the update before any request", async () => {
+    for (const value of [
+      "http://10.0.0.5:8899",
+      "https://127.0.0.1:8899",
+      "file:///C:/mirror",
+      "http://127.0.0.1.example.com",
+      "http://localhost@example.com",
+      "http://[::1]:8899",
+    ]) {
+      const h = binaryHarness({ env: { COLLIE_UPDATE_MIRROR: value } });
+      const asked: string[] = [];
+      const { getJson } = h.deps.net;
+      h.deps.net = {
+        ...h.deps.net,
+        getJson: (url) => {
+          asked.push(url);
+          return getJson(url);
+        },
+      };
+      expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+      expect(asked).toEqual([]);
+      expect(h.io.stderr.join("\n")).toContain(`COLLIE_UPDATE_MIRROR='${value}' is not an http://127.0.0.1 or http://localhost URL`);
+      expect(h.link.ops).toEqual([]);
+    }
   });
 
   test("a systemd-run binary with no reachable user bus falls back to setsid, not a doomed handoff", async () => {
@@ -1326,6 +1692,376 @@ describe("collie update on a binary install", () => {
     // GC: `current` plus one older is kept, so 0.9.0 goes and 1.0.0 stays.
     expect(h.files.ops.join("\n")).toContain(`${INST}/.trash/0.9.0.`);
     expect(h.files.ops.join("\n")).not.toContain(`${INST}/versions/1.0.0 ${INST}/.trash`);
+  });
+
+  test("Windows: the runner restarts through `current/bin/collie.exe`, the name this host's binary has", async () => {
+    const exe = (rest: string): string => `${INST}/current/bin/collie.exe ${rest}`;
+    const h = binaryHarness({
+      answers: [
+        [`/inst/versions/${NEW}/bin/collie.exe version`, { stdout: `${NEW}\n` }],
+        [exe("version"), { stdout: `${NEW}\n` }],
+        [exe("hooks status --check"), { code: EXIT.OK }],
+      ],
+    });
+    h.deps.host = hostFor("win32");
+    expect(await runner(h, BINARY_APPLY)).toBe(EXIT.OK);
+    expect(h.exec.calls).toContain(`${INST}$ ${exe("restart")}`);
+    expect(h.exec.calls.join("\n")).not.toContain(`${INST}/current/bin/collie restart`);
+  });
+
+  test("Windows: takes the `windows-x64` zip, checks its sha256, unpacks it with Windows' own tar.exe", async () => {
+    const payload = `collie-${NEW}-windows-x64`;
+    const zip = `${payload}.zip`;
+    const h = windowsBinaryHarness({
+      env: { SystemRoot: "C:\\Windows" },
+      manifest: manifestDoc({
+        artifacts: [
+          { name: `${PAYLOAD}.tar.gz`, platform: "linux-x64", sha256: "0".repeat(64), size: 4, payloadRoot: PAYLOAD },
+          { name: zip, platform: "windows-x64", sha256: DIGEST, size: 4, payloadRoot: payload },
+        ],
+      }),
+    });
+    const fetched: string[] = [];
+    h.deps.net = {
+      ...h.deps.net,
+      download: (url, dest) => {
+        fetched.push(url);
+        h.files.write(dest, "zip bytes");
+        const at = `${INST}/.staging/x/${payload}`;
+        h.files.write(`${at}/bin/collie.exe`, "NEW BINARY");
+        h.files.write(`${at}/web/dist/index.html`, "NEW");
+        h.files.write(`${at}/herdr-plugin.toml`, `version = "${NEW}"\n`);
+        h.files.write(`${at}/package.json`, `{"version":"${NEW}"}`);
+        return Promise.resolve({ ok: true as const, sha256: DIGEST, size: 4 });
+      },
+    };
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(fetched).toEqual([`https://github.com/AltanS/collie/releases/download/v${NEW}/${zip}`]);
+    expect(h.exec.calls).toContain(`/Windows/System32/tar.exe -xf ${INST}/.staging/${zip} -C ${INST}/.staging/x`);
+    expect(h.exec.calls.some((c) => c.startsWith("tar ") || c.startsWith("chmod "))).toBe(false);
+    expect(h.files.ops).toContain(`mv ${INST}/.staging/x/${payload} ${INST}/versions/${NEW}`);
+  });
+
+  test("Windows: a version the launcher still runs, left in .trash, is a note and not a failed update", async () => {
+    // A pruned version whose collie.exe the launcher still executes: Windows refuses to delete it.
+    const held = `${INST}/.trash/0.9.0.abc`;
+    const h = windowsBinaryHarness({ env: { SystemRoot: "C:\\Windows" } });
+    h.files.write(`${held}/bin/collie.exe`, "OLD");
+    const removeTree = h.files.removeTree;
+    h.files.removeTree = (p) => {
+      if (posixKey(p) === held) throw Object.assign(new Error("EPERM: operation not permitted, unlink"), { code: "EPERM" });
+      removeTree(p);
+    };
+    // The update goes on past the sweep to the release check (this fixture's release has no zip).
+    await cmdUpdate(h.deps);
+    expect(h.io.stderr.join("\n")).toContain("has no Windows build");
+    expect(h.io.stdout.some((l) => l.includes("0.9.0.abc") && l.includes("is still in use") && l.includes("It is harmless, and the next update removes it."))).toBe(true);
+
+    // Off Windows the same failure still stops the update, as it always did.
+    const linux = binaryHarness();
+    linux.files.removeTree = (p) => {
+      if (p.includes(".staging")) throw new Error("EACCES");
+    };
+    await expect(cmdUpdate(linux.deps)).rejects.toThrow("EACCES");
+  });
+
+  test("Windows: a zip whose sha256 differs is thrown away, and nothing is unpacked", async () => {
+    const h = windowsBinaryHarness({
+      digest: "9c1a04".padEnd(64, "0"),
+      manifest: manifestDoc({
+        artifacts: [{ name: "collie-1.1.0-windows-x64.zip", platform: "windows-x64", sha256: DIGEST, size: 4, payloadRoot: "p" }],
+      }),
+    });
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.io.stderr.join("\n")).toContain("checksum mismatch for collie-1.1.0-windows-x64.zip");
+    expect(h.exec.calls.some((c) => c.includes("tar.exe"))).toBe(false);
+    expect(h.link.ops).toEqual([]);
+  });
+
+  test("Windows: a busy unpacked folder is moved after a retry, and one that stays busy changes nothing", async () => {
+    const zipManifest = (payload: string) =>
+      manifestDoc({
+        artifacts: [{ name: `${payload}.zip`, platform: "windows-x64", sha256: DIGEST, size: 4, payloadRoot: PAYLOAD }],
+      });
+    const busy = (times: number) => {
+      const h = windowsBinaryHarness({ manifest: zipManifest(PAYLOAD) });
+      const download = h.deps.net.download;
+      h.deps.net = {
+        ...h.deps.net,
+        download: async (url, dest) => {
+          const got = await download(url, dest);
+          h.files.write(`${INST}/.staging/x/${PAYLOAD}/bin/collie.exe`, "NEW BINARY");
+          return got;
+        },
+      };
+      let left = times;
+      const rename = h.files.rename;
+      h.files.rename = (from, to) => {
+        if (posixKey(to) === `${INST}/versions/${NEW}` && left > 0) {
+          left--;
+          throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+        }
+        rename(from, to);
+      };
+      return h;
+    };
+    const twice = busy(2);
+    expect(await cmdUpdate(twice.deps)).toBe(EXIT.OK);
+    expect(twice.files.ops).toContain(`mv ${INST}/.staging/x/${PAYLOAD} ${INST}/versions/${NEW}`);
+
+    const always = busy(99);
+    expect(await cmdUpdate(always.deps)).toBe(EXIT.FAIL);
+    expect(always.io.stderr.join("\n")).toContain("Nothing was changed. Try again in a minute.");
+    expect(always.files.exists(`${INST}/versions/${NEW}`)).toBe(false);
+    expect(always.files.exists(`${INST}/.staging`)).toBe(false);
+    expect(always.link.ops).toEqual([]);
+  });
+
+  describe("Windows: a folder of the target version is already there and in use (rollback, then update again)", () => {
+    const zipManifest = manifestDoc({
+      artifacts: [{ name: `${PAYLOAD}.zip`, platform: "windows-x64", sha256: DIGEST, size: 4, payloadRoot: PAYLOAD }],
+    });
+    const laid = `${INST}/versions/${NEW}`;
+    const EBUSY = (): Error => Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+    /**
+     * The target's folder laid down by an earlier update. `whole` lays all four files the payload
+     * needs; `binary` is its collie.exe, the same bytes as the download unless a test says otherwise.
+     */
+    const held = (whole: boolean, refuse: "rename" | "delete" | "none" = "rename", binary = "NEW BINARY") => {
+      const h = windowsBinaryHarness({ manifest: zipManifest });
+      const download = h.deps.net.download;
+      h.deps.net = {
+        ...h.deps.net,
+        download: async (url, dest) => {
+          const got = await download(url, dest);
+          h.files.write(`${INST}/.staging/x/${PAYLOAD}/bin/collie.exe`, "NEW BINARY");
+          return got;
+        },
+      };
+      h.files.write(`${laid}/bin/collie.exe`, binary);
+      h.files.write(`${laid}/marker`, "laid before");
+      if (whole) {
+        h.files.write(`${laid}/web/dist/index.html`, "NEW");
+        h.files.write(`${laid}/herdr-plugin.toml`, `version = "${NEW}"\n`);
+        h.files.write(`${laid}/package.json`, `{"version":"${NEW}"}`);
+      }
+      const rename = h.files.rename;
+      h.files.rename = (from, to) => {
+        if (refuse === "rename" && posixKey(from) === laid) throw EBUSY();
+        rename(from, to);
+      };
+      const removeTree = h.files.removeTree;
+      h.files.removeTree = (p) => {
+        if (refuse === "delete" && posixKey(p).startsWith(`${INST}/.trash/${NEW}.`)) throw EBUSY();
+        removeTree(p);
+      };
+      return h;
+    };
+
+    test("a complete folder holding the same collie.exe is used as it is, with a plain note", async () => {
+      const h = held(true);
+      expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+      // POSIX keys: on a real Windows run the native `join` spells the folder with backslashes.
+      expect(posixKey(h.io.stdout.join("\n"))).toContain(
+        `note: ${laid} is still in use and holds this same build, so this update uses it as it is. This does not stop the update.`,
+      );
+      // The new payload never replaced it, and the staging folder is gone.
+      expect(h.files.ops).not.toContain(`mv ${INST}/.staging/x/${PAYLOAD} ${laid}`);
+      expect(h.files.read(`${laid}/marker`)).toBe("laid before");
+      expect(h.files.exists(`${INST}/.staging`)).toBe(false);
+    });
+
+    test("a complete folder whose collie.exe is another build is not used: the update stops and changes nothing", async () => {
+      const h = held(true, "rename", "AN OLDER CUT OF THE SAME VERSION");
+      expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+      const err = posixKey(h.io.stderr.join("\n"));
+      expect(err).toContain(`error: ${laid} is still in use, and its collie.exe is not the one just downloaded, so this update cannot use it or replace it now (`);
+      expect(err).toContain("Nothing was changed. Run `collie stop`, then `collie start`, then run `collie update` again.");
+      expect(h.link.ops).toEqual([]);
+      expect(h.files.read(`${laid}/bin/collie.exe`)).toBe("AN OLDER CUT OF THE SAME VERSION");
+      expect(h.files.exists(`${INST}/.staging`)).toBe(false);
+    });
+
+    test("a partial one fails the update cleanly, before the flip, and says how to free it", async () => {
+      const h = held(false);
+      expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+      const err = posixKey(h.io.stderr.join("\n"));
+      expect(err).toContain(`${laid} is still in use, and it is missing web/dist/index.html, herdr-plugin.toml, package.json`);
+      expect(err).toContain("Run `collie stop`, then `collie start`, then run `collie update` again.");
+      expect(h.link.ops).toEqual([]);
+      expect(h.files.exists(`${INST}/.staging`)).toBe(false);
+    });
+
+    test("a folder that moves but cannot be deleted yet stays in .trash with a plain note", async () => {
+      const h = held(true, "delete");
+      expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+      const note = h.io.stdout.find((l) => posixKey(l).includes(`${INST}/.trash/${NEW}.`)) ?? "";
+      expect(note).toContain("note: the old folder ");
+      expect(note).toContain("so it stays for now. It is harmless, and the next update removes it. This does not stop the update.");
+      expect(h.files.ops).toContain(`mv ${INST}/.staging/x/${PAYLOAD} ${laid}`);
+    });
+
+    test("off Windows a busy partial folder fails cleanly too, and nothing throws", async () => {
+      const h = binaryHarness();
+      h.files.write(`${INST}/versions/${NEW}/bin/collie`, "old");
+      const rename = h.files.rename;
+      h.files.rename = (from, to) => {
+        if (posixKey(from) === `${INST}/versions/${NEW}`) throw EBUSY();
+        rename(from, to);
+      };
+      expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+      expect(h.io.stderr.join("\n")).toContain("so this update cannot use it or replace it now");
+    });
+  });
+
+  test("a version folder a live launcher holds cannot be pruned, and the update still succeeds", async () => {
+    // Windows: the launcher keeps its own version folder open, so the prune's rename fails with
+    // EBUSY. It is a note, never a failure and never a rollback.
+    const h = windowsBinaryHarness({ others: ["0.9.0"] });
+    const rename = h.files.rename;
+    h.files.rename = (from, to) => {
+      if (posixKey(from) === `${INST}/versions/0.9.0`) throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+      rename(from, to);
+    };
+    expect(await runner(h, BINARY_APPLY)).toBe(EXIT.OK);
+    expect(h.io.stdout.join("\n")).toContain("note: could not remove the old version 0.9.0");
+    expect(h.io.stdout.join("\n")).toContain(`✓ updated to ${NEW}`);
+    expect(JSON.parse(h.files.read(`${STATE}/update.json`) ?? "{}").state).toBe("done");
+    expect(currentTarget(h)).toBe(`${INST}/versions/${NEW}`);
+  });
+
+  test("Windows: a payload with no `bin\\collie.exe` is not a payload", async () => {
+    const h = windowsBinaryHarness({
+      manifest: manifestDoc({
+        artifacts: [{ name: `${PAYLOAD}.zip`, platform: "windows-x64", sha256: DIGEST, size: 4, payloadRoot: PAYLOAD }],
+      }),
+    });
+    // The fixture's download lays a POSIX payload down: `bin/collie`, no `.exe`.
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.io.stderr.join("\n")).toContain("missing bin/collie.exe");
+  });
+
+  test("a manifest with a `windows-x64` entry resolves Linux and macOS exactly as before", async () => {
+    const windows = {
+      name: `collie-${NEW}-windows-x64.zip`,
+      platform: "windows-x64",
+      sha256: "f".repeat(64),
+      size: 9,
+      payloadRoot: `collie-${NEW}-windows-x64`,
+      signed: false,
+    };
+    // The released parser keeps an entry it does not know and drops nothing else.
+    const parsed = parseReleaseManifest(manifestDoc({ artifacts: [windows, ...manifestDoc().artifacts] }));
+    expect(parsed.ok && parsed.manifest.artifacts.map((a) => a.platform)).toEqual(["windows-x64", "linux-x64"]);
+    // No platform but win32/x64 can ever name it.
+    for (const os of ["linux", "darwin", "freebsd", "win32"]) {
+      for (const arch of ["x64", "arm64", "ia32", "riscv64"]) {
+        expect(platformId(os, arch) === "windows-x64").toBe(os === "win32" && arch === "x64");
+      }
+    }
+    // The Linux update takes its own tarball, with the Windows entry listed first.
+    const h = binaryHarness({ manifest: manifestDoc({ artifacts: [windows, ...manifestDoc().artifacts] }) });
+    const fetched: string[] = [];
+    const download = h.deps.net.download;
+    h.deps.net = { ...h.deps.net, download: (url, dest) => (fetched.push(url), download(url, dest)) };
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(fetched).toEqual([`https://github.com/AltanS/collie/releases/download/v${NEW}/${PAYLOAD}.tar.gz`]);
+  });
+
+  test("Windows: a release with no `windows-x64` entry says so plainly and changes nothing", async () => {
+    // The fixture's manifest lists linux-x64 only: a release whose Windows build failed.
+    const h = windowsBinaryHarness();
+    const fetched: string[] = [];
+    h.deps.net = { ...h.deps.net, download: (url) => (fetched.push(url), Promise.reject(new Error("no download expected"))) };
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    const err = h.io.stderr.join("\n");
+    expect(err).toContain(`error: release ${NEW} has no Windows build; try again after the next release. Nothing was changed.`);
+    expect(err).not.toContain("From source");
+    expect(fetched).toEqual([]);
+    expect(h.link.ops).toEqual([]);
+    expect(h.files.exists(`${INST}/versions/${NEW}`)).toBe(false);
+    expect(h.files.exists(`${INST}/.staging`)).toBe(false);
+    expect(currentTarget(h)).toBe(BROOT);
+    expect(h.exec.calls.some((c) => c.includes("tar"))).toBe(false);
+    // The phone reads the same sentence from the run record.
+    expect(h.files.read(`${STATE}/update.json`) ?? "").toContain("has no Windows build");
+  });
+
+  test("Linux still unpacks with `tar -xzf`, the exact vector it always ran", async () => {
+    const h = binaryHarness();
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(h.exec.calls).toContain(`tar -xzf ${INST}/.staging/${PAYLOAD}.tar.gz -C ${INST}/.staging/x`);
+  });
+
+  test("Windows: the runner makes `current` a junction beside the old one, removes the old one, then renames", async () => {
+    const h = windowsBinaryHarness();
+    expect(await runner(h, BINARY_APPLY)).toBe(EXIT.OK);
+    // A junction names an absolute folder, and a rename onto a junction fails, so the order is fixed.
+    expect(h.link.ops.slice(0, 3)).toEqual([
+      `rm ${INST}/.current.new`,
+      `junction ${INST}/versions/${NEW} ${INST}/.current.new`,
+      `rm ${INST}/current`,
+    ]);
+    expect(h.files.ops).toContain(`mv ${INST}/.current.new ${INST}/current`);
+    expect(h.link.ops.some((op) => op.startsWith("symlink"))).toBe(false);
+    expect(currentTarget(h)).toBe(`${INST}/versions/${NEW}`);
+  });
+
+  test("Windows: a rename that fails puts the old junction back, so `current` still names the old version", async () => {
+    const h = windowsBinaryHarness({ others: ["0.9.0"] });
+    const rename = h.files.rename;
+    h.files.rename = (from, to) => {
+      if (posixKey(to) === `${INST}/current`) throw new Error("EBUSY: resource busy");
+      rename(from, to);
+    };
+    expect(await cmdUpdate(h.deps, ["--rollback"])).toBe(EXIT.FAIL);
+    expect(currentTarget(h)).toBe(BROOT);
+    expect(h.link.ops).toContain(`junction ${BROOT} ${INST}/current`);
+    expect(h.io.stderr.join("\n")).toContain("EBUSY");
+    expect(h.io.stderr.join("\n")).toContain(`still names ${BROOT}. Nothing was changed.`);
+    expect(h.restarts).toBe(0);
+  });
+
+  test("Windows: when putting the old junction back fails too, the error prints the exact repair command", async () => {
+    const h = windowsBinaryHarness({ others: ["0.9.0"] });
+    const rename = h.files.rename;
+    h.files.rename = (from, to) => {
+      if (posixKey(to) === `${INST}/current`) throw new Error("EBUSY: resource busy");
+      rename(from, to);
+    };
+    const junction = h.link.junction;
+    h.link.junction = (target, at) => {
+      if (posixKey(at) === `${INST}/current`) throw new Error("EPERM: operation not permitted");
+      junction(target, at);
+    };
+    expect(await cmdUpdate(h.deps, ["--rollback"])).toBe(EXIT.FAIL);
+    const err = h.io.stderr.join("\n");
+    expect(err).toContain("is missing now, and putting it back failed too");
+    // The command an operator can paste into cmd or PowerShell, with both paths spelled out.
+    expect(err).toContain(`Make it again by hand: cmd /c mklink /J "\\inst\\current" "${BROOT}"`);
+    expect(h.restarts).toBe(0);
+  });
+
+  test("Windows: a real folder named `current` is refused and never removed", async () => {
+    const h = windowsBinaryHarness({ others: ["0.9.0"] });
+    h.link.entries.set(`${INST}/current`, { kind: "other", what: "a directory" });
+    expect(await runner(h, BINARY_APPLY)).toBe(EXIT.FAIL);
+    expect(h.link.ops).not.toContain(`rm ${INST}/current`);
+    expect(h.io.stderr.join("\n")).toContain("it is a directory, not a junction");
+  });
+
+  test("Windows: a rollback flips the junction back and restarts", async () => {
+    const h = windowsBinaryHarness({ others: ["0.9.0"] });
+    expect(await cmdUpdate(h.deps, ["--rollback"])).toBe(EXIT.OK);
+    expect(h.link.ops).toContain(`junction ${INST}/versions/0.9.0 ${INST}/.current.new`);
+    expect(currentTarget(h)).toBe(`${INST}/versions/0.9.0`);
+    expect(h.restarts).toBe(1);
+  });
+
+  test("a staged payload gets its mode set on the binary this host names", async () => {
+    const h = binaryHarness({ others: ["0.9.0"] });
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(h.exec.calls).toContain(`chmod 0755 ${INST}/.staging/x/${PAYLOAD}/bin/collie`);
   });
 
   test("a checksum mismatch changes nothing — no version directory, no flip", async () => {
@@ -1522,11 +2258,13 @@ describe("the hooks nudge", () => {
   });
 
   test("the checkout path asks the binary `build` just wrote, for the same reason", async () => {
+    // `nudgeHooks` names the binary by the injected platform's spelling, the harness's pinned "linux".
+    const built = posixKey(collieBinary(ROOT, hostFor("linux")));
     const h = harness({
-      answers: [...LINKED, ...SHALLOW, [`${BINARY} hooks status --check`, { code: EXIT.STATE }]],
+      answers: [...LINKED, ...SHALLOW, [`${built} hooks status --check`, { code: EXIT.STATE }]],
     });
     expect(await cmdApplyUpdate(h.deps)).toBe(EXIT.OK);
-    expect(h.exec.calls).toContain(`${BINARY} hooks status --check`);
+    expect(h.exec.calls).toContain(`${built} hooks status --check`);
     expect(h.io.stdout.join("\n")).toContain(NUDGE);
   });
 
@@ -1592,7 +2330,7 @@ function stagedHarness(over: StagedOptions = {}): Harness {
   const versions = over.versions ?? { "v1.0.0": "1.0.0" };
   const root = WT(current);
   const io = capture();
-  const exec = fakeExec({
+  const exec = posixExec({
     answers: [
       ...(over.answers ?? []),
       // A worktree of a tag is detached — which is exactly why the layout, not the HEAD, decides
@@ -1626,7 +2364,7 @@ function stagedHarness(over: StagedOptions = {}): Harness {
       files,
       link,
       net: { ...deadNet, getJson: (url) => (url.includes("/api/health") ? health() : deadNet.getJson(url)) },
-      platform: "linux",
+      host: hostFor("linux"),
       arch: "x64",
       restart: () => {
         h.restarts++;
@@ -1681,11 +2419,16 @@ describe("the staged checkout path", () => {
   test("migrates a legacy in-place checkout with no manual step, and says it has no rollback target", async () => {
     const h = legacyClone();
     // The name on PATH was published at the clone's own binary before the migration (ADR 0021).
-    h.link.entries.set(`${HOME}/.local/bin/collie`, { kind: "symlink", target: BINARY });
-    // The flip is what makes this path resolve; the fake filesystem is flat, so it is seeded.
+    // A link target is compared as a string against the path the code built (from the context's root and
+    // the harness host), so it is spelled that way.
+    h.link.entries.set(`${HOME}/.local/bin/collie`, { kind: "symlink", target: collieBinary(h.deps.ctx.root, h.deps.host) });
+    // The flip is what makes this path resolve; the fake filesystem is flat, so it is seeded. `link`
+    // names the binary by the harness host's spelling (the pinned Linux host: `collie`), so that is the file it looks for.
     h.files.entries.set(`${CURRENT}/bin/collie`, { text: "NEW BINARY" });
+    h.files.entries.set(collieBinary(CURRENT, hostFor("linux")), { text: "NEW BINARY" });
     expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
     const said = h.io.stdout.join("\n");
+    // The layout is spelled by the injected host (the harness pins Linux), not by the machine's `join`.
     expect(said).toContain(`${VERSIONS} and ${CURRENT} are created now`);
     // Nothing to fall back to yet, and the transcript says exactly that rather than implying one.
     expect(said).toContain("nothing to roll back to yet");
@@ -1694,7 +2437,7 @@ describe("the staged checkout path", () => {
     expect(
       await runner(h, { to: "v0.32.0", from: null, version: "0.32.0", commit: "b2peeled", kind: "checkout" }),
     ).toBe(EXIT.OK);
-    expect(h.link.ops).toContain(`symlink ${CURRENT}/bin/collie ${HOME}/.local/bin/collie`);
+    expect(h.link.ops).toContain(`symlink ${posixKey(collieBinary(CURRENT, hostFor("linux")))} ${HOME}/.local/bin/collie`);
     // And Herdr is re-registered at `current`, so a plugin action runs whatever is live.
     expect(h.exec.calls).toContain(`herdr plugin link ${CURRENT}`);
   });
@@ -1967,6 +2710,39 @@ describe("the update state file and its lock", () => {
     expect(h.link.ops).toEqual([]);
   });
 
+  test("a live in-flight record of another process stops a binary update before it stages anything", async () => {
+    const h = binaryHarness();
+    const record = reduce(
+      reduce(idleRun(NOW), { kind: "begin", from: "1.0.0", to: NEW, pid: 999, runId: "r-1" }, NOW),
+      { kind: "stage" },
+      NOW,
+    );
+    h.files.write(RUN_FILE, `${JSON.stringify(record)}\n`);
+    h.deps.exec.processCommand = (pid) => (pid === 999 ? "collie update" : null);
+    const before = h.files.ops.length;
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.io.stderr.join("\n")).toContain("This update does not start a second one. Wait for it to finish.");
+    expect(h.files.ops.slice(before)).toEqual([]);
+    expect(h.link.ops).toEqual([]);
+    expect(h.exec.ran).toEqual([]);
+    expect(JSON.parse(h.files.read(RUN_FILE) ?? "{}").pid).toBe(999);
+  });
+
+  test("a live in-flight record of another process stops a staged checkout update before it stages", async () => {
+    const h = stagedHarness();
+    const record = reduce(
+      reduce(idleRun(NOW), { kind: "begin", from: "1.0.0", to: "1.1.0", pid: 999, runId: "r-1" }, NOW),
+      { kind: "stage" },
+      NOW,
+    );
+    h.files.write(RUN_FILE, `${JSON.stringify(record)}\n`);
+    h.deps.exec.processCommand = (pid) => (pid === 999 ? "collie update" : null);
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.FAIL);
+    expect(h.io.stderr.join("\n")).toContain("This update does not start a second one. Wait for it to finish.");
+    expect(h.exec.ran).toEqual([]);
+    expect(JSON.parse(h.files.read(RUN_FILE) ?? "{}").pid).toBe(999);
+  });
+
   test("a lock older than ten minutes whose updater is gone no longer blocks a retry", () => {
     const now = 2_000_000_000_000;
     const held = { pid: 999, at: now - STALE_AFTER_MS - 1 };
@@ -1974,6 +2750,12 @@ describe("the update state file and its lock", () => {
     expect(lockVerdict(held, now, false, STALE_AFTER_MS).ok).toBe(true);
     // A YOUNG lock with a dead pid still holds: a retry must not race the tail of a finishing run.
     expect(lockVerdict({ pid: 999, at: now - 1_000 }, now, false, STALE_AFTER_MS).ok).toBe(false);
+  });
+
+  test("a live pid holds a lock 59 minutes old, and a lock 61 minutes old is a reused pid", () => {
+    const now = 2_000_000_000_000;
+    expect(lockVerdict({ pid: 999, at: now - 59 * 60_000 }, now, true, STALE_AFTER_MS).ok).toBe(false);
+    expect(lockVerdict({ pid: 999, at: now - 61 * 60_000 }, now, true, STALE_AFTER_MS).ok).toBe(true);
   });
 
   test("the updater dies mid-flight: the stale marker reads as interrupted and the retry proceeds", async () => {
@@ -2013,6 +2795,61 @@ describe("the detached updater's health gate", () => {
     expect(parseUpdateRun(h.files.read(RUN_FILE))?.state).toBe("rolled-back");
   });
 
+  // `collie restart` may exit non-zero over a bridge that is merely slow (the Windows tier does, after
+  // its own wait). The runner must neither trust that code nor skip its gate and its one rollback.
+  test("a restart that exits non-zero still gets the health gate, and the one rollback", async () => {
+    const restartFails: NonNullable<BinaryOptions["answers"]> = [
+      [`${INST}$ ${INST}/current/bin/collie restart`, { code: 1 }],
+    ];
+    const late = binaryHarness({ answers: restartFails });
+    expect(await runner(late, BINARY_APPLY)).toBe(EXIT.OK);
+    // The scripted failure was the call actually made, so the gate below is what decided.
+    expect(late.exec.calls).toContain(`${INST}$ ${INST}/current/bin/collie restart`);
+    expect(parseUpdateRun(late.files.read(RUN_FILE))?.state).toBe("done");
+
+    const dead = binaryHarness({
+      answers: restartFails,
+      env: { COLLIE_UPDATE_HEALTH_TIMEOUT_MS: "1000" },
+      health: [{ down: true }, { down: true }, { version: "1.0.0" }],
+    });
+    expect(await runner(dead, BINARY_APPLY)).toBe(EXIT.FAIL);
+    expect(parseUpdateRun(dead.files.read(RUN_FILE))?.state).toBe("rolled-back");
+    expect(dead.exec.calls.filter((c) => c.endsWith("current/bin/collie restart")).length).toBe(2);
+  });
+
+  // #410: a peer with no standby door serves only mutual TLS. Its gate reads the certificate on the
+  // port and the runtime marker the bridge wrote at boot, against the moment `runApply` restarted it.
+  describe("a crew peer with no standby door", () => {
+    const peerHarness = (bootedAt: number) => {
+      const h = binaryHarness({ env: { COLLIE_UPDATE_HEALTH_TIMEOUT_MS: "1000" } });
+      h.files.write(`${STATE}/crew-trust.json`, serializeTrustStore(peerStore()));
+      h.files.write(crewRuntimePath(STATE), formatMarker(markerFor(peerStore(), bootedAt, FAKE_PID)));
+      const own = new X509Certificate(peerStore().self.certPem).fingerprint256;
+      h.deps = {
+        ...h.deps,
+        net: { ...h.deps.net, tlsCertificate: () => Promise.resolve({ ok: true as const, fingerprint256: own }) },
+        exec: { ...h.exec, processLookup: () => ({ kind: "running" as const, command: "collie" }) },
+      };
+      return h;
+    };
+
+    test("passes on its own certificate and a marker written after the restart", async () => {
+      const h = peerHarness(Number.MAX_SAFE_INTEGER);
+      expect(await runner(h, BINARY_APPLY)).toBe(EXIT.OK);
+      expect(parseUpdateRun(h.files.read(RUN_FILE))?.state).toBe("done");
+    });
+
+    test("a marker older than the restart is the old process: the update does not pass", async () => {
+      const h = peerHarness(0);
+      expect(await runner(h, BINARY_APPLY)).toBe(EXIT.FAIL);
+      const record = parseUpdateRun(h.files.read(RUN_FILE));
+      expect(record?.state).toBe("stuck");
+      expect(record?.reason).toContain("has not booted since the restart");
+      // The forward restart, then the rollback's own.
+      expect(h.exec.calls.filter((c) => c.endsWith("current/bin/collie restart")).length).toBe(2);
+    });
+  });
+
   test("a deposed peer answering health is not a success — it is rolled back like any other failure", async () => {
     const h = binaryHarness({
       env: { COLLIE_UPDATE_HEALTH_TIMEOUT_MS: "1000" },
@@ -2029,7 +2866,8 @@ describe("the detached updater's health gate", () => {
     expect(await runner(h, BINARY_APPLY)).toBe(EXIT.FAIL);
     const run = parseUpdateRun(h.files.read(RUN_FILE));
     expect(run?.state).toBe("stuck");
-    expect(run?.recovery).toBe(`${INST}/versions/1.0.0/bin/collie update --rollback`);
+    // The recovery command is a string the code built with `join`, so it carries the host's separators.
+    expect(run?.recovery).toBe(`${collieBinary(join(INST, "versions", "1.0.0"), hostFor("linux"))} update --rollback`);
     // Two restarts and no more: forward, then the one rollback.
     expect(h.exec.calls.filter((c) => c.endsWith("current/bin/collie restart")).length).toBe(2);
     expect(h.io.stderr.join("\n")).toContain("Nothing will restart again");
@@ -2054,7 +2892,7 @@ describe("the detached updater's launch seam", () => {
   const base = { binary: "/inst/current/bin/collie", args: ["_apply-update", "--to", "1.1.0"], unit: "collie", stamp: "abc" };
 
   test("linux launches the runner with systemd-run --user --collect and a transient unit name", () => {
-    const plan = launchPlan({ ...base, platform: "linux", hasSystemdRun: true, hasSetsid: true });
+    const plan = launchPlan({ ...base, host: hostFor("linux"), hasSystemdRun: true, hasSetsid: true });
     expect(plan.kind).toBe("systemd-run");
     expect(plan.command.slice(0, 5)).toEqual(["systemd-run", "--user", "--collect", "--unit", "collie-update-abc"]);
     expect(plan.command.slice(5)).toEqual([base.binary, ...base.args]);
@@ -2063,7 +2901,7 @@ describe("the detached updater's launch seam", () => {
   });
 
   test("macOS launches a setsid double-forked child instead — there is no systemd-run there", () => {
-    const plan = launchPlan({ ...base, platform: "darwin", hasSystemdRun: false, hasSetsid: true });
+    const plan = launchPlan({ ...base, host: hostFor("darwin"), hasSystemdRun: false, hasSetsid: true });
     expect(plan.kind).toBe("setsid");
     expect(plan.command).toEqual(["setsid", base.binary, ...base.args]);
     // There is no manager to ask, and the child is the runner itself rather than a client of one.
@@ -2071,9 +2909,9 @@ describe("the detached updater's launch seam", () => {
   });
 
   test("linux with no systemd-run falls back to the same setsid child and says so", () => {
-    const plan = launchPlan({ ...base, platform: "linux", hasSystemdRun: false, hasSetsid: true });
+    const plan = launchPlan({ ...base, host: hostFor("linux"), hasSystemdRun: false, hasSetsid: true });
     expect(plan.kind).toBe("setsid");
-    const bare = launchPlan({ ...base, platform: "linux", hasSystemdRun: false, hasSetsid: false });
+    const bare = launchPlan({ ...base, host: hostFor("linux"), hasSystemdRun: false, hasSetsid: false });
     expect(bare.kind).toBe("fork");
     expect(bare.command).toEqual([base.binary, ...base.args]);
     expect(bare.note).toContain("neither systemd-run nor setsid");
@@ -2532,5 +3370,129 @@ describe("staging reports itself while it builds", () => {
     expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
     expect(h.files.ops.join("\n")).not.toContain("update-staging-");
     expect(JSON.parse(h.files.read(`${STATE}/update.json`) ?? "{}").state).toBe("staging");
+  });
+});
+
+describe("#283: another install's collie runs under its own root", () => {
+  // The updater a phone starts is a child of the service, and the service carries
+  // `COLLIE_PLUGIN_ROOT` (the LaunchAgent and the unit both inject it). Every child that is a
+  // DIFFERENT install's `collie` must start without it, or it takes this install's root for its own.
+  const RUN = "r-283";
+  const OWN_ROOT = { COLLIE_PLUGIN_ROOT: null };
+  const overrideOf = (exec: FakeExec, suffix: string) => exec.overrides.find((o) => o.call.endsWith(suffix))?.env;
+
+  test("the smoke of the laid candidate removes the inherited variable", async () => {
+    const h = binaryHarness({ env: { COLLIE_PLUGIN_ROOT: BROOT } });
+    expect(await cmdUpdate(h.deps, ["--run-id", RUN])).toBe(EXIT.OK);
+    expect(overrideOf(h.exec, `/inst/versions/${NEW}/bin/collie version`)).toEqual(OWN_ROOT);
+  });
+
+  test("a candidate that answers with the wrong version ends the run idle, with the reason on it", async () => {
+    const h = binaryHarness({ smoke: { pre: false } });
+    expect(await cmdUpdate(h.deps, ["--run-id", RUN])).toBe(EXIT.FAIL);
+    const run = parseUpdateRun(h.files.read(RUN_FILE));
+    expect(run?.state).toBe("idle");
+    expect(run?.runId).toBe(RUN);
+    expect(run?.reason).toBe("the new version did not start here (`collie version` answered boom, not 1.1.0)");
+    // The phone's progress lines carry the same sentence: the last thing the staging log says.
+    expect(h.files.read(stagingLogPath(STATE, RUN))).toContain("the new version did not start here");
+    expect(h.io.stderr.join("\n")).toContain("answered boom, not 1.1.0");
+  });
+
+  test("a candidate that exits non-zero keeps its exit code and its own last line", async () => {
+    const h = binaryHarness({
+      smokeAnswer: { code: 1, stderr: "dyld[123]: Library not loaded: /usr/lib/libfoo.dylib\n  Reason: tried: nothing\n" },
+    });
+    expect(await cmdUpdate(h.deps, ["--run-id", RUN])).toBe(EXIT.FAIL);
+    const run = parseUpdateRun(h.files.read(RUN_FILE));
+    expect(run?.state).toBe("idle");
+    expect(run?.reason).toBe("the new version did not start here (exit 1): dyld[123]: Library not loaded: /usr/lib/libfoo.dylib");
+    // The whole tail goes to the staging log and the terminal; the record keeps the one line.
+    expect(h.files.read(stagingLogPath(STATE, RUN))).toContain("dyld[123]: Library not loaded");
+    expect(h.io.stderr.join("\n")).toContain("| dyld[123]: Library not loaded");
+  });
+
+  test("the reason is capped, like every other abort the phone prints", () => {
+    const reason = smokeReason({ ok: false, why: "exit 1", headline: "x".repeat(400), tail: [] });
+    expect(reason.length).toBeLessThanOrEqual(161);
+    expect(reason.endsWith("…")).toBe(true);
+  });
+
+  test("the smoke runs the binary under the injected platform's name, `collie.exe` on Windows", () => {
+    const exec = posixExec();
+    expect(smoke({ exec, host: hostFor("win32") }, "/c", NEW).ok).toBe(false);
+    expect(smoke({ exec, host: hostFor("linux") }, "/c", NEW).ok).toBe(false);
+    expect(exec.calls).toEqual(["/c/bin/collie.exe version", "/c/bin/collie version"]);
+  });
+
+  test("a signal and a hang are named as such, not as an exit code", () => {
+    const killed = smoke(
+      { exec: posixExec({ answers: [["/c/bin/collie version", { code: 124, signal: "SIGKILL" }]] }), host: hostFor("linux") },
+      "/c",
+      NEW,
+    );
+    expect(killed.ok || smokeReason(killed)).toBe("the new version did not start here (killed by SIGKILL)");
+    const hung = smoke(
+      { exec: posixExec({ answers: [["/c/bin/collie version", { code: 124 }]] }), host: hostFor("linux") },
+      "/c",
+      NEW,
+    );
+    expect(hung.ok || smokeReason(hung)).toBe("the new version did not start here (no answer in 20s)");
+  });
+
+  test("the rollback's smoke removes it too", async () => {
+    const h = binaryHarness({ others: ["0.9.0"], currentSays: "0.9.0", env: { COLLIE_PLUGIN_ROOT: BROOT } });
+    expect(await cmdUpdate(h.deps, ["--rollback"])).toBe(EXIT.OK);
+    expect(overrideOf(h.exec, `${INST}/current/bin/collie version`)).toEqual(OWN_ROOT);
+  });
+
+  test("the runner's restart and hooks check through `current` remove it", async () => {
+    const h = binaryHarness({ env: { COLLIE_PLUGIN_ROOT: BROOT } });
+    expect(await runner(h, BINARY_APPLY)).toBe(EXIT.OK);
+    expect(overrideOf(h.exec, `${INST}/current/bin/collie hooks status --check`)).toEqual(OWN_ROOT);
+    const staged = legacyClone();
+    staged.files.write(`${WT("v0.32.0")}/.collie-build`, JSON.stringify({ version: "0.32.0", commit: "b2peeled" }));
+    staged.files.entries.set(`${CURRENT}/bin/collie`, { text: "NEW BINARY" });
+    expect(
+      await runner(staged, { to: "v0.32.0", from: null, version: "0.32.0", commit: "b2peeled", kind: "checkout" }),
+    ).toBe(EXIT.OK);
+    expect(overrideOf(staged.exec, `${CURRENT}/bin/collie restart`)).toEqual(OWN_ROOT);
+  });
+
+  test("the staged build of the new source removes it, or it would build the running tree", async () => {
+    const h = legacyClone();
+    expect(await cmdUpdate(h.deps)).toBe(EXIT.OK);
+    expect(overrideOf(h.exec, `${WT("v0.32.0")}/cli/main.ts build`)).toEqual(OWN_ROOT);
+  });
+});
+
+describe("a source checkout on Windows (M43 spec 08)", () => {
+  test("`collie update` refuses at once, with one sentence, and changes nothing on disk", async () => {
+    for (const args of [[], ["--rollback"], ["--to-tag", "v0.32.0"], ["--major"]]) {
+      const h = legacyClone();
+      h.deps.host = hostFor("win32");
+      expect(await cmdUpdate(h.deps, args)).toBe(EXIT.FAIL);
+      expect(h.io.stderr).toEqual([`error: ${WINDOWS_CHECKOUT_SENTENCE}`]);
+      expect(h.io.stdout).toEqual([]);
+      expect(h.files.ops).toEqual([]);
+      expect(h.link.ops).toEqual([]);
+      expect(h.exec.ran).toEqual([]);
+      expect(h.exec.spawned).toEqual([]);
+      expect(h.exec.calls.some((c) => /fetch|worktree|ls-remote| build|install/.test(c))).toBe(false);
+      expect(h.files.exists(`${STATE}/update.json`)).toBe(false);
+      expect(h.restarts).toBe(0);
+    }
+  });
+
+  test("the sentence is the one the operator reads, word for word", () => {
+    expect(WINDOWS_CHECKOUT_SENTENCE).toBe(
+      "On Windows, collie updates a release install. A source checkout is not supported for updates; install the release zip with install.ps1.",
+    );
+  });
+
+  test("off Windows the same checkout is not refused", async () => {
+    const h = legacyClone();
+    await cmdUpdate(h.deps, []);
+    expect(h.io.stderr.join("\n")).not.toContain("On Windows");
   });
 });

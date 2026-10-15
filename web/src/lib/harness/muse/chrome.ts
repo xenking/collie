@@ -32,8 +32,10 @@ import {
   isContinuationRow,
   isNoteRow,
   locateTail,
+  parsePaletteRow,
   promptRowText,
   rstrip,
+  tasksPopupNamesStopKey,
 } from "./markers";
 
 // How far above the composer to scan for an open note row. The dialog sits directly above the box
@@ -135,6 +137,22 @@ export function extractInputDraft(lines: StyledLine[]): string | null {
 
   const prompt = promptRowText(texts[tail.prompt]!);
   if (prompt === null) return null;
+  // Slash-command palette (#276): typing `/usage` opens a suggestion row INSIDE the draft run, and
+  // folding it in (`/usage /usage Show session usage`) can never verify. When the prompt itself
+  // starts with `/` and the run below it is exactly one suggestion row naming that same command,
+  // the draft is the prompt text alone — Enter submits the exact match (probed). Anything else
+  // keeps the legacy read and stalls safe: Enter on partial input accepts the highlighted
+  // suggestion (probed: `/us` ran `/usage`), so verifying the typed text there would bless a
+  // command the operator did not type.
+  const trimmed = prompt.trim();
+  if (trimmed.startsWith("/")) {
+    const run: string[] = [];
+    for (let i = tail.prompt + 1; i < tail.rule; i++) run.push(texts[i]!);
+    if (run.length === 1) {
+      const suggestion = parsePaletteRow(run[0]!);
+      if (suggestion !== null && suggestion.command === trimmed) return trimmed;
+    }
+  }
   const parts = [prompt.trim()];
   for (let i = tail.prompt + 1; i < tail.rule; i++) {
     const row = texts[i]!;
@@ -163,7 +181,8 @@ export function hasComposer(lines: StyledLine[]): boolean {
  * dialogs leave the box strictly bare, so a detector match above a bare box refuses; the same
  * shapes above a placeholder or draft box are quoted transcript and stay sendable (#260).
  * Approval replaces the box and trust is pre-session, so both fail on the geometry alone — and
- * are still consulted, so a future chrome change cannot silently re-open them.
+ * are still consulted, so a future chrome change cannot silently re-open them. A tasks popup that
+ * holds focus and names `x to stop` refuses too ({@link tasksPopupHoldsStopKey}).
  *
  * Known limitation, documented rather than guessed at: the command palette, `/resume` picker,
  * `/tasks` drawer and `/workflows` room are unmeasured (outside DIALOG_NOTES.md's scope). If one of them leaves a live
@@ -176,12 +195,56 @@ export function composerReady(lines: StyledLine[]): boolean {
   if (detectTrustRegion(lines) !== null) return false;
   if (hasOpenNote(lines)) return false;
   if (boxIsBare(lines) && liveDialogOwnsKeyboard(lines)) return false;
+  if (tasksPopupHoldsStopKey(lines)) return false;
   return hasComposer(lines);
+}
+
+/**
+ * True when the tasks popup under the box holds focus on a running task: its header then reads
+ * `main · Enter to view · x to stop` (DIALOG_NOTES.md §5). The box takes typed text in that state,
+ * but the header says `x` stops the task, so a message that starts with `x` could stop it instead.
+ * The composer refuses, and the unread-dialog card's Escape (probed: it dismisses the popup) is the
+ * way back. Unfocused, the header names no key the popup answers, and the box is ready as before.
+ */
+function tasksPopupHoldsStopKey(lines: StyledLine[]): boolean {
+  const tail = locateTail(lines);
+  if (tail === null || tail.popup === null) return false;
+  return tasksPopupNamesStopKey(lineText(lines[tail.popup]!));
 }
 
 // Mirror of the bridge's tail window (bridge/prompt-binding.ts DEFAULT_PROMPT_TAIL_LINES): the
 // binding only verifies when its match ends within this many non-blank rows of the fresh read.
 const BRIDGE_PROMPT_TAIL_LINES = 6;
+
+/** Text as the bridge compares it (`normalizePromptRegion`): trailing pad off, blank rows dropped. */
+function bridgeRows(text: string): string[] {
+  return text
+    .split("\n")
+    .map(rstrip)
+    .filter((row) => row.length > 0);
+}
+
+/**
+ * Whether the bridge can bind a write to `region` on this screen. `verifyExpectedPrompt`
+ * (bridge/prompt-binding.ts) drops trailing pad and blank rows, takes the LAST match, and accepts
+ * it only when that match ends within the last {@link BRIDGE_PROMPT_TAIL_LINES} rows.
+ *
+ * A lifted dialog's first write binds its region, so a region that ends higher refuses every tap
+ * on a screen that never moved. The tasks popup (DIALOG_NOTES.md §5) is what pushes one there: it
+ * adds a header and one row per task under the bottom rule, so an approval over three tasks, or a
+ * question over any, ends outside the window. buildBlocks declines such a lift.
+ */
+export function regionReachesTail(lines: StyledLine[], region: string): boolean {
+  const fresh = bridgeRows(lines.map((l) => lineText(l)).join("\n"));
+  const expected = bridgeRows(region);
+  if (expected.length === 0) return false;
+  for (let start = fresh.length - expected.length; start >= 0; start--) {
+    if (expected.every((row, k) => fresh[start + k] === row)) {
+      return start + expected.length - 1 >= fresh.length - BRIDGE_PROMPT_TAIL_LINES;
+    }
+  }
+  return false;
+}
 
 /**
  * The composer's prompt row, verbatim (trailing pad dropped), bound as `expected_prompt` for the

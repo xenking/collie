@@ -21,13 +21,38 @@
 //
 // Where Herdr's id comes from: the grok integration reports `session_id` (kind `id`) matching the
 // session directory name — a UUID, v7 observed. It needs `herdr integration install grok`.
+//
+// That id can go stale (live-verified 2026-10-08, grok 1.0.46, Herdr 0.9.0): `/resume` inside a
+// running grok fires SessionStart with the resumed id and source `load`, and Herdr keeps the pane's
+// first id because it accepts a replacement from grok only for source `new` (still so on Herdr's
+// main that day). `reconcile` corrects it from `$GROK_HOME/active_sessions.json`, the list grok
+// itself keeps of the session each live process holds. A resumed session that had no prompt is
+// dropped from that list, but one that had a prompt stays beside the resumed one under the same pid
+// (live-verified 2026-10-11, grok 1.0.50), so a listed id can still be stale. That file is grok's
+// own and undocumented, so anything short of one unambiguous live match leaves Herdr's id alone.
+// The reconcile step is a workaround for herdrdev/herdr#2683 and is to be removed once the Herdr
+// version Collie requires takes a grok session start with source `load`.
 
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import type { JsonObject, JsonValue } from "../json.ts";
-import { containedRealpath, exists, loadTail, rootList, statFile } from "./files.ts";
+import {
+  parseWith,
+  createUnknownCounter,
+  type KnownTypes,
+  NO_CHANGE,
+  noQueue,
+  noteBlockTypes,
+  type PendingTool,
+  reduction,
+  type Reduction,
+  rememberPending,
+  type RowReducer,
+} from "./reduce.ts";
+import { containedRealpath, exists, loadTail, readSinceFile, rootList, statFile } from "./files.ts";
 import { clamp, MAX_RESULT_CHARS, MAX_TEXT_CHARS, stripAnsi, summarizeToolInput } from "./text.ts";
+import { classifyToolCall } from "./tool-call.ts";
 import type {
   AgentSessionRef,
   JournalAdapter,
@@ -40,6 +65,101 @@ const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 
 export function isGrokSessionId(value: string): boolean {
   return SESSION_ID_RE.test(value);
+}
+
+/** One row of grok's `active_sessions.json`: the session a live grok process currently holds. */
+export interface GrokActiveSession {
+  sessionId: string;
+  pid: number;
+  cwd: string;
+  /** When the process opened it, in ms, or null when the row says nothing parseable. */
+  openedAt: number | null;
+}
+
+/**
+ * The rows of `active_sessions.json`, or null when the file or any row does not read cleanly. A
+ * skipped row could be the one holding the reported id, so a partial list is no list at all.
+ */
+export function parseActiveSessions(text: string): GrokActiveSession[] | null {
+  let parsed: JsonValue;
+  try {
+    // SAFETY: `JSON.parse` output IS a JsonValue by construction — a string, number, boolean, null,
+    // or an array/object of those. The array check and every field read below narrow it further.
+    parsed = JSON.parse(text) as JsonValue;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const rows: GrokActiveSession[] = [];
+  for (const row of parsed) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) return null;
+    const { session_id: sessionId, pid, cwd } = row;
+    if (typeof sessionId !== "string" || !isGrokSessionId(sessionId)) return null;
+    if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return null;
+    if (typeof cwd !== "string" || cwd === "") return null;
+    const opened = typeof row.opened_at === "string" ? Date.parse(row.opened_at) : Number.NaN;
+    rows.push({ sessionId, pid, cwd, openedAt: Number.isNaN(opened) ? null : opened });
+  }
+  return rows;
+}
+
+/** The row opened last among these, leaving out rows without a parseable `opened_at`. */
+function latestOpened(rows: readonly GrokActiveSession[]): GrokActiveSession | undefined {
+  let latest: GrokActiveSession | undefined;
+  for (const s of rows) {
+    if (s.openedAt !== null && s.openedAt > (latest?.openedAt ?? Number.NEGATIVE_INFINITY)) latest = s;
+  }
+  return latest;
+}
+
+/**
+ * The session a grok pane really holds. `live` is the rows whose process is still running. While
+ * grok still lists Herdr's id, the latest session that same process opened stands, which is that id
+ * unless the process resumed another since. Otherwise, when every live session in the pane's cwd
+ * belongs to one process, the latest of them replaces it. Sessions of two processes in the same cwd
+ * could be either pane's, so the reported id stands then too.
+ */
+export function pickLiveSession(
+  reported: string,
+  cwd: string,
+  live: readonly GrokActiveSession[],
+): string {
+  const mine = live.find((s) => s.sessionId === reported);
+  if (mine !== undefined) {
+    if (mine.openedAt === null) return reported;
+    const latest = latestOpened(live.filter((s) => s.pid === mine.pid));
+    return latest !== undefined && (latest.openedAt ?? 0) > mine.openedAt ? latest.sessionId : reported;
+  }
+  const here = live.filter((s) => s.cwd === cwd);
+  if (here.length === 1 && here[0] !== undefined) return here[0].sessionId;
+  if (here.length === 0 || new Set(here.map((s) => s.pid)).size !== 1) return reported;
+  return latestOpened(here)?.sessionId ?? reported;
+}
+
+/**
+ * Whether a path is known to be missing. Only ENOENT and ENOTDIR say so; any other stat failure (a
+ * folder without search permission, say) leaves it unknown, which is not the same as absent.
+ */
+/** A live-session list is a few rows. One over this size is not grok's list, so it is not read. */
+const MAX_ACTIVE_SESSIONS_BYTES = 1024 * 1024;
+
+async function knownAbsent(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return false;
+  } catch (err) {
+    return err instanceof Error && "code" in err && (err.code === "ENOENT" || err.code === "ENOTDIR");
+  }
+}
+
+/** Whether a pid names a running process. EPERM means it runs as someone else, which is still alive. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err instanceof Error && "code" in err && err.code === "EPERM";
+  }
 }
 
 /** Inner text of the first `<user_query>…</user_query>`, trimmed; null when the tag isn't present. */
@@ -93,10 +213,49 @@ type GrokRow = JsonObject;
  * Unparseable lines are skipped (live append, tail-read window).
  */
 export function parseGrokTranscript(text: string): TranscriptEntry[] {
-  const entries: TranscriptEntry[] = [];
-  const pendingTools = new Map<string, Extract<TranscriptPart, { kind: "tool" }>>();
+  return parseWith(createGrokReducer(), text);
+}
+
+/**
+ * Every type this adapter has MET, rendered or dropped (`reduce.ts` § "what a reducer reports about
+ * what it could not read"). Anything else is counted and named.
+ *
+ * The rows are this file's own header inventory, verified on disk on 2026-08-21; there are no local
+ * Grok logs on the canary host, so unlike the other six this list has NOT been re-swept since.
+ *
+ * `parts` covers the two block lists: a row's `content` (`text`) and a `reasoning` row's `summary`
+ * (`summary_text`). Both are read by FIELD — `contentText` takes any block's `.text` — so a block
+ * type Grok adds would be dropped in silence, which is what this counts. There is no role list:
+ * Grok's row `type` IS its role.
+ */
+const GROK_KNOWN: KnownTypes = {
+  rows: ["system", "user", "reasoning", "assistant", "backend_tool_call", "tool_result"],
+  roles: [],
+  parts: ["text", "summary_text"],
+};
+
+/**
+ * The same reading, one row at a time (see `reduce.ts`).
+ *
+ * The loop this replaces was already a reducer wearing a `for`: it carried `pendingTools`, `seen`
+ * and `heldThinking` across rows, and a `tool_result` row MUTATED a part inside a turn the loop had
+ * already pushed. So the state below is the state the loop always kept, and the only genuinely new
+ * thing is that the mutation gets REPORTED — under a tail that turn is on somebody's screen.
+ */
+export function createGrokReducer(): RowReducer {
+  // `tool_calls[].id` → the part awaiting its result and the turn it went out in, so a `tool_result`
+  // row lands on the call that made it and can name where that call is drawn.
+  const pendingTools = new Map<string, PendingTool>();
+  // Row hash → how many times that exact row has been seen, which is what gives two IDENTICAL rows
+  // two different uuids (`grokCursor`). DELIBERATELY UNBOUNDED, and not the same kind of growth as
+  // `pendingTools`: evicting an entry resets a count to 0, so a later identical row would reuse an
+  // earlier row's uuid, and a duplicate identity is worse than the memory. Its size is bounded by
+  // the window a reader feeds the reducer — one clamped tail read — not by the session.
   const seen = new Map<string, number>();
+  // A `reasoning` row's summary, held for the assistant turn that follows it.
   let heldThinking: string | null = null;
+  // What this reducer met and had no branch for, asked for once per session by the canary.
+  const unknown = createUnknownCounter(GROK_KNOWN);
 
   const flushThinking = (parts: TranscriptPart[]) => {
     if (heldThinking !== null && heldThinking.trim() !== "") {
@@ -105,21 +264,30 @@ export function parseGrokTranscript(text: string): TranscriptEntry[] {
     heldThinking = null;
   };
 
-  for (const line of text.split("\n")) {
-    if (line.trim() === "") continue;
+  // A nested `function` rather than a method on the returned object: the body below is the old loop
+  // body at the indentation it always had, so this refactor is readable as the move it is.
+  function push(line: string): Reduction {
+    const entries: TranscriptEntry[] = [];
+    const changed = new Set<string>();
+    if (line.trim() === "") return NO_CHANGE;
     let parsed: JsonValue;
     try {
       // SAFETY: `JSON.parse` output IS a JsonValue by construction — naming it keeps every field
       // read below a checked property access.
       parsed = JSON.parse(line) as JsonValue;
     } catch {
-      continue;
+      return NO_CHANGE;
     }
     // A line that parses to a scalar (or a bare `null`, which would THROW on `.type`) has no row
     // shape — skip it exactly as an unparseable line is skipped.
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return NO_CHANGE;
     const row: GrokRow = parsed;
     const type = row.type;
+    // At the READ, not in the branch that declined (`reduce.ts` § `createUnknownCounter`). Both
+    // block lists are counted here too, for every row, so no branch can forget one.
+    unknown.row(type);
+    noteBlockTypes(unknown, row.content);
+    noteBlockTypes(unknown, row.summary);
     const uuid =
       typeof row.id === "string" && row.id !== "" ? row.id : grokCursor(line, seen);
 
@@ -137,22 +305,24 @@ export function parseGrokTranscript(text: string): TranscriptEntry[] {
           .join("\n");
       }
       if (textOut.trim() !== "") heldThinking = stripAnsi(textOut);
-      continue;
+      // The assignment above is CARRIED state, not a turn: nothing has been emitted yet, so there is
+      // nothing a caller holds and nothing to name. `NO_CHANGE` is the whole truth of this row.
+      return NO_CHANGE;
     }
 
     if (type === "user") {
-      if (typeof row.synthetic_reason === "string") continue;
+      if (typeof row.synthetic_reason === "string") return NO_CHANGE;
       const raw = stripAnsi(contentText(row.content));
       const query = extractUserQuery(raw);
       const spoken = query ?? (typeof row.prompt_index === "number" ? raw.trim() : null);
-      if (spoken === null || spoken === "") continue;
+      if (spoken === null || spoken === "") return NO_CHANGE;
       entries.push({
         uuid,
         ts: "",
         role: "user",
         parts: [{ kind: "text", ...clamp(spoken, MAX_TEXT_CHARS) }],
       });
-      continue;
+      return reduction(entries, changed);
     }
 
     if (type === "assistant") {
@@ -162,30 +332,49 @@ export function parseGrokTranscript(text: string): TranscriptEntry[] {
       if (body.trim() !== "") parts.push({ kind: "text", ...clamp(body, MAX_TEXT_CHARS) });
       if (Array.isArray(row.tool_calls)) {
         for (const call of row.tool_calls) {
+          // A `continue` over the BLOCK, not the row: the other calls of this turn still count.
           if (call === null || typeof call !== "object" || Array.isArray(call)) continue;
           const c: JsonObject = call;
+          const name = typeof c.name === "string" ? c.name : "tool";
+          const input = parseArgs(c.arguments);
+          const summary = summarizeToolInput(input);
           const part: Extract<TranscriptPart, { kind: "tool" }> = {
             kind: "tool",
-            name: typeof c.name === "string" ? c.name : "tool",
-            summary: summarizeToolInput(parseArgs(c.arguments)),
+            name,
+            summary,
+            // Classified from the input alone, which is ALL grok's log allows — see the note at
+            // `tool_result` below for what it does not carry.
+            call: classifyToolCall(name, input, summary),
           };
-          if (typeof c.id === "string") pendingTools.set(c.id, part);
+          if (typeof c.id === "string") {
+            part.id = c.id;
+            // The turn is named here, before it exists, because `uuid` is read off the row above and
+            // the part is already the object the turn will carry. `rememberPending` is what keeps an
+            // orphan call from growing this map for the life of a session.
+            rememberPending(pendingTools, c.id, { part, uuid });
+          }
           parts.push(part);
         }
       }
-      if (parts.length === 0) continue;
+      // A row with nothing to SHOW, which is not the same as a row that did nothing — so the answer
+      // is built rather than assumed. `reduction` here cannot lose a report: an assistant row folds
+      // no result, so `changed` is still empty. In grok the fold sits in the `tool_result` branch,
+      // which builds no `parts` and leaves through the bottom of `push` instead of this guard.
+      if (parts.length === 0) return reduction(entries, changed);
       entries.push({ uuid, ts: "", role: "assistant", parts });
-      continue;
+      return reduction(entries, changed);
     }
 
     if (type === "backend_tool_call") {
       const kind = row.kind;
       let name = "tool";
       let summary = "";
+      let action: JsonValue | undefined;
       if (kind !== null && kind !== undefined && typeof kind === "object" && !Array.isArray(kind)) {
         const k: JsonObject = kind;
         if (typeof k.tool_type === "string") name = k.tool_type;
         if (k.action !== null && typeof k.action === "object") {
+          action = k.action;
           summary = summarizeToolInput(k.action);
         }
       }
@@ -193,18 +382,31 @@ export function parseGrokTranscript(text: string): TranscriptEntry[] {
         uuid,
         ts: "",
         role: "assistant",
-        parts: [{ kind: "tool", name, summary }],
+        // The action object IS the input here — a server-side tool's arguments arrive already
+        // parsed, so the same classifier reads it. A backend row carries no call id, so there is
+        // nothing to put in `id` and no result row ever addresses it.
+        parts: [{ kind: "tool", name, summary, call: classifyToolCall(name, action, summary) }],
       });
-      continue;
+      return reduction(entries, changed);
     }
 
     if (type === "tool_result") {
+      // NO `enrichCall` HERE, and that is the honest answer rather than a gap. A grok result row is
+      // `{type,tool_call_id,content}` and nothing else (the header's row inventory, verified on
+      // disk): no exit code, no patch or diff, no hit count, and no error or refusal flag — which is
+      // also why `result` below carries neither `isError` nor `denied`. So the call stays exactly as
+      // the input classified it, which still names the kind, the path and the command. Fold
+      // something in the day grok's log records what a call DID.
       const id = typeof row.tool_call_id === "string" ? row.tool_call_id : "";
       const resultText = stripAnsi(contentText(row.content));
       const target = pendingTools.get(id);
       if (target) {
         pendingTools.delete(id);
-        target.result = { ...clamp(resultText, MAX_RESULT_CHARS) };
+        target.part.result = { ...clamp(resultText, MAX_RESULT_CHARS) };
+        // The mutation above landed in a turn that went out rows ago. Name it. The uuid is the one
+        // the assistant row was emitted with — grok's assistant rows carry no `id`, so in practice
+        // it is that row's `grokCursor` hash, which is never empty.
+        changed.add(target.uuid);
       } else if (resultText.trim() !== "") {
         entries.push({
           uuid,
@@ -221,9 +423,14 @@ export function parseGrokTranscript(text: string): TranscriptEntry[] {
         });
       }
     }
+
+    // The `tool_result` branch and an unknown row type both leave here: one may have folded a result
+    // into an earlier turn, the other did nothing at all, and `reduction` tells those two apart.
+    return reduction(entries, changed);
   }
 
-  return entries;
+  // No queue in this format's log: see `RowReducer.queued`.
+  return { push, unknowns: unknown.tally, queued: noQueue };
 }
 
 /**
@@ -240,8 +447,47 @@ export class GrokTranscriptSource implements TranscriptSource {
   private readonly pathCache = new Map<string, { path: string; root: string }>();
   private readonly roots: string[];
 
-  constructor(roots: string | readonly string[]) {
+  constructor(
+    roots: string | readonly string[],
+    private readonly isAlive: (pid: number) => boolean = processAlive,
+  ) {
     this.roots = rootList(roots);
+  }
+
+  /**
+   * Herdr's id, or the live session grok says this pane's process moved to (header: the id can go
+   * stale). The answer is only ever a key for `resolve`, which still finds and contains the file.
+   */
+  async reconcile(ref: AgentSessionRef, cwd: string): Promise<AgentSessionRef> {
+    if (ref.kind !== "id") return ref;
+    const sessions = await this.activeSessions();
+    if (sessions === null) return ref;
+    const live = sessions.filter((s) => this.isAlive(s.pid));
+    const value = pickLiveSession(ref.value, cwd, live);
+    return value === ref.value ? ref : { kind: "id", value };
+  }
+
+  /**
+   * Every root's `active_sessions.json`, which sits in `$GROK_HOME`, one level above `sessions`, or
+   * null when any of them may exist and cannot be read whole. A root known to have no file holds no
+   * live grok.
+   */
+  private async activeSessions(): Promise<GrokActiveSession[] | null> {
+    const rows: GrokActiveSession[] = [];
+    for (const root of this.roots) {
+      const home = dirname(root);
+      const path = join(home, "active_sessions.json");
+      if (await knownAbsent(path)) continue;
+      const real = await containedRealpath(path, home);
+      if (real === null) return null;
+      const size = await stat(real).then((st) => st.size, () => null);
+      if (size === null || size > MAX_ACTIVE_SESSIONS_BYTES) return null;
+      const text = await readFile(real, "utf8").catch(() => null);
+      const parsed = text === null ? null : parseActiveSessions(text);
+      if (parsed === null) return null;
+      rows.push(...parsed);
+    }
+    return rows;
   }
 
   async resolve(ref: AgentSessionRef): Promise<string | null> {
@@ -283,12 +529,18 @@ export class GrokTranscriptSource implements TranscriptSource {
 
   stat = statFile;
   load = loadTail;
+
+  /** The live read, byte-counted like every harness that writes a JSONL file. */
+  readSince = readSinceFile;
 }
 
 export function grokJournal(roots: string | readonly string[]): JournalAdapter {
+  const source = new GrokTranscriptSource(roots);
   return {
     agent: "grok",
-    source: new GrokTranscriptSource(roots),
+    source,
     parse: parseGrokTranscript,
+    reducer: createGrokReducer,
+    reconcile: (ref, cwd) => source.reconcile(ref, cwd),
   };
 }

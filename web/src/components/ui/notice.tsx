@@ -36,16 +36,25 @@ export type NoticeVariant = "strip" | "box";
 export type NoticeAnnounce = "alert" | "status" | "none";
 
 /**
- * Whole-surface tap is EXCLUSIVE with an action cluster, at the type level.
+ * A custom `action` node is EXCLUSIVE with whole-surface tap, at the type level.
  *
- * Not a style preference: a `<button>` wrapping a second `<button>` is invalid HTML, and the
- * browsers that tolerate it disagree about which one a tap fires. Expressing the exclusion in the
- * union means a caller cannot write the broken combination and discover it in the field — the
- * third member exists only so that a dismiss control cannot be added without an accessible name,
- * which `ui/` cannot supply itself because i18n lives on the feature side.
+ * Not a style preference: a `<button>` wrapping a second, arbitrary `<button>` is invalid HTML,
+ * and the browsers that tolerate it disagree about which one a tap fires. Expressing the
+ * exclusion in the union means a caller cannot write the broken combination and discover it in
+ * the field.
+ *
+ * `onActivate` MAY combine with `onDismiss`, and that pair is not the same hazard: the root stays
+ * a plain element and the whole-surface tap is a separate, absolutely-positioned `<button>`
+ * layered UNDER the dismiss control (see the render below) rather than an ancestor of it — so
+ * there is no nested `<button>` for a browser to disagree about, and a tap that lands on the ✕
+ * never reaches the layer underneath because the ✕ is what the browser hit-tests first. The third
+ * member below carries no `dismissLabel`/`onDismiss` requirement pairing beyond the ordinary one:
+ * a dismiss control cannot be added without an accessible name, which `ui/` cannot supply itself
+ * because i18n lives on the feature side.
  */
 type NoticeInteraction =
   | { onActivate: () => void; action?: never; onDismiss?: never; dismissLabel?: never }
+  | { onActivate: () => void; action?: never; onDismiss: () => void; dismissLabel: string }
   | { onActivate?: never; action?: ReactNode; onDismiss?: never; dismissLabel?: never }
   | { onActivate?: never; action?: ReactNode; onDismiss: () => void; dismissLabel: string };
 
@@ -70,6 +79,13 @@ export type NoticeProps = {
   icon?: ReactNode;
   children: ReactNode;
   className?: string;
+  /**
+   * A strip only: let the copy wrap instead of truncating. The one exception to "strips never wrap"
+   * (see STRIP), for a sentence the reader must see whole to act on, like the dated saved-copy line
+   * at 390px beside Retry. The strip then grows past its floor, which `min-h` allows on purpose.
+   * Ignored by a box, which always wraps.
+   */
+  wrap?: boolean;
 } & NoticeInteraction;
 
 /**
@@ -161,9 +177,9 @@ export const NOTICE_ACTION = `h-6 gap-1 px-2 text-xs ${NOTICE_ACTION_TAP}`;
  * by definition and `ui/strip-host.tsx` owns the row it sits in, so there is no gutter for the 100%
  * to be offset by. Both halves of that are what the box cannot say for itself.
  *
- * No safe-area inset here. The band's top inset belongs to `ui/strip-host.tsx`, which owns the row;
- * three of the current strips carry it and one does not, which is exactly the drift a shared owner
- * ends. The FLOOR, by contrast, does belong here and not on the host: it is derived from the action
+ * No safe-area inset here. The band sits under the header, and the header owns the notch
+ * (`app-header.tsx`); three of the old strips carried it and one did not, which is exactly the drift
+ * a single owner ends. The FLOOR, by contrast, does belong here and not on the host: it is derived from the action
  * slot's button, which is this component's contract, and it is tone-tinted through the `border-b`,
  * which the host is deliberately blind to.
  */
@@ -213,21 +229,19 @@ export function Notice({
   action,
   onDismiss,
   dismissLabel,
+  wrap = false,
 }: NoticeProps) {
   const { surface, accent } = TONE[tone];
   const strip = variant === "strip";
 
   // The live-region role rides the BODY, never the root, and it is one attribute or none — never a
-  // role plus an aria-live (see NoticeProps.announce). Putting it on the body rather than the root
-  // is what lets `onActivate` render the root as a real `<button>` without a role="status" on it
-  // stripping its button semantics from the accessibility tree. A live region announces its
-  // subtree's changes wherever it is nested, so nothing is lost by moving it one element in — and
+  // role plus an aria-live (see NoticeProps.announce). A live region announces its subtree's changes
+  // wherever it is nested, so nothing is lost by putting it on the body rather than higher up — and
   // the announced text is then exactly the text that changed.
   //
-  // That placement has a cost when `onActivate` is set: accessible-name-from-content skips a child
-  // whose own role isn't a name-from-content role, and `status`/`alert` aren't, so a button whose
-  // only content is this body would be nameless. `bodyId` + `aria-labelledby` on the button (below)
-  // names it from the same text explicitly, without moving the live region off the body.
+  // `onActivate`'s overlay button (below) renders no children of its own — it sits beside the body,
+  // not around it, so a `<button>` next to a `<button>` never has to disagree with a browser about
+  // nesting. `bodyId` + `aria-labelledby` names the empty button from the body's text explicitly.
   const role = announce === "none" ? undefined : announce;
   const bodyId = useId();
 
@@ -237,7 +251,8 @@ export function Notice({
     <span
       role={role}
       id={onActivate ? bodyId : undefined}
-      className="min-w-0 flex-1 truncate font-medium"
+      // `wrap`: the opt-in exception, a sentence that must read whole (see NoticeProps.wrap).
+      className={cn("min-w-0 flex-1 font-medium", wrap ? "break-words text-pretty" : "truncate")}
     >
       {children}
     </span>
@@ -272,7 +287,11 @@ export function Notice({
       ) : null}
       {body}
       {action || onDismiss ? (
-        <div className="flex shrink-0 items-center gap-1">
+        // `relative`, so this cluster stacks ABOVE the whole-surface overlay below when `onActivate`
+        // is also set — two positioned siblings with `z-index: auto` paint in DOM order, and this one
+        // is later. A tap that lands here therefore hits the ✕ (or `action`) and never the overlay
+        // underneath; `relative` alone does nothing when there is no overlay to out-stack.
+        <div className="relative flex shrink-0 items-center gap-1">
           {action}
           {onDismiss ? (
             <button
@@ -295,32 +314,32 @@ export function Notice({
     </>
   );
 
-  const box = cn(strip ? STRIP : BOX, surface, !strip && accent, className);
+  const box = cn(strip ? STRIP : BOX, surface, !strip && accent, onActivate && "relative", className);
 
-  // `onActivate` makes the WHOLE surface the target — the "new version, tap to update" case. A
-  // 390×33 row passes the 44px floor on area the way a 28px text row never did, and it is one
-  // element, so there is no second thing on the row to mis-hit. `text-left` because a <button>
-  // centres its text by default and this one is a sentence, not a label.
   // `data-slot` and not a test id: it is the house handle for addressing a primitive's own element
   // (`ui/collapse.tsx`, `ui/strip-host.tsx` and the header row all carry one), and DESIGN.md §9
   // names it as the way to scope a query inside a tree that holds a StripHost — where `role="status"`
   // matches the band's two permanent empty live regions as readily as the notice you meant.
-  if (onActivate) {
-    return (
-      <button
-        type="button"
-        data-slot="notice"
-        onClick={onActivate}
-        aria-labelledby={bodyId}
-        className={cn(box, "text-left")}
-      >
-        {inner}
-      </button>
-    );
-  }
-
   return (
     <div data-slot="notice" className={box}>
+      {onActivate ? (
+        // `onActivate` makes the WHOLE surface the target — the "new version, tap to update" case,
+        // and now also a state that carries its own ✕ (see NoticeInteraction's header). This button
+        // is NOT the root: it is absolutely positioned UNDER whatever `action`/`onDismiss` render
+        // (that cluster is `relative`, so it wins the stacking tie), and it is the only element a tap
+        // anywhere else on the row can reach. `aria-labelledby` names it from the same text the body
+        // renders — the FULL string, since `truncate` only clips paint, never the text node itself, so
+        // the accessible name is never shorter than what a sighted reader would get by widening the
+        // window. `-inset-y-[5.5px]` buys the 44px tap floor from the 33px strip without growing it
+        // (the box's own layout is untouched — same technique as `NOTICE_ACTION_TAP` above, just
+        // vertical-only because this target is already `w-full`).
+        <button
+          type="button"
+          onClick={onActivate}
+          aria-labelledby={bodyId}
+          className="absolute inset-x-0 -inset-y-[5.5px] rounded-[inherit] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        />
+      ) : null}
       {inner}
     </div>
   );

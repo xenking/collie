@@ -1,11 +1,19 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { STT_ENV_KEYS, STT_FILENAME, type SttSettings } from "../bridge/stt/config.ts";
+import { STT_ENV_KEYS, STT_FILENAME, type CodexSttSettings, type SttSettings } from "../bridge/stt/config.ts";
+import { CODEX_CONSENT_ID } from "../bridge/stt/codex-setup.ts";
+import { sttHostPut } from "../bridge/stt/host-http.ts";
+import { wavHeaderProblem } from "../bridge/stt/wav.ts";
+import { createWhistleModelStore } from "../bridge/stt/whistle-model.ts";
 import { CODEX_TRANSCRIBE_URL } from "../bridge/stt/codex.ts";
+import { LocalCliEmptyTranscriptError } from "../bridge/stt/local-cli.ts";
 import { SttError, type SttAudio, type SttProvider, type SttResult } from "../bridge/stt/provider.ts";
 import { capture, context, type FakeFiles, fakeFiles, fakeExec, STATE } from "./fakes.ts";
 import { EXIT } from "./io.ts";
-import { cmdStt, cmdSttOff, cmdSttSetup, cmdSttStatus, cmdSttTest, type SttDeps } from "./stt.ts";
+import { cmdStt, cmdSttOff, cmdSttSetup, cmdSttStatus, cmdSttTest, parseArgList, type SttDeps } from "./stt.ts";
 
 // The four `stt` verbs against fake seams. What is asserted here is what only these verbs own: the
 // file that lands under the state dir, the consent gate in front of the codex probe, and the words
@@ -15,6 +23,8 @@ import { cmdStt, cmdSttOff, cmdSttSetup, cmdSttStatus, cmdSttTest, type SttDeps 
 // Nothing here dials anything: the probe and the provider are both injected, which is the whole
 // reason `SttDeps` carries them.
 
+// The key the fake disk is seeded with. What the verb PRINTS is `join(STATE, STT_FILENAME)`, which
+// carries `\` on Windows, so the printed-path assertions use that form.
 const CONFIG_PATH = `${STATE}/${STT_FILENAME}`;
 
 type Deps = SttDeps & { io: ReturnType<typeof capture>; files: FakeFiles };
@@ -27,6 +37,7 @@ function deps(
     probe?: SttDeps["probe"];
     create?: SttDeps["create"];
     absent?: string[];
+    commandProblem?: SttDeps["commandProblem"];
   } = {},
 ): Deps {
   const io = capture();
@@ -41,6 +52,9 @@ function deps(
     interactive: queued.length > 0,
     prompt: () => queued.shift() ?? null,
     now: () => 0,
+    // Every command file reads as runnable unless a test says otherwise: the fake paths
+    // (`/fake/<tool>`, `/opt/engine`) do not exist on the real disk the production check reads.
+    commandProblem: over.commandProblem ?? (() => null),
   };
   if (over.probe !== undefined) built.probe = over.probe;
   if (over.create !== undefined) built.create = over.create;
@@ -55,6 +69,8 @@ interface SttDocument {
   apiKey?: string;
   codexBin?: string;
   wireIdentity?: string;
+  command?: string;
+  args?: string[];
 }
 
 function written(d: Deps): SttDocument {
@@ -132,7 +148,12 @@ describe("collie stt setup — openai-compatible", () => {
     });
     expect(d.files.entries.get(CONFIG_PATH)?.mode).toBe(0o600);
     // Never written through: the temporary is what carried the bytes, and the rename is the commit.
-    expect(d.files.ops).toEqual([`mv ${CONFIG_PATH}.tmp ${CONFIG_PATH}`]);
+    // The temporary's name is this write's alone (pid and sequence), never a shared `stt.json.tmp`.
+    expect(d.files.ops).toHaveLength(1);
+    const [verb, from, to] = d.files.ops[0]!.split(" ");
+    expect([verb, to]).toEqual(["mv", CONFIG_PATH]);
+    expect(from).toMatch(/\.\d+\.\d+\.tmp$/);
+    expect(from!.startsWith(`${CONFIG_PATH}.${process.pid}.`)).toBe(true);
     expect(said(d)).toContain("no restart needed");
     // The key is in the file and nowhere on the screen.
     expect(said(d)).not.toContain("sk-abcd1234");
@@ -316,6 +337,46 @@ describe("collie stt setup — codex", () => {
     expect(await cmdSttSetup(d, ["--provider", "codex", "--codex-bin", "/opt/bin/codex"])).toBe(EXIT.OK);
     expect(written(d).codexBin).toBe("/opt/bin/codex");
   });
+
+  test("Settings' Codex switch probes the same way and writes the same file (ADR 0097)", async () => {
+    for (const identity of ["honest", "codex-cli"] as const) {
+      const cliAsked: CodexSttSettings[] = [];
+      const d = deps({
+        answers: consented,
+        probe: async (settings) => {
+          cliAsked.push(settings);
+          return identity;
+        },
+      });
+      expect(await cmdSttSetup(d, ["--provider", "codex"])).toBe(EXIT.OK);
+
+      const stateDir = mkdtempSync(join(tmpdir(), "collie-stt-parity-"));
+      try {
+        const hostAsked: CodexSttSettings[] = [];
+        const result = await sttHostPut(
+          {
+            stateDir,
+            env: {},
+            stt: async () => null,
+            store: createWhistleModelStore({ stateDir, version: "0.0.0" }),
+            // The binary the CLI found (`which codex` in the fakes), found the same way on the host.
+            codex: { check: async () => ({ state: "ready", codexBin: "/fake/codex" }) },
+            gate: { busy: false },
+            probe: async (settings) => {
+              hostAsked.push(settings);
+              return identity;
+            },
+          },
+          { provider: "codex", consent: CODEX_CONSENT_ID },
+        );
+        expect(result.response.status).toBe(200);
+        expect(hostAsked).toEqual(cliAsked);
+        expect(JSON.parse(readFileSync(join(stateDir, STT_FILENAME), "utf8"))).toEqual(written(d));
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    }
+  });
 });
 
 describe("collie stt test", () => {
@@ -350,6 +411,63 @@ describe("collie stt test", () => {
     expect(String.fromCharCode(...provider.seen.magic[2]!.subarray(4, 8))).toBe("ftyp");
     expect(said(d)).toContain("as audio/webm;codecs=opus (Chrome, Android, Firefox) … ✓ 0 ms");
     expect(said(d)).toContain("as audio/mp4 (Safari, iOS) … ✓ 0 ms");
+  });
+
+  test("a wav-16k provider gets one 16 kHz wav, and a line says why webm and mp4 are skipped", async () => {
+    const provider = fakeProvider("");
+    const problems: Array<string | null> = [];
+    const bytes: Uint8Array[] = [];
+    const whistle: SttProvider = {
+      ...provider,
+      id: "whistle",
+      input: "wav-16k",
+      async transcribe(input: SttAudio): Promise<SttResult> {
+        bytes.push(input.audio);
+        // The engine's own header check (bridge/stt/wav.ts): the child accepts 16 kHz mono s16 only.
+        problems.push(wavHeaderProblem(input.audio));
+        return provider.transcribe(input);
+      },
+    };
+    const d = deps({ seed: configured, create: () => whistle });
+    expect(await cmdSttTest(d)).toBe(EXIT.OK);
+    expect(provider.seen.mime).toEqual(["audio/wav"]);
+    expect(provider.seen.filenames).toEqual(["collie-stt-test.wav"]);
+    expect(problems).toEqual([null]);
+    expect(String.fromCharCode(...bytes[0]!.subarray(0, 4))).toBe("RIFF");
+    // 0.2 s of 16 kHz 16-bit mono is 6400 bytes of samples after the 44-byte header.
+    expect(bytes[0]!.byteLength).toBe(44 + 6_400);
+    expect(said(d)).toContain(
+      "sending:  0.2 s of generated silence as audio/wav, 16 kHz (what phones send to a Whistle host) … ✓ 0 ms",
+    );
+    expect(said(d)).toContain("webm and mp4 are skipped, because phones convert recordings to 16 kHz WAV");
+    // An empty transcript from silence is the pass it is for every other provider.
+    expect(said(d)).toContain("(empty)");
+    expect(said(d)).not.toContain("audio/webm");
+    expect(provider.seen.closed).toBe(1);
+  });
+
+  test("a wav-16k provider that refuses its clip fails with a count of one", async () => {
+    const whistle: SttProvider = {
+      id: "whistle",
+      input: "wav-16k",
+      status: async () => ({ available: true }),
+      transcribe: async () => {
+        throw new SttError("refused", "the Whistle engine exited with status 1");
+      },
+    };
+    const d = deps({ seed: configured, create: () => whistle });
+    expect(await cmdSttTest(d)).toBe(EXIT.FAIL);
+    expect(said(d)).toContain("✗ refused: the Whistle engine exited with status 1");
+    expect(said(d)).toContain("error: the provider refused 1 of 1 clip.");
+    expect(said(d)).not.toContain("takes audio/wav, but not");
+  });
+
+  test("a provider without an input rule keeps all three clips and prints no skip line", async () => {
+    const provider = fakeProvider("");
+    const d = deps({ seed: configured, create: () => provider });
+    expect(await cmdSttTest(d)).toBe(EXIT.OK);
+    expect(provider.seen.mime).toHaveLength(3);
+    expect(said(d)).not.toContain("are skipped");
   });
 
   test("a transcript is printed, with the provider and the round trip", async () => {
@@ -427,21 +545,21 @@ describe("collie stt test", () => {
 });
 
 describe("collie stt status", () => {
-  test("off is off, and asking does not create a file", () => {
+  test("off is off, and asking does not create a file", async () => {
     const d = deps();
-    expect(cmdSttStatus(d)).toBe(EXIT.OK);
+    expect(await cmdSttStatus(d)).toBe(EXIT.OK);
     expect(said(d)).toContain("speech-to-text: off");
     expect(d.files.entries.size).toBe(0);
   });
 
-  test("the source of every setting is named, and the key never is", () => {
+  test("the source of every setting is named, and the key never is", async () => {
     const d = deps({
       seed: {
         [CONFIG_PATH]: '{"provider":"openai-compatible","baseUrl":"https://stt.example/v1","apiKey":"sk-secret-9999"}',
       },
       env: { [STT_ENV_KEYS.model]: "whisper-1" },
     });
-    expect(cmdSttStatus(d)).toBe(EXIT.OK);
+    expect(await cmdSttStatus(d)).toBe(EXIT.OK);
     const heard = said(d);
     expect(heard).toContain(`(${STT_FILENAME})`);
     expect(heard).toContain(`(${STT_ENV_KEYS.model})`);
@@ -449,18 +567,34 @@ describe("collie stt status", () => {
     expect(heard).not.toContain("sk-secret-9999");
   });
 
-  test("`codex-cli` is labelled as impersonation, in those words", () => {
+  test("a file holding only a change stamp is there, so it is not called absent", async () => {
+    const stamp = JSON.stringify({ changedBy: "Pixel 8", changedAt: "2026-10-11T08:00:00.000Z" });
+    const d = deps({ seed: { [CONFIG_PATH]: stamp } });
+    expect(await cmdSttStatus(d)).toBe(EXIT.OK);
+    expect(said(d)).toContain("speech-to-text: off");
+    expect(said(d)).toContain(`${join(STATE, STT_FILENAME)} (no provider)`);
+    expect(said(d)).not.toContain("(absent)");
+    expect(d.files.entries.has(CONFIG_PATH)).toBe(true);
+  });
+
+  test("with no file at all it still says absent", async () => {
+    const d = deps();
+    expect(await cmdSttStatus(d)).toBe(EXIT.OK);
+    expect(said(d)).toContain(`${join(STATE, STT_FILENAME)} (absent)`);
+  });
+
+  test("`codex-cli` is labelled as impersonation, in those words", async () => {
     const d = deps({
       seed: { [CONFIG_PATH]: '{"provider":"codex","codexBin":"/opt/bin/codex","wireIdentity":"codex-cli"}' },
     });
-    expect(cmdSttStatus(d)).toBe(EXIT.OK);
+    expect(await cmdSttStatus(d)).toBe(EXIT.OK);
     expect(said(d)).toContain("impersonating the Codex CLI (accepted at setup)");
     expect(said(d)).toContain(CODEX_TRANSCRIBE_URL);
   });
 
-  test("configured but unusable is a non-zero report, never a silent off", () => {
+  test("configured but unusable is a non-zero report, never a silent off", async () => {
     const d = deps({ seed: { [CONFIG_PATH]: '{"provider":"codex","wireIdentity":"sneaky"}' } });
-    expect(cmdSttStatus(d)).toBe(EXIT.FAIL);
+    expect(await cmdSttStatus(d)).toBe(EXIT.FAIL);
     expect(said(d)).toContain("cannot be used");
   });
 });
@@ -468,12 +602,22 @@ describe("collie stt status", () => {
 describe("collie stt off", () => {
   test("removes stt.json and only stt.json", () => {
     const d = deps({
-      seed: { [CONFIG_PATH]: "{}", [`${STATE}/paired-devices.json`]: "{}" },
+      seed: { [CONFIG_PATH]: '{"provider":"local-cli","command":"/opt/engine"}', [`${STATE}/paired-devices.json`]: "{}" },
     });
     expect(cmdSttOff(d)).toBe(EXIT.OK);
     expect(d.files.entries.has(CONFIG_PATH)).toBe(false);
     expect(d.files.entries.has(`${STATE}/paired-devices.json`)).toBe(true);
     expect(said(d)).toContain("no restart needed");
+  });
+
+  test("a file holding only a change stamp is removed, and speech was already off", () => {
+    const stamp = JSON.stringify({ changedBy: "Pixel 8", changedAt: "2026-10-11T08:00:00.000Z" });
+    const d = deps({ seed: { [CONFIG_PATH]: stamp, [`${STATE}/paired-devices.json`]: "{}" } });
+    expect(cmdSttOff(d)).toBe(EXIT.OK);
+    expect(said(d)).toContain("was already off");
+    expect(said(d)).not.toContain("off from the next request");
+    expect(d.files.entries.has(CONFIG_PATH)).toBe(false);
+    expect(d.files.entries.has(`${STATE}/paired-devices.json`)).toBe(true);
   });
 
   test("a second off is a clean no-op", () => {
@@ -503,5 +647,143 @@ describe("collie stt (bare)", () => {
     const d = deps();
     expect(await cmdStt(d, ["setpu"])).toBe(EXIT.USAGE);
     expect(d.io.stderr.join("\n")).toContain("unknown stt subcommand `setpu`");
+  });
+});
+
+describe("collie stt — the local-cli provider (#227)", () => {
+  test("setup by flag resolves a bare command on PATH and writes the absolute path", async () => {
+    const d = deps();
+    expect(
+      await cmdSttSetup(d, ["--provider", "local-cli", "--command", "muesli-cli", "--args", "transcribe --json"]),
+    ).toBe(EXIT.OK);
+    expect(written(d)).toEqual({ provider: "local-cli", command: "/fake/muesli-cli", args: ["transcribe", "--json"] });
+    expect(said(d)).toContain("/fake/muesli-cli transcribe --json <recording>");
+    expect(said(d)).toContain("No shell is involved");
+  });
+
+  test("no args leaves the field absent, not an empty list", async () => {
+    // An absolute command must exist on the fake disk; the file check itself is stubbed to pass.
+    const e = deps({ seed: { "/opt/engine": "" } });
+    expect(await cmdSttSetup(e, ["--provider", "local-cli", "--command", "/opt/engine"])).toBe(EXIT.OK);
+    expect(written(e)).toEqual({ provider: "local-cli", command: "/opt/engine" });
+  });
+
+  test("a relative command and a command missing from PATH are refused, and nothing is written", async () => {
+    const relative = deps();
+    expect(await cmdSttSetup(relative, ["--provider", "local-cli", "--command", "./engine"])).toBe(EXIT.FAIL);
+    expect(said(relative)).toContain("relative path");
+    expect(relative.files.entries.has(CONFIG_PATH)).toBe(false);
+
+    const missing = deps({ absent: ["engine"] });
+    expect(await cmdSttSetup(missing, ["--provider", "local-cli", "--command", "engine"])).toBe(EXIT.FAIL);
+    expect(said(missing)).toContain("was not found on PATH");
+    expect(missing.files.entries.has(CONFIG_PATH)).toBe(false);
+  });
+
+  test("an unattended run with no command refuses and names the flag", async () => {
+    const d = deps();
+    expect(await cmdSttSetup(d, ["--provider", "local-cli"])).toBe(EXIT.FAIL);
+    expect(said(d)).toContain("--command");
+  });
+
+  test("interactive setup asks for the command and the arguments", async () => {
+    const d = deps({ answers: ["local-cli", "whisper-cli", '["-m", "/my models/base.bin", "-nt"]'] });
+    expect(await cmdSttSetup(d, [])).toBe(EXIT.OK);
+    expect(written(d)).toEqual({
+      provider: "local-cli",
+      command: "/fake/whisper-cli",
+      args: ["-m", "/my models/base.bin", "-nt"],
+    });
+  });
+
+  test("parseArgList takes words or a JSON array of strings, and refuses anything else", () => {
+    expect(parseArgList("")).toEqual([]);
+    expect(parseArgList("  transcribe   --lang en ")).toEqual(["transcribe", "--lang", "en"]);
+    expect(parseArgList('["a b", "c"]')).toEqual(["a b", "c"]);
+    expect(parseArgList("[1, 2]")).toBeNull();
+    expect(parseArgList("[not json")).toBeNull();
+    expect(parseArgList(Array.from({ length: 40 }, () => "x").join(" "))).toBeNull();
+  });
+
+  test("stt test counts an empty transcript from silence as the pass it is", async () => {
+    const provider: SttProvider = {
+      id: "local-cli",
+      status: async () => ({ available: true }),
+      transcribe: async () => {
+        throw new LocalCliEmptyTranscriptError();
+      },
+    };
+    const d = deps({
+      seed: { [CONFIG_PATH]: '{"provider":"local-cli","command":"/opt/engine","args":["transcribe"]}' },
+      create: () => provider,
+    });
+    expect(await cmdSttTest(d)).toBe(EXIT.OK);
+    expect(said(d)).toContain("local-cli (/opt/engine, 1 argument(s) before the recording)");
+    expect(said(d)).toContain("(empty)");
+  });
+
+  test("stt test still fails on a real refusal", async () => {
+    const provider: SttProvider = {
+      id: "local-cli",
+      status: async () => ({ available: true }),
+      transcribe: async () => {
+        throw new SttError("refused", "the local transcription command exited with status 2");
+      },
+    };
+    const d = deps({ seed: { [CONFIG_PATH]: '{"provider":"local-cli","command":"/opt/engine"}' }, create: () => provider });
+    expect(await cmdSttTest(d)).toBe(EXIT.FAIL);
+    expect(said(d)).toContain("exited with status 2");
+  });
+
+  test("status names the command, the arguments and where each came from", async () => {
+    const d = deps({
+      seed: { [CONFIG_PATH]: '{"provider":"local-cli","command":"/opt/engine","args":["transcribe"]}' },
+      env: { [STT_ENV_KEYS.command]: "/env/engine" },
+    });
+    expect(await cmdSttStatus(d)).toBe(EXIT.OK);
+    const heard = said(d);
+    expect(heard).toContain("/env/engine");
+    expect(heard).toContain(`(${STT_ENV_KEYS.command})`);
+    expect(heard).toContain('["transcribe"]');
+    expect(heard).toContain(`(${STT_FILENAME})`);
+    expect(heard).toContain("no shell");
+  });
+
+  test("setup refuses a command file that is not a regular executable, and says why", async () => {
+    const seen: string[] = [];
+    const d = deps({
+      seed: { "/opt/engine": "" },
+      commandProblem: (p) => {
+        seen.push(p);
+        return "is not executable by this user (chmod +x it)";
+      },
+    });
+    expect(await cmdSttSetup(d, ["--provider", "local-cli", "--command", "/opt/engine"])).toBe(EXIT.FAIL);
+    expect(said(d)).toContain("/opt/engine is not executable by this user");
+    expect(said(d)).toContain("Nothing was written");
+    expect(d.files.entries.has(CONFIG_PATH)).toBe(false);
+
+    // A bare name is checked at the path PATH resolved it to, which is the path that gets written.
+    const bare = deps({ commandProblem: (p) => (seen.push(p), "is a directory, not a program") });
+    expect(await cmdSttSetup(bare, ["--provider", "local-cli", "--command", "engine"])).toBe(EXIT.FAIL);
+    expect(seen).toEqual(["/opt/engine", "/fake/engine"]);
+    expect(said(bare)).toContain("/fake/engine is a directory, not a program");
+  });
+
+  test("status fails on a command the bridge cannot run, with the host-side reason", async () => {
+    const d = deps({
+      seed: { [CONFIG_PATH]: '{"provider":"local-cli","command":"/opt/engine"}' },
+      commandProblem: () => "is not a regular file",
+    });
+    expect(await cmdSttStatus(d)).toBe(EXIT.FAIL);
+    expect(said(d)).toContain("the command cannot be run: /opt/engine is not a regular file.");
+    expect(said(d)).toContain("microphone as unavailable");
+
+    const gone = deps({
+      seed: { [CONFIG_PATH]: '{"provider":"local-cli","command":"engine"}' },
+      absent: ["engine"],
+    });
+    expect(await cmdSttStatus(gone)).toBe(EXIT.FAIL);
+    expect(said(gone)).toContain("was not found on this shell's PATH");
   });
 });

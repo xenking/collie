@@ -20,15 +20,17 @@
 
 import type { StyledLine } from "../../blocks";
 import {
+  BRIDGE_PROMPT_TAIL_LINES,
   composerBottomText,
   composerContText,
   composerGhost,
-  composerPromptText,
+  composerPlaceholder,
   isBlank,
-  isBorderlessPrompt,
   isComposerTop,
   isOpenComposerBottom,
   lineText,
+  openDraftRowGhost,
+  openDraftRowText,
   opensBox,
   rstrip,
 } from "./markers";
@@ -63,7 +65,7 @@ import {
 const MAX_SUGGESTION_ROWS = 64;
 
 // A long draft WRAPS onto continuation rows ABOVE the bottom border. Same defense-in-depth role — and
-// the same number — as claude/chrome.ts's MAX_DRAFT_LINES: the caller's read window defaults to 200
+// the same number — as claude/markers.ts's MAX_DRAFT_LINES: the caller's read window defaults to 200
 // lines and is client-requestable up to 10,000, so an unbounded walk would let a stray `│  … │` row
 // pair with an unrelated `╭─…─╮` hundreds of lines further up. Note what this cap does NOT have to
 // bound: there is no free `while (isBlank) i--` skip anywhere in the walk below. claude/chrome.ts
@@ -109,14 +111,20 @@ const MAX_DRAFT_ROWS = 100;
 // captures too, i.e. the exact check was never observed failing OR discriminating. What pins the shape
 // is the literal, the contiguous `│  …  │` run above it, the `╭─…─╮` directly above that run, the tail
 // anchor, and the two caps — every one of them a claim about glyphs both renderers agree on.
+
+/** The composer box located at the buffer's tail. Every index is into the ORIGINAL `lines` array. */
 export interface ComposerBox {
+  /** The TOP border row. It IS omp's statusline: the powerline fields are painted into the border. */
   top: number;
+  /** First draft row = `top + 1`. Equals `bottom` when the draft fits on one row (the common case). */
   firstDraftRow: number;
+  /** The `╰─ … ─╯` row — which carries the LAST fragment of the draft, not chrome below it. */
   bottom: number;
+  /** EXCLUSIVE end of the autocomplete run painted BELOW the box (`bottom + 1` when there is none). */
   suggestEnd: number;
-  /** Patched OMP uses a borderless prompt and a footer below it. */
-  layout?: "boxed" | "borderless";
-  status?: number;
+  /** EXCLUSIVE end of the later draft lines OMP 18.10 paints under its open-ended prompt row
+   *  (`bottom + 1` when there are none). Those rows are the draft, never autocomplete. */
+  draftEnd: number;
 }
 
 /**
@@ -139,30 +147,6 @@ export function locateComposer(lines: StyledLine[]): ComposerBox | null {
   let end = texts.length - 1;
   while (end >= 0 && isBlank(texts[end]!)) end--;
   if (end < 0) return null;
-  // The installed borderless patch renders `› draft` followed by optional autocomplete rows.
-  // Anchor at the tail, reject boxes below it, and allow a missing status while a menu is open.
-  for (let prompt = end; prompt >= 0 && end - prompt <= MAX_SUGGESTION_ROWS; prompt--) {
-    if (!isBorderlessPrompt(texts[prompt]!)) continue;
-    if (prompt > 0 && opensBox(texts[prompt - 1]!)) continue;
-    let status: number | undefined;
-    if (prompt < end && /^ \S/.test(texts[end]!) && texts[end]!.includes("·")) {
-      status = end;
-    }
-    let valid = true;
-    for (let row = prompt + 1; row <= end; row++) {
-      if (opensBox(texts[row]!) ||
-          (status === undefined && isBlank(texts[row]!)) ||
-          (status !== undefined && row < status && !isBlank(texts[row]!) && !texts[row]!.startsWith("  "))) {
-        valid = false;
-        break;
-      }
-    }
-    const hasSuggestions =
-      prompt < end && texts.slice(prompt + 1, end + 1).some((text) => /^ /u.test(text));
-    if (valid && (status !== undefined || hasSuggestions)) {
-      return { top: prompt, firstDraftRow: prompt, bottom: prompt, suggestEnd: end + 1, layout: "borderless", status };
-    }
-  }
 
   // (a) The bottom border, and the autocomplete run (if any) omp painted below it. Nothing here reads
   //     a palette row's CONTENT, because those rows are model- and user-authored text (they carry
@@ -196,8 +180,12 @@ export function locateComposer(lines: StyledLine[]): ComposerBox | null {
   //     needs to see. A width equality would not have bought any of this back: omp paints its pickers
   //     at the composer's own 189 cells, so it could never have told the two apart.
   let bottom = -1;
+  let draftEnd = -1;
   if (composerBottomText(texts[end]!) !== null) {
     bottom = end;
+  } else if ((draftEnd = openDraftEnd(texts, end)) > 0) {
+    bottom = draftEnd;
+    draftEnd = end + 1;
   } else {
     for (let k = end - 1; k >= 0 && end - k < MAX_SUGGESTION_ROWS; k--) {
       if (composerBottomText(texts[k]!) !== null) {
@@ -218,6 +206,7 @@ export function locateComposer(lines: StyledLine[]): ComposerBox | null {
     }
   }
   const suggestEnd = end + 1;
+  if (draftEnd < 0) draftEnd = bottom + 1;
   const openBottom = isOpenComposerBottom(texts[bottom]!);
 
   // (b) Continuation rows of a wrapped draft, walking up from the bottom border. The two-space gutter
@@ -236,7 +225,7 @@ export function locateComposer(lines: StyledLine[]): ComposerBox | null {
   // statusline to re-surface. A miss here stays fail-closed for destructive pre-type work.
   if (openBottom) {
     if (i < 0 || isBlank(texts[i]!)) return null;
-    return { top: i, firstDraftRow: i + 1, bottom, suggestEnd };
+    return { top: i, firstDraftRow: i + 1, bottom, suggestEnd, draftEnd };
   }
 
   // (c) The top border — the LAST anchor checked, which is what pays for `isComposerTop` being loose
@@ -257,7 +246,25 @@ export function locateComposer(lines: StyledLine[]): ComposerBox | null {
   //     indistinguishable here. index.ts records it as a known limit of the Tier-1 lift.
   if (i < 0 || !isComposerTop(texts[i]!)) return null;
 
-  return { top: i, firstDraftRow: i + 1, bottom, suggestEnd };
+  return { top: i, firstDraftRow: i + 1, bottom, suggestEnd, draftEnd };
+}
+
+/**
+ * The open-ended prompt row whose later draft lines run to the tail, or -1. Every row under it must be
+ * a gutter row (`openDraftRowText`) or a blank, and the last one a gutter row: a blank line in the
+ * draft is a blank row here. Anything else, a box above all, leaves the shape to step (a) below,
+ * which declines a blank or a box under the prompt exactly as before.
+ */
+function openDraftEnd(texts: string[], end: number): number {
+  if (openDraftRowText(texts[end]!) === null) return -1;
+  for (let k = end - 1; k >= 0 && end - k <= MAX_DRAFT_ROWS; k--) {
+    const t = texts[k]!;
+    if (composerBottomText(t) !== null) {
+      return isOpenComposerBottom(t) ? k : -1;
+    }
+    if (!isBlank(t) && openDraftRowText(t) === null) return -1;
+  }
+  return -1;
 }
 
 /**
@@ -345,7 +352,6 @@ function trimBorderSegments(line: StyledLine): StyledLine {
 export function extractStatusLines(lines: StyledLine[]): StyledLine[] {
   const box = locateComposer(lines);
   if (box === null) return [];
-  if (box.layout === "borderless") return box.status === undefined ? [] : [lines[box.status]!];
   const row = trimBorderSegments(lines[box.top]!);
   return row.segments.length === 0 ? [] : [row];
 }
@@ -360,9 +366,10 @@ export function extractStatusLines(lines: StyledLine[]): StyledLine[] {
  * contributes the tail. Fragments are joined with a single space — omp soft-wraps at word boundaries,
  * so the break it removed was one.
  *
- * There is NO placeholder allow-list, and one must not be invented: omp paints nothing at all in an
- * empty composer (verified across every idle capture in the corpus), so an empty box yields `""` and
- * this returns null. `null` also covers "no box at the tail".
+ * omp 17/18.1 painted nothing at all in an empty composer, so an empty box yields `""` and this
+ * returns null. omp 18.4 paints a right-aligned key hint there instead (`⇧⇥ to change thinking
+ * effort`); `composerPlaceholder` (markers.ts) recognises it by the renderer's shape, not by an
+ * allow-list of labels, and it reads as null too. `null` also covers "no box at the tail".
  *
  * Load-bearing beyond the preview: reply-action.ts runs omp panes through type-then-verify, and THIS
  * is the verify half — a wrong answer stalls every free-text send with "Message didn't reach the
@@ -376,26 +383,24 @@ export function extractInputDraft(lines: StyledLine[]): string | null {
   if (box === null) return null;
   const texts = lines.map((l) => rstrip(lineText(l)));
 
-  if (box.layout === "borderless") {
-    const draftEnd = box.status ?? box.bottom;
-    const parts = [composerPromptText(texts[box.bottom]!) ?? ""];
-    if (box.status !== undefined) {
-      for (let row = box.bottom + 1; row < draftEnd; row++) parts.push(texts[row]!.trim());
-      const ghost = composerGhost(lines[draftEnd - 1]!, draftEnd - 1 > box.bottom);
-      const last = parts[parts.length - 1]!;
-      parts[parts.length - 1] = ghost.length > 0 && last.endsWith(ghost) ? last.slice(0, -ghost.length) : last;
-    }
-    const draft = parts.filter((part) => part.length > 0).join(" ");
-    return draft.length === 0 ? null : draft;
-  }
+  if (box.firstDraftRow === box.bottom && composerPlaceholder(lines[box.bottom]!)) return null;
   const parts: string[] = [];
   for (let i = box.firstDraftRow; i < box.bottom; i++) {
     parts.push(composerContText(texts[i]!)!.trim());
   }
   const tail = rstrip(composerBottomText(texts[box.bottom]!)!);
-  const ghost = composerGhost(lines[box.bottom]!);
+  const ghost = box.draftEnd > box.bottom + 1 ? "" : composerGhost(lines[box.bottom]!);
   const typed = ghost.length > 0 && tail.endsWith(ghost) ? tail.slice(0, -ghost.length) : tail;
   parts.push(typed.trim());
+  // The later lines under an open-ended prompt. Only the LAST one can carry omp's suggestion, which
+  // is painted after the cursor.
+  for (let i = box.bottom + 1; i < box.draftEnd; i++) {
+    const text = openDraftRowText(texts[i]!);
+    if (text === null) continue;
+    const rowGhost = i === box.draftEnd - 1 ? openDraftRowGhost(lines[i]!) : "";
+    const row = rowGhost.length > 0 && text.endsWith(rowGhost) ? text.slice(0, -rowGhost.length) : text;
+    parts.push(row.trim());
+  }
 
   const draft = parts.filter((p) => p.length > 0).join(" ");
   return draft.length === 0 ? null : draft;
@@ -418,9 +423,6 @@ export function extractInputDraft(lines: StyledLine[]): string | null {
 export function hasComposer(lines: StyledLine[]): boolean {
   return locateComposer(lines) !== null;
 }
-
-/** `DEFAULT_PROMPT_TAIL_LINES` in bridge/prompt-binding.ts — mirrored, the way web mirrors wire types. */
-const BRIDGE_PROMPT_TAIL_LINES = 6;
 
 /**
  * The composer's OWN prompt row, verbatim as it sits on screen (trailing padding dropped), or null
@@ -445,16 +447,20 @@ export function composerPrompt(lines: StyledLine[]): string | null {
   // Decline the binding when omp has painted too much below the box for the bridge to accept it.
   // `verifyExpectedPrompt` (bridge/prompt-binding.ts) matches the region against the fresh read's
   // NON-BLANK rows and requires the match to end inside the last DEFAULT_PROMPT_TAIL_LINES (6) of
-  // them — so a one-row region needs at most 5 non-blank rows beneath it. Every row in
-  // `(bottom, suggestEnd)` is non-blank by construction (locateComposer step (a) rejects a blank
-  // inside the run) and everything past `suggestEnd` is trailing blanks the bridge's normalization
-  // drops, so that count is exactly `suggestEnd - bottom - 1`. The slash palette lives down there
-  // and MAX_SUGGESTION_ROWS admits 64 rows of it, so a long enough palette would put the composer's
-  // own row out of reach and 409 EVERY destructive sweep with "The input box changed while clearing
-  // it" — a permanent, unexplainable refusal on a screen where nothing is wrong. Null instead means
-  // an unbound write, which is exactly what this adapter did before it named a region at all: the
-  // sweep loses its binding, never its pre-flight.
-  if (box.suggestEnd - box.bottom - 1 > BRIDGE_PROMPT_TAIL_LINES - 1) return null;
+  // them — so a one-row region needs at most 5 non-blank rows beneath it. Only non-blank rows count:
+  // an autocomplete run has none blank, but the later lines of a draft under OMP 18.10's open prompt
+  // may (a blank line in the message), and the bridge's normalization drops those, as it drops the
+  // trailing blanks past `suggestEnd`. The slash palette lives down there and MAX_SUGGESTION_ROWS
+  // admits 64 rows of it, and a draft runs to MAX_DRAFT_ROWS, so a long enough one would put the
+  // composer's own row out of reach and 409 EVERY destructive sweep with "The input box changed while
+  // clearing it" — a permanent, unexplainable refusal on a screen where nothing is wrong. Null instead
+  // means an unbound write, which is exactly what this adapter did before it named a region at all:
+  // the sweep loses its binding, never its pre-flight.
+  let nonBlankBelow = 0;
+  for (let i = box.bottom + 1; i < box.suggestEnd; i++) {
+    if (!isBlank(lineText(lines[i]!))) nonBlankBelow++;
+  }
+  if (nonBlankBelow > BRIDGE_PROMPT_TAIL_LINES - 1) return null;
 
   const row = rstrip(lineText(lines[box.bottom]!));
   return row.length === 0 ? null : row;

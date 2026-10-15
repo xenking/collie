@@ -134,6 +134,18 @@ export function markerFor(attachment: Pick<MarkedAttachment, "n" | "kind">): str
 }
 
 /**
+ * The number the next chip takes: `next`, or one past the highest marker number already in `text`
+ * when that is higher. A marker can stand in the text with no chip behind it (text copied from
+ * another pane, or typed), and a new chip that reused its number would make it a twin: Send swaps
+ * every copy of a chip's marker for its path, so the photo went in twice (minibuch, 2026-10-14).
+ */
+export function nextMarkerNumber(text: string, next: number): number {
+  let highest = 0;
+  for (const m of text.matchAll(/\[(?:Image|File) #(\d+)\]/g)) highest = Math.max(highest, Number(m[1]));
+  return Math.max(next, highest + 1);
+}
+
+/**
  * Put a marker into the draft at `caret` (the end when there is none), padded so it never welds to
  * a word: a space before it unless the text there already ends in whitespace, and a space after it
  * unless the text there already starts with some. Returns the new text and where the caret goes,
@@ -169,21 +181,33 @@ export function removeMarker(text: string, marker: string): string {
 }
 
 /**
+ * Whether a chip's marker is gone from the draft, so Send will put its path in front of the text
+ * rather than where the marker stood. The chip shows this before Send (ADR 0060, point 7), and
+ * {@link composeLine} acts on the same answer, so the two cannot disagree.
+ */
+export function markerMissing(
+  text: string,
+  attachment: Pick<MarkedAttachment, "n" | "kind">,
+): boolean {
+  return !text.includes(markerFor(attachment));
+}
+
+/**
  * The line Send types into the terminal. Each marker whose number matches a chip becomes that
  * chip's path, where it stands. A chip whose marker is no longer in the text (the operator edited
  * it away) is not dropped: its path goes in front of the text, in chip order, so nothing attached
- * is lost by accident. A marker-looking string with no chip behind it is left exactly as typed.
+ * is lost by accident, and the chip says so before Send ({@link markerMissing}). A marker-looking
+ * string with no chip behind it is left exactly as typed.
  */
 export function composeLine(text: string, attachments: readonly MarkedAttachment[]): string {
   let line = text;
   const orphans: string[] = [];
   for (const attachment of attachments) {
-    const marker = markerFor(attachment);
-    if (!text.includes(marker)) {
+    if (markerMissing(text, attachment)) {
       orphans.push(attachment.path);
       continue;
     }
-    line = line.split(marker).join(attachment.path);
+    line = line.split(markerFor(attachment)).join(attachment.path);
   }
   const words = line.trim();
   return [...orphans, ...(words === "" ? [] : [words])].join(" ");

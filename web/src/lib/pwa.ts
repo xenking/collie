@@ -1,6 +1,9 @@
 import { basePath, mounted } from "./base-path";
 import { BUILD, isStaleBuild } from "./build";
+import { setChunkReloader } from "./chunk-reload";
+import { UPDATE_MODE_HOLD, isReloadHeld, isReloadHeldBy, subscribeReloadHeld } from "./reload-guard";
 import { getServerBuild, subscribeServerBuild } from "./server-build";
+import { isSttCacheName } from "./stt-cache";
 
 // Service-worker registration + update wiring, in one place. The worker is registered by hand
 // rather than through `virtual:pwa-register`: that module registers `${import.meta.env.BASE_URL}sw.js`,
@@ -91,6 +94,15 @@ const spent = new Set<ReloadLane>();
  * does not return, so anything after this flag is set is running in a page that is already leaving.
  */
 let navigating = false;
+
+/**
+ * Whether this page has asked for its reload and is on its way out. A notification's in-app open
+ * reads it (`lib/nav-entry.ts`): a move now would be lost with the page, so the target waits for the
+ * fresh one.
+ */
+export function isReloadInFlight(): boolean {
+  return navigating;
+}
 
 /**
  * How long a page waits for its own reload before it decides the reload is not coming.
@@ -202,6 +214,10 @@ function reloadOnce(lane: ReloadLane) {
   window.location.reload();
 }
 
+// A lazy chunk the new build no longer has reloads the page through the automatic lane, so it shares
+// that lane's latch and the `navigating` flag (lib/chunk-reload.ts holds the held-draft and loop checks).
+setChunkReloader(() => reloadOnce("auto"));
+
 // Last-resort reload that BYPASSES a wedged service worker: unregister every registration first, so
 // the ensuing navigation fetches straight from the bridge instead of being answered from the stale
 // precache (a plain reload stays controlled by the active worker and would re-serve the SAME old
@@ -222,11 +238,16 @@ async function forceReload(lane: ReloadLane): Promise<void> {
   // Deleting the caches needs no job and cannot be queued behind one. With its precache gone,
   // workbox's precache handler falls through to the network (`fallbackToNetwork`), so the navigation
   // below reaches the bridge whether the unregister ever lands or not. Every cache, not the precache
-  // by name: the name is workbox's to change, and the only other one is the font cache
-  // (`src/sw.ts` FONT_CACHE), which re-fills on first use.
+  // by name: the name is workbox's to change, and the others are the font cache
+  // (`src/sw.ts` FONT_CACHE), which re-fills on first use, and the speech cache.
+  //
+  // THE SPEECH CACHE IS SPARED (ADR 0096 Decision 10). It holds a 17 MB model the person chose to copy
+  // to the phone, and a stale model cannot cause a stale app: it is not part of the shell, and the
+  // service worker's own sweep drops it when a build stops accepting its hash. Deleting it here would
+  // make a stuck update cost a second 17 MB download. (A pairing wipe still takes it: lib/wipe.ts.)
   try {
     const keys = await caches.keys();
-    await Promise.all(keys.map((key) => caches.delete(key)));
+    await Promise.all(keys.filter((key) => !isSttCacheName(key)).map((key) => caches.delete(key)));
   } catch {
     /* no CacheStorage, or it refused — the unregister below and the reload still stand */
   }
@@ -255,7 +276,38 @@ function onControllerChange() {
   }
   controllerChangedAt = Date.now();
   for (const listener of controllerListeners) listener();
-  reloadOnce("auto");
+  reloadWhenReleased();
+}
+
+/**
+ * THE SWAP'S RELOAD WAITS FOR THE RELOAD HOLD (ADR 0064).
+ *
+ * The swap used to reload at once, whatever the page was holding. Two holders cannot afford that:
+ * update mode, which saves the phone's own reload for the LAST step of an update and must not lose
+ * its screen while other machines still move, and a composer with unsent text, which the reload
+ * would eat. The page keeps running the bundle it booted; the new worker is already in control, and
+ * the reload fires the moment the last hold clears. The swap is stamped above either way, so the
+ * update screen still knows this device's download is over.
+ *
+ * `sw.ts` keeps `skipWaiting()` on install, so a worker another tab found can still take control of
+ * this one mid-hold. That is the case this deferral is for; this page itself stops LOOKING for a new
+ * worker while update mode holds (the periodic check below).
+ */
+let swapWaiting = false;
+
+function reloadWhenReleased(): void {
+  if (!isReloadHeld()) {
+    reloadOnce("auto");
+    return;
+  }
+  if (swapWaiting) return;
+  swapWaiting = true;
+  const stop = subscribeReloadHeld(() => {
+    if (isReloadHeld()) return;
+    stop();
+    swapWaiting = false;
+    reloadOnce("auto");
+  });
 }
 
 /**
@@ -430,7 +482,13 @@ function onRegistered(r: ServiceWorkerRegistration): void {
     // *replaces* a prior controller (see onControllerChange); the first-visit initial claim is not
     // an update and must not reload.
     navigator.serviceWorker?.addEventListener("controllerchange", onControllerChange);
-    setInterval(() => void r.update().catch(() => {}), UPDATE_CHECK_MS);
+    // PAUSED WHILE UPDATE MODE HOLDS (ADR 0064). A worker found here mid-update installs, skips
+    // waiting and takes control, which is this phone's reload arriving before the other machines are
+    // done. Update mode asks for the new app itself when its phone step starts.
+    setInterval(() => {
+      if (isReloadHeldBy(UPDATE_MODE_HOLD)) return;
+      void r.update().catch(() => {});
+    }, UPDATE_CHECK_MS);
   }
 }
 

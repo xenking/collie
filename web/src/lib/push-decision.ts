@@ -5,13 +5,30 @@
 // show vs clear, tag derivation, title/renotify defaults, and the URL a tap opens — is plain data
 // in, plain data out.
 
+import { interpolate } from "./i18n/template";
+import { machinePath, machinesPath } from "./machine-paths";
+import { isPushTitleCode, type PushTitleDetail } from "./push-title-codes";
+import type { PushTitleTemplates } from "./push-title-store";
 import { scopeSearch } from "./scope";
 
 // Payload shape is whatever bridge/push.ts sends: a render → { title, body, tag, renotify,
 // data: { paneId } }; a retraction → { type: "clear", tag }.
 export interface PushPayload {
-  type?: "clear";
+  /**
+   * `clear` retracts a slot. `machine` is a sustained-load alert for a crew member (ADR 0084) and
+   * `update` is the update push; both are the bridge's own spellings (bridge/push.ts). Only `machine`
+   * changes a decision here: it is never suppressed (see {@link decidePush}).
+   */
+  type?: "clear" | "update" | "machine";
   title?: string;
+  /**
+   * The catalogue code `title` was rendered from, and the values it was filled with
+   * (bridge/push-titles.ts). Kept loose (`string`, not the code union) because it is read off the
+   * wire: a code a newer bridge invented is a value this build must recognise as unknown, not a type
+   * error — `localisedTitle` narrows it.
+   */
+  titleCode?: string;
+  titleDetail?: PushTitleDetail;
   body?: string;
   /** Notification slot. The bridge sends one shared "collie:herd" tag so the herd coalesces. */
   tag?: string;
@@ -40,6 +57,8 @@ export interface NotifData {
   host?: string;
   /** Non-pane tap destination (e.g. "settings"); absent = the default agent deep-link. */
   target?: string;
+  /** The crew member a `target: "machine"` alert is about, as `/api/machines` names it. Not `host`. */
+  machine?: string;
 }
 
 export type PushDecision =
@@ -60,6 +79,8 @@ export type PushDecision =
       host?: string;
       /** Non-pane tap destination (e.g. "settings"); undefined = the default agent deep-link. */
       target?: string;
+      /** The crew member a machine alert is about; undefined for every other push. */
+      machine?: string;
       renotify: boolean;
     };
 
@@ -94,30 +115,54 @@ export const tagFor = (paneId?: string, host?: string): string => {
 };
 
 /**
+ * The title in this device's language, or `undefined` when there is none to give: no code on the push
+ * (an older bridge, or a title the operator typed), a code this build does not know (a newer bridge),
+ * or no template stored for it (the page has not run since the worker was installed, or storage was
+ * refused). Every `undefined` falls through to the bridge's own English title.
+ */
+export function localisedTitle(payload: PushPayload, templates: PushTitleTemplates): string | undefined {
+  const code = payload.titleCode;
+  if (!isPushTitleCode(code)) return undefined;
+  const template = templates[code];
+  if (template === undefined) return undefined;
+  return interpolate(template, payload.titleDetail);
+}
+
+/**
  * Decide what the SW should do with a push. `hasVisibleClient` = a Collie tab is open and visible
  * (the in-app status already surfaces the alert, so the redundant system notification is suppressed
- * — but a clear still runs, since a retraction must close regardless).
+ * — but a clear still runs, since a retraction must close regardless). `templates` is the device's
+ * push title table (lib/push-title-store.ts); an empty one shows every title in the bridge's English.
  */
-export function decidePush(payload: PushPayload, hasVisibleClient: boolean): PushDecision {
+export function decidePush(
+  payload: PushPayload,
+  hasVisibleClient: boolean,
+  templates: PushTitleTemplates = {},
+): PushDecision {
   const paneId = payload.data?.paneId;
   const session = payload.data?.session;
   const host = payload.data?.host;
   const target = payload.data?.target;
+  const machine = payload.data?.machine;
   // ONE derivation, both directions. A retraction that computed a different tag than its render did
   // would leave a dead notification on the lock screen forever, with nothing left that will ever
   // close it — so `clear` and `show` resolve the slot on this single line, before they diverge.
   const tag = payload.tag ?? tagFor(paneId, host);
   if (payload.type === "clear") return { kind: "clear", tag };
-  if (hasVisibleClient) return { kind: "suppress" };
+  // A machine alert is the one push a visible tab does not stand in for. The in-app status line speaks
+  // for panes: it says an agent needs you, and says nothing about a machine running hot. Suppressing
+  // it because a Collie tab happens to be open would swallow the only signal there is (1.17.0 review).
+  if (hasVisibleClient && payload.type !== "machine") return { kind: "suppress" };
   return {
     kind: "show",
-    title: payload.title ?? "Collie",
+    title: localisedTitle(payload, templates) ?? payload.title ?? "Collie",
     body: payload.body ?? "",
     tag,
     paneId,
     session,
     host,
     target,
+    machine,
     renotify: payload.renotify ?? false,
   };
 }
@@ -144,6 +189,11 @@ export function decidePush(payload: PushPayload, hasVisibleClient: boolean): Pus
  */
 export function notificationPath(data: NotifData = {}): string {
   if (data.target === "settings") return "/settings/updates";
+  // A machine alert (ADR 0084) opens that machine's page. `machine` is the crew member id the bridge
+  // stamped, which is the row id `/api/machines` answers with. `host` is NOT read for this target: it
+  // names where a pane lives, and a machine alert has no pane. A push without a machine has nowhere
+  // better to go than Machines itself. The paths are nav.ts's own (kept in machine-paths.ts for the worker), unscoped: the page is the lead's.
+  if (data.target === "machine") return data.machine ? machinePath(data.machine) : machinesPath();
   const base = data.paneId && data.paneId !== "test" ? `/pane/${encodeURIComponent(data.paneId)}` : "/";
   return `${base}${scopeSearch({ host: data.host, session: data.session })}`;
 }

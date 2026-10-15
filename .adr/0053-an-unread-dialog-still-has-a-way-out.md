@@ -1,6 +1,9 @@
 # 0053 — An unread dialog still has a way out
 
 - **Status:** Accepted
+- **Amended in scope by:** [ADR 0076](./0076-the-omp-resume-picker-is-lifted-and-every-omp-modal-has-a-way-out.md):
+  omp now declares `Escape` and a `modalOnScreen` probe, which closes the gap recorded in the table
+  below. The rules above stand.
 - **Date:** 2026-09-21
 - **Shipped in:** pending (M34, target 1.12.0)
 - **Trail:** `web/src/lib/harness/claude/markers.ts` (`classifyFooter`) ·
@@ -82,7 +85,7 @@ class that just shipped. A declaration cannot be fooled by a phrase.
 | muse | `Escape` | `muse/DIALOG_NOTES.md`: `Esc to interrupt`, and `Esc to go back` in the review phase |
 | agy / antigravity | `Escape` | same two registrations, same footers |
 | grok | `ctrl+c` | `grok/PERMISSION_NOTES.md`: `Ctrl+c:cancel │ Esc:scrollback`, Escape opens the scrollback view |
-| omp | none | gap, below |
+| omp | `Escape` (since ADR 0076) | `⎋ cancel` / `⎋ close`, read by `modalOnScreen`; was a gap, below |
 
 Grok is the reason the key is declared rather than assumed. On grok, Escape is not the way out.
 
@@ -132,3 +135,32 @@ files every new or changed screen before the next Collie release.
 
 Credit for finding this belongs to the operator, who hit the `/effort` slider live on 2026-09-21 and
 had no way out of it but the Keys keypad.
+
+## Addendum 2026-09-26: a fifth condition, positive evidence of a modal
+
+The four conditions fired on a pane whose composer was not live but whose screen was not a modal
+either: the shell prompt under a Claude that is starting or exiting. Herdr reports the agent about
+0.3 s before its first frame paints and about 0.5 s after it exits, and the operator saw the card
+flash when starting Claude with a shell function (`claude-danger`). Captures:
+`claude--v2283-shell-before-first-frame.txt` and `claude--v2283-shell-after-exit.txt`.
+
+So an adapter may now also declare `modalOnScreen(lines)`, positive evidence that one of its own
+modals is up. When declared, the card needs it to answer `true`; a throw counts as `false`, the same
+fail-closed reading the pass gives `composerReady`. Claude declares it as "one of the last six
+non-blank rows names a key" (`namesAMenuKey`), which every screen on Claude's allow-list satisfies
+and a shell prompt does not. This is a gate on showing the card, not a footer parse for its key: the
+key is still the declaration. Adapters that declare nothing keep the four conditions unchanged.
+
+Codex, Grok and Muse declared `modalOnScreen` afterwards (harness canary 2026-10-12: Codex 0.159.3,
+Grok Build 1.0.50, Muse 1.4.6), each with its own positive evidence and the same fail-closed reading:
+
+| Adapter | `modalOnScreen` answers `true` when |
+|---|---|
+| codex | one of the last six non-blank rows names `esc`, as every Codex dialog footer does |
+| grok | one of the last six non-blank rows is a `Key:verb │ Key:verb` footer; the shell after exit prints none, so the card no longer offers `ctrl+c` to it |
+| muse | its bottom rule and statusline are there (`locateTail`); the shell after `muse resume` and the banner before the composer have neither |
+
+The same day, most of the screens that had been showing the card were read instead: the permission
+dialog is now recognised by its own words when its footer drops "Tab to amend", Claude's `▔` modal
+top is a menu region top, and the amend note and AskUserQuestion's "Type something." row are
+modelled as fields. The card stays the answer for what is left.

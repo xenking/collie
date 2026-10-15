@@ -68,6 +68,11 @@ case "$(uname -m)" in
   aarch64|arm64) ARCH=arm64 ;;
   *) die "Collie publishes no binary for $(uname -m). Build from source instead: https://github.com/${REPO}#from-source" ;;
 esac
+# A shell under Rosetta on Apple Silicon reports x86_64, and the x64 build dies there with an illegal
+# instruction (seen on the macos-14 runner, #385), so a translated shell gets the native arm64 one.
+if [ "$OS" = macos ] && [ "$ARCH" = x64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then
+  ARCH=arm64
+fi
 PLATFORM="${OS}-${ARCH}"
 
 # ── Leave an existing install alone — unless a tag was pinned ────────────────
@@ -228,7 +233,7 @@ cat <<EOF
 
 ✓ Collie $TAG is installed at $DIR — and nothing is running yet.
 
-Three steps left, and each one is a decision:
+Four steps left, and each one is a decision:
 
   1. Seed the config:
        mkdir -p ~/.config/collie
@@ -241,6 +246,9 @@ Three steps left, and each one is a decision:
 
   3. Start it, and read the banner it prints:
        collie start
+
+  4. Pair your phone. Collie answers no device until one is paired:
+       collie pair
 
 Read $DIR/current/docs/security.md before you open the URL on a phone. A Collie is remote shell
 access to your machine, by design.

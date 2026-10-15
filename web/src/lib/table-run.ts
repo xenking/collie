@@ -22,9 +22,11 @@
 //   · Markdown — the anchor is the delimiter row (`| --- | --- |`, or the same without outer pipes),
 //     and the count is its pipes. Prose that happens to contain a pipe cannot match a count it never
 //     had.
-//   · Box drawing — the anchor is a frame row carrying a CROSS (`├───┼───┤`), and the count is its
-//     crosses. A T-piece is not enough and the reason is load-bearing: see BOX_CROSS_GLYPH_CLASS.
-//     Claude's input box has neither, being a single-column frame (`╭───╮`, `│ > … │`, `╰───╯`).
+//   · Box drawing — the anchor is a frame row carrying a COLUMN JUNCTION, a cross (`├───┼───┤`) or a
+//     vertical tee (`╭───┬───╮`, `╰───┴───╯`), and the count is its junctions. The tee is the two-pane
+//     box, and it is here deliberately: see BOX_ANCHOR below and ADR 0072. A side tee (`├ ┤ ╞ ╡`) is
+//     still not one, because it ends a frame row without dividing it.
+//     Claude's input box has none of them, being a single-column frame (`╭───╮`, `│ > … │`, `╰───╯`).
 //     Neighbours join as frame rows spending that count on junctions, or as content rows spending it
 //     on verticals — plus two more when the table is drawn with outer borders.
 //
@@ -34,10 +36,10 @@
 import { isBlank, lineText, type StyledLine } from "./blocks";
 import {
   BOX_COLUMN_JUNCTION_GLYPH_CLASS,
-  BOX_CROSS_GLYPH_CLASS,
   BOX_DRAWING_RULE_GLYPH_CLASS,
   BOX_VERTICAL_GLYPH_CLASS,
 } from "./rule-glyphs";
+import { cellsByColumn } from "./text-width";
 
 /** A contiguous, inclusive range of line indices to pan as one unit. */
 export interface TableRun {
@@ -58,21 +60,36 @@ const PIPE = /\|/g;
 // The `+---+---+` rule of mysql, sqlite3 -table, psql, docker, tabulate and comfy-table — the most
 // common table an agent pastes out of a shell tool, after markdown.
 const ASCII_DELIMITER = /^\+(?:-+\+)+$/;
-const PLUS = /\+/g;
+const PLUS = /^\+$/;
 const ASCII_SEPARATOR = /^[|+]$/;
 
 // A row whose every printable character is box drawing: a frame row, top, bottom or divider.
 const BOX_FRAME_ROW = new RegExp(`^[${BOX_DRAWING_RULE_GLYPH_CLASS}\\s]+$`);
-// The anchor is a CROSS and never a T-piece. A `┬` sits wherever ANY two-pane box's divider meets
-// its top border and a `┴` where it meets the bottom, so a T-piece anchor claimed omp's splash
-// screen and the whole of its /model picker — 18 of the 121 committed pane fixtures. A cross is a
-// column boundary crossing a ROW boundary, which only a table draws. The trade is a headerless box
-// table, with no interior divider row, which is now left to wrap; that is the cheap failure.
-const BOX_CROSS = new RegExp(`[${BOX_CROSS_GLYPH_CLASS}]`);
+// The anchor is any junction that carries a COLUMN boundary: a cross, or a vertical tee.
+//
+// A TEE USED TO BE REFUSED, and ADR 0072 reverses that. The old rule wanted a `┼`, a column boundary
+// crossing a ROW boundary, on the reasoning that only a table draws one. It is true that only a table
+// draws a `┼`, and it turned out to be the wrong test: a two-pane box draws its divider meeting a
+// border instead, `┬` at the lid and `┴` at the floor, so the rule refused every two-pane box there
+// is. Refusing it does not leave the box wrapping, which would have been the cheap failure. It leaves
+// the box CLIPPED, because `FRAME_ROW` in blocks.ts marks every `│ … │` row `noWrap`. So the second
+// pane of a two-pane box was unreachable on a phone: Claude's dynamic-workflow view (discussion #301),
+// omp's `/model` picker with the model names in it, and omp's splash with the Tips beside the logo.
+//
+// Measured before the change, not guessed: across all 355 committed captures a tee anchor claims
+// exactly two more screens, omp's splash and omp's `/model` picker, and both are real two-pane boxes
+// whose right half a phone cannot otherwise see. The corpus gate at the foot of table-run.test.ts
+// lists every claim, so a third screen cannot arrive unnoticed.
+//
+// Three things keep it honest, and they are what the old rule leaned on a glyph to do. The anchor row
+// must be a PURE frame row, so a sentence with a tee in it is not one. Every one of the anchor's
+// offsets must be held on every member row, so a run cannot grow past its own box. And a run of one
+// row is discarded, so a lone tee with no box under it claims nothing.
+const BOX_ANCHOR = new RegExp(`[${BOX_COLUMN_JUNCTION_GLYPH_CLASS}]`);
 // Interior junctions carry the anchor's column offsets. Corners and side tees (`┌ ┐ ├ ┤`) are not
 // here: they mark where the FRAME is, and a lid draws a corner where a content row draws a border,
 // so an offset taken from one would never match the other.
-const BOX_JUNCTION = new RegExp(`[${BOX_COLUMN_JUNCTION_GLYPH_CLASS}]`, "g");
+const BOX_JUNCTION = new RegExp(`^[${BOX_COLUMN_JUNCTION_GLYPH_CLASS}]$`);
 // What may stand at a column offset on a member row: a cell wall, or another row's junction.
 const BOX_SEPARATOR = new RegExp(`^[${BOX_VERTICAL_GLYPH_CLASS}${BOX_COLUMN_JUNCTION_GLYPH_CLASS}]$`);
 
@@ -102,7 +119,7 @@ export function tableRuns(lines: StyledLine[]): readonly TableRun[] {
       ? markdownMember(text.match(PIPE)?.length ?? 0)
       : ASCII_DELIMITER.test(text)
         ? offsetMember(offsetsOf(row, PLUS), ASCII_SEPARATOR)
-        : BOX_FRAME_ROW.test(text) && BOX_CROSS.test(text)
+        : BOX_FRAME_ROW.test(text) && BOX_ANCHOR.test(text)
           ? offsetMember(offsetsOf(row, BOX_JUNCTION), BOX_SEPARATOR)
           : null;
     if (!member) continue;
@@ -120,11 +137,20 @@ export function tableRuns(lines: StyledLine[]): readonly TableRun[] {
   return runs.length > 0 ? runs : NO_RUNS;
 }
 
+// A row of printable ASCII and box drawing only. Every character in it is one cluster and one
+// terminal column, so its column is its string index and `Intl.Segmenter` has nothing to decide.
+// Most tables are all of this, and the segmenter costs a pass per row (400 rows: 0.04 ms by index,
+// 1.3 ms through the segmenter, measured on a development machine).
+const ALL_NARROW = /^[\x20-\x7e\u2500-\u257f]*$/;
+
 /** Where the anchor's separators stand, in terminal columns. */
 function offsetsOf(row: string, separator: RegExp): number[] {
   const at: number[] = [];
-  separator.lastIndex = 0;
-  for (let m = separator.exec(row); m; m = separator.exec(row)) at.push(m.index);
+  if (ALL_NARROW.test(row)) {
+    for (let i = 0; i < row.length; i++) if (separator.test(row.charAt(i))) at.push(i);
+    return at;
+  }
+  for (const [column, cell] of cellsByColumn(row)) if (separator.test(cell)) at.push(column);
   return at;
 }
 
@@ -152,12 +178,16 @@ function markdownMember(pipes: number): (text: string) => boolean {
  *   · A single-column chrome box below a table — Claude's input box — has walls only at its own two
  *     edges, so a multi-column anchor cannot grow into it even with no blank line between them.
  *
- * The cost is a table whose cells hold double-width characters: the terminal's columns and the
- * string's indices stop agreeing, no offset matches, and the table wraps as it did before.
+ * Offsets are terminal columns, not string indices, so a CJK cell (one index, two columns) keeps
+ * its row's walls where the anchor's junctions are. Where the width table and the TUI disagree on a
+ * glyph (a ZWJ emoji sequence, text-width.ts), the walls after it miss, the row is not a member, and
+ * the table wraps, as it did before this change.
  */
 function offsetMember(offsets: number[], separator: RegExp): (row: string) => boolean {
   return (row) => {
     if (isBlank(row)) return false;
-    return offsets.every((at) => separator.test(row.charAt(at)));
+    if (ALL_NARROW.test(row)) return offsets.every((at) => separator.test(row.charAt(at)));
+    const cells = cellsByColumn(row);
+    return offsets.every((at) => separator.test(cells.get(at) ?? ""));
   };
 }

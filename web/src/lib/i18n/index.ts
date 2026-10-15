@@ -1,6 +1,8 @@
 import { hasDocument } from "../env";
 import { DEFAULT_LOCALE, isLocale, type Locale } from "./locale";
 import { en, type Dictionary, type MessageKey } from "./messages/en";
+import { interpolate, type TemplateVars } from "./template";
+import { reloadOnChunkError } from "../chunk-reload";
 
 // The translation runtime: one module-scoped store, one lookup function, one plural function.
 //
@@ -25,11 +27,7 @@ export type { Locale } from "./locale";
 export { LOCALES, DEFAULT_LOCALE, isLocale, type LocaleOption } from "./locale";
 export type { MessageKey, Messages, Dictionary } from "./messages/en";
 
-/** Values for a message's `{slot}`s. An interface (not `Record<string, …>`) so the index signature
- *  has a named owner — see ADR 0019, `no-known-value-widening`. */
-export interface TemplateVars {
-  readonly [slot: string]: string | number;
-}
+export type { TemplateVars } from "./template";
 
 /** The bases of the `.one`/`.other` pairs in English — the only keys `tn()` accepts. Extracting
  *  them from `MessageKey` means adding a plural pair to `en.ts` is all it takes to make it
@@ -53,6 +51,11 @@ const LOADERS = {
   ja: async () => (await import("./messages/ja")).ja,
   zh: async () => (await import("./messages/zh")).zh,
   "zh-TW": async () => (await import("./messages/zh-TW")).zhTW,
+  ru: async () => (await import("./messages/ru")).ru,
+  it: async () => (await import("./messages/it")).it,
+  fr: async () => (await import("./messages/fr")).fr,
+  pt: async () => (await import("./messages/pt")).pt,
+  tr: async () => (await import("./messages/tr")).tr,
 } satisfies Record<Exclude<Locale, typeof DEFAULT_LOCALE>, () => Promise<Dictionary>>;
 
 const loaded = new Map<Locale, Dictionary>();
@@ -110,7 +113,7 @@ function notify(locale: Locale): void {
  *  English serving, which is exactly the degraded state the fallback exists for. */
 async function fetchDictionary(locale: Exclude<Locale, typeof DEFAULT_LOCALE>): Promise<void> {
   try {
-    const dictionary = await LOADERS[locale]();
+    const dictionary = await reloadOnChunkError(LOADERS[locale]);
     loaded.set(locale, dictionary);
     // Only notify if this is still the locale on screen — a fast en→de→en toggle must not repaint
     // the app in German because the German chunk finally arrived.
@@ -143,21 +146,6 @@ function activeLocale(): Locale {
   return loaded.has(state.locale) ? state.locale : DEFAULT_LOCALE;
 }
 
-/**
- * Fill a message's `{slot}`s.
- *
- * split/join, NOT `String.replaceAll` — the replacement half of `replaceAll` interprets `$&`, `$'`
- * and `$1`, so a value containing a dollar sign would be mangled into a capture reference. Nor is a
- * `RegExp` built from the slot name, which would let a key's punctuation become syntax.
- */
-function interpolate(template: string, vars: TemplateVars | undefined): string {
-  if (vars === undefined) return template;
-  let out = template;
-  for (const [slot, value] of Object.entries(vars)) {
-    out = out.split(`{${slot}}`).join(String(value));
-  }
-  return out;
-}
 
 /** Translate one key into the active language, filling any `{slot}`s. */
 export function t(key: MessageKey, vars?: TemplateVars): string {
@@ -166,26 +154,36 @@ export function t(key: MessageKey, vars?: TemplateVars): string {
 
 const pluralRules = new Map<Locale, Intl.PluralRules>();
 
-/** `one` or `other` — the only two categories our seven languages need. Anything else Intl reports
- *  (`few`, `many`, `zero`, `two`) maps to `other`, which is the correct bucket for a dictionary
- *  that only carries the pair. */
-function pluralSuffix(locale: Locale, count: number): "one" | "other" {
+/** The CLDR plural category Intl reports for `count` in `locale`: `one`, `few`, `many`, `other` and so
+ *  on. Which categories a language has is the language's business, not ours: English and German
+ *  have `one`/`other`, Japanese only `other`, Russian `one`/`few`/`many`/`other`. */
+function pluralCategory(locale: Locale, count: number): Intl.LDMLPluralRule {
   let rules = pluralRules.get(locale);
   if (rules === undefined) {
     rules = new Intl.PluralRules(locale);
     pluralRules.set(locale, rules);
   }
-  return rules.select(count) === "one" ? "one" : "other";
+  return rules.select(count);
 }
 
 /**
- * Translate a plural pair. `keyBase` names the pair, not a key: `tn("a.b.count", 2)` reads
- * `a.b.count.other`. `count` is injected as the `{count}` slot, so the message never has to repeat
- * it at the call site — and it wins over an explicit `vars.count`, which would only ever disagree.
+ * Translate a plural set. `keyBase` names the set, not a key: `tn("a.b.count", 2)` reads
+ * `a.b.count.other` in English. The category comes from `Intl.PluralRules` for the active language,
+ * and the key is `${keyBase}.${category}`. A dictionary carries only the categories its language
+ * needs beyond `.other`: English has `.one`, Russian adds `.few` and `.many`. A category the
+ * dictionary has no key for (French `many` for a million, a fraction in any language) falls back to
+ * `.other`, which every dictionary carries. `count` is injected as the `{count}` slot, so the
+ * message never has to repeat it at the call site, and it wins over an explicit `vars.count`,
+ * which would only ever disagree.
  */
 export function tn(keyBase: PluralKey, count: number, vars?: TemplateVars): string {
-  const key: MessageKey = `${keyBase}.${pluralSuffix(activeLocale(), count)}`;
-  return interpolate(activeDictionary()[key], { ...vars, count });
+  const dictionary: Readonly<Record<string, string | undefined>> = activeDictionary();
+  const template =
+    dictionary[`${keyBase}.${pluralCategory(activeLocale(), count)}`] ?? dictionary[`${keyBase}.other`];
+  // `.other` exists for every PluralKey in every dictionary (the type and the parity test see to
+  // it), so this only fires if that contract is broken.
+  if (template === undefined) throw new Error(`tn: no plural form for ${keyBase}`);
+  return interpolate(template, { ...vars, count });
 }
 
 /** Switch languages: persist, stamp `<html lang>`, repaint now in whatever is available, and start

@@ -33,6 +33,23 @@ describe("PaneStrip", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("passes a saved copy to the sheet: a long-press shows a note in place of Rename and Close", () => {
+    render(
+      <PaneStrip
+        panes={[pane("w1:p1", "claude"), pane("w1:p2", "codex")]}
+        currentPaneId="w1:p1"
+        onSelect={vi.fn()}
+        savedCopy
+        onRenamed={vi.fn()}
+        onClosed={vi.fn()}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByRole("button", { name: /codex/ }));
+    expect(screen.getByText("Saved copy. Reconnect to make changes.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Close pane" })).toBeNull();
+  });
+
   it("carries an accessible name, so the row of pills is not an unnamed run of buttons", () => {
     render(
       <PaneStrip
@@ -58,6 +75,40 @@ describe("PaneStrip", () => {
     // The current pane (codex / w1:p2) is the one marked active.
     expect(screen.getByRole("button", { name: /codex/ })).toHaveAttribute("aria-current", "true");
     expect(screen.getByRole("button", { name: /claude/ })).not.toHaveAttribute("aria-current");
+  });
+
+  // ── A PILL IS NUMBERED ONLY WHEN IT HAS TO BE ───────────────────────────────
+  // Every pill used to carry the multiplexer's pane id suffix (`p1`, `p3`), whether or not there was
+  // anything to tell apart. Altan, reading his own phone: "idk what pN means". The suffix is gone; a
+  // pill now carries its 1-based place in the row, and only when a neighbour reads the same.
+  it("numbers nothing when every pill already reads differently", () => {
+    render(
+      <PaneStrip
+        panes={[pane("w1:p1", "claude"), pane("w1:p3", "codex")]}
+        currentPaneId="w1:p1"
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "claude" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "codex" })).toBeInTheDocument();
+    // And no pane id anywhere on the row.
+    expect(screen.queryByText(/^p\d+$/)).toBeNull();
+  });
+
+  it("numbers two pills that would otherwise read the same, by their place in the row", () => {
+    render(
+      <PaneStrip
+        panes={[pane("w1:p1", "claude"), pane("w1:p4", "claude"), pane("w1:p9", "codex")]}
+        currentPaneId="w1:p1"
+        onSelect={vi.fn()}
+      />,
+    );
+    // The position in the row, which is what the reader can see — never the id suffix `p4`.
+    expect(screen.getByRole("button", { name: "claude 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "claude 2" })).toBeInTheDocument();
+    // The odd one out keeps its clean name: the number answers a question only the twins raise.
+    expect(screen.getByRole("button", { name: "codex" })).toBeInTheDocument();
+    expect(screen.queryByText("p4")).toBeNull();
   });
 
   it("shows Claude's /rename session name on a pill when no user label is set", () => {
@@ -193,5 +244,55 @@ describe("PaneStrip", () => {
     );
     await user.click(screen.getByRole("button", { name: /claude/ }));
     expect(onSelect).toHaveBeenCalledExactlyOnceWith("w1:p1");
+  });
+
+  // iOS Safari does not scroll a `pointer-events: none` scroller from a `pointer-events: auto`
+  // child (https://bugs.webkit.org/show_bug.cgi?id=183870): the row looked fine and did not move
+  // under a thumb. jsdom cannot scroll, so this pins the cause: nothing from the scroller down to
+  // a pill may opt out of hit-testing, and no z-index lifts any part of the row: nothing of the row
+  // overhangs the content below it any more (see the hit-box test beside this one).
+  it("lets the scroller take a touch itself, so a sideways swipe scrolls the row on iOS", () => {
+    render(
+      <PaneStrip
+        panes={[pane("w1:p1", "claude"), pane("w1:p2", "codex")]}
+        currentPaneId="w1:p1"
+        onSelect={vi.fn()}
+      />,
+    );
+    const nav = screen.getByRole("navigation", { name: "Panes" });
+    const pill = screen.getByRole("button", { name: /claude/ });
+    const scroller = nav.querySelector<HTMLElement>(".overflow-x-auto")!;
+    for (let el: HTMLElement | null = pill; el && el !== nav.parentElement; el = el.parentElement) {
+      expect(el.className).not.toMatch(/(?:^|\s)pointer-events-none(?=\s|$)/);
+    }
+    expect(nav.className).not.toMatch(/(?:^|\s)z-\[/);
+    expect(scroller.firstElementChild!.className).not.toMatch(/(?:^|\s)z-\[/);
+    expect(scroller.firstElementChild!.contains(pill)).toBe(true);
+  });
+
+  // THE STRIP MAY NOT OVERHANG THE CONTENT. A pill's `::before` reach used to hang 18px below the
+  // row (`before:-bottom-5`, in an 18px `pb`/`-mb` clip room), which put it over the first lines of
+  // the chat or terminal and took the tap off a file-path link there (measured 2026-10-07 with
+  // `elementFromPoint`). jsdom has no layout, so this pins the classes that made it: the reach is
+  // the row's own 26px (`-inset-y-[2px]` against the pill's padding box), and the scroller has no
+  // bottom padding or negative bottom margin to extend a clip box below the row.
+  it("keeps every pill's hit box inside the 26px row, never over the content below", () => {
+    render(
+      <PaneStrip
+        panes={[pane("w1:p1", "claude"), pane("w1:p2", "codex")]}
+        currentPaneId="w1:p1"
+        onSelect={vi.fn()}
+      />,
+    );
+    const nav = screen.getByRole("navigation", { name: "Panes" });
+    const scroller = nav.querySelector<HTMLElement>(".overflow-x-auto")!;
+    for (const pill of screen.getAllByRole("button")) {
+      const cls = pill.className;
+      expect(cls).toMatch(/(?:^|\s)before:-inset-y-\[2px\](?=\s|$)/);
+      expect(cls).not.toMatch(/before:-inset-y-\[7px\]/);
+      expect(cls).not.toMatch(/before:-bottom-/);
+      expect(cls).not.toMatch(/before:z-/);
+    }
+    expect(scroller.className).not.toMatch(/(?:^|\s)(?:pb-|-mb-)/);
   });
 });

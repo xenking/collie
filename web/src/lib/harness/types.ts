@@ -15,6 +15,22 @@ export interface HarnessAdapter {
   /** Lossless transport pastes. Intermediate parts must be verified before continuing;
    * only the complete reply can authorise Enter. Other harnesses stay single-paste. */
   replyChunks?(text: string): string[];
+  /**
+   * Whether to type this reply part as ONE bracketed paste (`ESC[200~ … ESC[201~`) rather than as
+   * bare keystrokes. `pane.send_text` writes raw bytes (HERDR_API.md), so a long send reaches the
+   * harness as several PTY reads, and a harness that guesses pastes from read size can mis-split it.
+   * OPTIONAL: only for a harness that turns bracketed paste on, or the markers are typed as junk.
+   */
+  bracketedPaste?(text: string): boolean;
+  /**
+   * The minimum time in ms between the type call and the guarded Enter. The echo on screen proves
+   * the bytes are in the box, not that the TUI will act on a submit key yet; a harness that swallows
+   * an Enter sent right behind its own text declares a floor here, and the guarded send holds the
+   * submit until that long after the LAST type call (lib/reply-action.ts). A verify loop that
+   * already took longer pays nothing extra.
+   * OPTIONAL: adapters that need no settle omit it and send as before.
+   */
+  submitSettleMs?(): number;
   /** The exact Herdr snapshot `agent` string this adapter claims (its registry key). */
   agent: string;
   /** The adapter's OWN full block pipeline over the pane's styled lines — for Claude that is the
@@ -67,6 +83,31 @@ export interface HarnessAdapter {
    */
   cancelKey?: string;
   /**
+   * Positive evidence that one of THIS harness's modals is on screen, asked by the unread-dialog pass
+   * before it offers `cancelKey` (.adr/0053, addendum 2026-09-26). `composerReady` answering `false`
+   * says only that no input box is there, and that is also true of a plain shell: herdr reports the
+   * agent a moment before its first frame paints and a moment after it exits, and the card used to
+   * flash over the shell prompt in both windows.
+   *
+   * OPTIONAL. Absent keeps the four original conditions unchanged for that adapter. Declared, the
+   * card needs it to answer `true` as well; a throw counts as `false`. Read from the harness's own
+   * captures, and pinned by the card's allow-list test.
+   */
+  modalOnScreen?(lines: StyledLine[]): boolean;
+  /**
+   * Positive evidence that a full overlay box holds the keyboard — the /models-style overlay
+   * paints its own bordered box over the middle of the screen while the composer tail stays
+   * intact, so `composerReady` still answers true although typing would land in the overlay's
+   * filter, never the input box. Asked by the reply path (`lib/reply-action.ts`) before typing
+   * and when classifying a stalled send.
+   *
+   * OPTIONAL. Absent skips both checks for that adapter, which is the pre-existing behaviour. A
+   * throw propagates to the caller — the unread-dialog card treats it as `false`, the reply path
+   * lets the send reject, exactly like a throwing `composerReady`. Read from the harness's own
+   * captures; the suites pin the corpus.
+   */
+  overlayHoldsKeyboard?(lines: StyledLine[]): boolean;
+  /**
    * Literal on-screen text from the composer's prompt/draft tail — the region a DESTRUCTIVE write
    * aimed at that composer may be bound to. Null = no composer at the tail (the same screens
    * `composerReady` answers false about).
@@ -86,6 +127,16 @@ export interface HarnessAdapter {
    */
   composerPrompt?(lines: StyledLine[]): string | null;
   /**
+   * Whether the input on screen SUBMITS when it receives a raw newline. `pane.send_text` delivers a
+   * `\n` inside the text as a real keypress (HERDR_API.md), so on such a screen a multi-line message
+   * would be submitted at its first line break and the rest typed into whatever comes next.
+   *
+   * OPTIONAL; absence means "a newline inserts a line", which is the pre-existing assumption. The
+   * reply path asks it of every read that clears the text to go out, after `composerReady` said yes,
+   * and refuses a message that contains a newline when it answers true.
+   */
+  newlineSubmits?(lines: StyledLine[]): boolean;
+  /**
    * SUPPLEMENTAL evidence that `sent` reached the input box, for the case the reply guard's own
    * literal-substring match structurally cannot see: a harness that swallows what was typed and paints
    * a TOKEN of its own instead (Claude's `[Pasted text #N +M lines]`), so the box never holds our
@@ -95,8 +146,13 @@ export interface HarnessAdapter {
    * it can widen what counts as evidence, never narrow it. The contract is strict-or-false: return
    * true only when the token on screen is CONSISTENT with this exact send, because a `true` here fires
    * the submit key. An adapter that can't tell omits it and keeps today's stall.
+   *
+   * `before` is the draft the guard's last read saw before it typed the final part (`null` for an
+   * empty box), and is left out when no read happened: a forced send, a read that threw, or a caller
+   * other than the guard. It is for a token that does not identify its content, where a stale one
+   * and a fresh one look the same.
    */
-  draftCarriesSend?(sent: string, draft: string): boolean;
+  draftCarriesSend?(sent: string, draft: string, before?: string | null): boolean;
   /**
    * Whether the draft on the input line is the harness's OWN opaque token rather than the user's text
    * — the same placeholder as above, sitting stranded. The stranded-draft preview keeps showing it
@@ -107,4 +163,16 @@ export interface HarnessAdapter {
    * heuristic gets, and is the pre-existing behaviour.
    */
   draftIsOpaque?(draft: string): boolean;
+  /**
+   * Tidy one raw block's rows for display only, after every grammar has run: chrome the harness paints
+   * inside the transcript that is not content (Grok's dark scrollbar track and its right padding).
+   * The terminal mirror calls it through the registry, on the wrapped view with grammars on, so the
+   * shared component never imports a harness module.
+   *
+   * Display only. Never hand the result back to a grammar, a guard or the reply path: it may drop or
+   * collapse rows, which would break the raw screen coordinates the send's verification reads.
+   *
+   * OPTIONAL; absence means the rows are shown as they are.
+   */
+  prepareDisplay?(lines: StyledLine[]): StyledLine[];
 }

@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The whole prompt-select feature end to end: the presentational component, the shared race guard
 // (submitPromptOption), and the wired tap (component → injected handler → api). The api layer is
@@ -20,8 +20,10 @@ import { splitLines, type PromptModel } from "@/lib/blocks";
 import { buildBlocks } from "@/lib/harness";
 import { detectPromptSelect } from "@/lib/harness/claude/prompt-select";
 import { submitPromptFeedback, submitPromptOption } from "@/lib/prompt-action";
+import { act } from "@testing-library/react";
+import { markLive, resetLiveness } from "@/lib/liveness";
 import { clearStatus, setStatus, useStatus } from "@/lib/status";
-import { keyBadgeFallback, PromptSelectBlock, type PromptBlockAction } from "./prompt-select-block";
+import { isHeaderRow, keyBadgeFallback, PromptSelectBlock, type PromptBlockAction } from "./prompt-select-block";
 
 const mockFetchPane = vi.mocked(fetchPane);
 const mockSendKeys = vi.mocked(sendKeys);
@@ -97,6 +99,124 @@ describe("PromptSelectBlock — presentation", () => {
 
 // ADR 0056, driven off a real capture through the real pipeline: a lifted card carries the way
 // back to the region it replaced.
+// The card carries what the dialog asks about and the question itself. It used to show the family
+// caption and the buttons only, trusting the raw scrollback above it for the rest; docked above the
+// belt (ADR 0059) and in the Chat view that scrollback is not on screen, so a subagent's permission
+// read "PERMISSION REQUIRED / 1 Yes / 2 No" and nothing else (Claude Code 2.1.291, 2026-10-06).
+describe("PromptSelectBlock — the subject and the question are on the card", () => {
+  it("shows the question as text on a card with no subject, and keeps it as the group's name", () => {
+    const { container } = render(<PromptSelectBlock prompt={selectModel} onAction={vi.fn()} />);
+    const question = container.querySelector('[data-slot="prompt-question"]');
+    expect(question?.textContent).toBe("Which color theme should the dashboard use?");
+    expect(within(container).getByRole("group", { name: "Which color theme should the dashboard use?" })).toBeInTheDocument();
+    expect(container.querySelector('[data-slot="prompt-subject"]')).toBeNull();
+  });
+
+  it("2.1.291 subagent Bash permission: header as title, command and warning, then the question", () => {
+    const model = fixtureModel("claude--v2291-permission-bash-subagent.txt");
+    const { container } = render(<PromptSelectBlock prompt={model} onAction={vi.fn()} />);
+    const card = within(container);
+
+    const title = container.querySelector('[data-slot="prompt-subject-title"]')!;
+    expect(title.textContent).toBe("Bash command · from the general-purpose agent");
+    // A title in the card's text face, not a mono terminal row.
+    expect(title.closest("pre")).toBeNull();
+
+    const subject = container.querySelector('[data-slot="prompt-subject"] pre')!;
+    expect(subject.textContent).toContain("Restore committed pane route in copy and build");
+    expect(subject.textContent).toContain("set -e; R=/var/home/devel/apps/sample-forge;");
+    expect(subject.textContent).toContain(
+      "Dangerous rm operation on statically-unresolvable target: /var/home/devel/projects/sample-workspace/*",
+    );
+    expect(subject.textContent).not.toMatch(/[╌│]/);
+    // Wraps at phone width instead of panning, and scrolls on its own past its cap, so a long diff
+    // never pushes the buttons out of the dock.
+    expect(subject.className).toContain("whitespace-pre-wrap");
+    expect(subject.className).toContain("max-h-[22dvh]");
+    expect(subject.className).toContain("overflow-y-auto");
+
+    expect(container.querySelector('[data-slot="prompt-question"]')!.textContent).toBe("Do you want to proceed?");
+    expect(card.getAllByRole("button").map((b) => b.textContent)).toEqual(["1Yes", "2No"]);
+
+    // Reading order: caption, title, subject, question, options.
+    const order = [title, subject, container.querySelector('[data-slot="prompt-question"]')!, card.getAllByRole("button")[0]!];
+    for (let i = 1; i < order.length; i++) {
+      expect(order[i - 1]!.compareDocumentPosition(order[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+  });
+
+  // jsdom lays nothing out, so the measurements the fade reads (`scrollHeight`, `clientHeight`,
+  // `scrollTop` on the scrolling <pre>) are stubbed, and this pins the structure only: whether the
+  // fade element exists for each measured state. How it looks is for a real browser.
+  describe("the fade below a subject that continues", () => {
+    const measure = (heights: { scroll: number; client: number }) => {
+      vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(heights.scroll);
+      vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(heights.client);
+    };
+    const renderSubject = () => {
+      const model = fixtureModel("claude--v2291-permission-bash-subagent.txt");
+      const { container } = render(<PromptSelectBlock prompt={model} onAction={vi.fn()} />);
+      return { container, pre: container.querySelector<HTMLElement>('[data-slot="prompt-subject"] pre')! };
+    };
+    const fade = (container: HTMLElement) => container.querySelector('[data-slot="prompt-subject-more"]');
+
+    afterEach(() => vi.restoreAllMocks());
+
+    it("shows while the box overflows and is not scrolled to the bottom", () => {
+      measure({ scroll: 500, client: 150 });
+      const { container } = renderSubject();
+      const more = fade(container)!;
+      expect(more).not.toBeNull();
+      // Inside the subject box, drawn over it, and out of the way of taps and of the accessibility tree.
+      expect(more.parentElement).toBe(container.querySelector('[data-slot="prompt-subject"]'));
+      expect(more.getAttribute("aria-hidden")).toBe("true");
+      expect(more.className).toContain("pointer-events-none");
+    });
+
+    it("goes once the box is scrolled to the bottom, and returns when it is scrolled back up", () => {
+      measure({ scroll: 500, client: 150 });
+      const { container, pre } = renderSubject();
+      expect(fade(container)).not.toBeNull();
+      Object.defineProperty(pre, "scrollTop", { configurable: true, value: 350 });
+      fireEvent.scroll(pre);
+      expect(fade(container)).toBeNull();
+      Object.defineProperty(pre, "scrollTop", { configurable: true, value: 100 });
+      fireEvent.scroll(pre);
+      expect(fade(container)).not.toBeNull();
+    });
+
+    it("is absent when the content fits the box", () => {
+      measure({ scroll: 150, client: 150 });
+      const { container } = renderSubject();
+      expect(container.querySelector('[data-slot="prompt-subject"]')).not.toBeNull();
+      expect(fade(container)).toBeNull();
+    });
+  });
+
+  it("an Edit permission shows the file and its diff under the title", () => {
+    const model = fixtureModel("claude--permission-edit.txt");
+    const { container } = render(<PromptSelectBlock prompt={model} onAction={vi.fn()} />);
+    expect(container.querySelector('[data-slot="prompt-subject-title"]')!.textContent).toBe("Create file");
+    expect(container.querySelector('[data-slot="prompt-subject"] pre')!.textContent).toBe("hello.txt\n 1 hello");
+    expect(container.querySelector('[data-slot="prompt-question"]')!.textContent).toBe("Do you want to create hello.txt?");
+  });
+
+  it("does not repeat a question the caption already says", () => {
+    const { container } = render(
+      <PromptSelectBlock prompt={{ ...selectModel, question: "Resume session", caption: "Resume session" }} onAction={vi.fn()} />,
+    );
+    expect(container.querySelector('[data-slot="prompt-question"]')).toBeNull();
+    expect(within(container).getAllByText("Resume session")).toHaveLength(1);
+  });
+
+  it("isHeaderRow: a row whose first painted run is bold", () => {
+    const seg = (text: string, bold = false) => ({ text, bold, style: {}, muted: false });
+    expect(isHeaderRow({ segments: [seg(" "), seg("Bash command", true), seg(" · from x")] })).toBe(true);
+    expect(isHeaderRow({ segments: [seg("touch a.txt")] })).toBe(false);
+    expect(isHeaderRow(undefined)).toBe(false);
+  });
+});
+
 describe("PromptSelectBlock — the way back to the terminal (ADR 0056)", () => {
   it("shows the Terminal control, and puts the card down to the raw rows on a tap", async () => {
     const user = userEvent.setup();
@@ -648,5 +768,61 @@ describe("PromptSelectBlock — Grok's z row is not Claude's plan-feedback compo
     expect(screen.getByText(/free-text row has the keyboard/)).toBeInTheDocument();
     expect(screen.queryByText(/feedback box has the keyboard/)).toBeNull();
     for (const button of screen.getAllByRole("button")) expect(button).toBeDisabled();
+  });
+});
+
+// M46 spec 11: a card drawn from cached state is readable and cannot be answered. With a `paneId`
+// the card enables only while the bridge has answered a read for that pane lately; a parent that drew
+// the screen from the cache says `stale`. Nothing is queued: a tap on a disabled option sends nothing.
+describe("PromptSelectBlock, no action from cached state (M46 spec 11)", () => {
+  beforeEach(() => resetLiveness());
+
+  it("shows the question and options, disables them, and says to reconnect when the pane is not live", async () => {
+    const onAction = vi.fn();
+    const user = userEvent.setup();
+    render(<PromptSelectBlock prompt={selectModel} paneId="w1:p1" onAction={onAction} />);
+
+    expect(screen.getByText("Which color theme should the dashboard use?")).toBeInTheDocument();
+    expect(screen.getByText("Reconnect to answer.")).toBeInTheDocument();
+    const red = screen.getByRole("button", { name: /Red/ });
+    const green = screen.getByRole("button", { name: /Green/ });
+    expect(red).toBeDisabled();
+    expect(green).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Reconnect to answer.");
+
+    await user.click(red);
+    await user.click(green);
+    expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it("enables the options and drops the note once a live read lands", async () => {
+    const onAction = vi.fn();
+    const user = userEvent.setup();
+    render(<PromptSelectBlock prompt={selectModel} paneId="w1:p1" onAction={onAction} />);
+    expect(screen.getByRole("button", { name: /Red/ })).toBeDisabled();
+
+    act(() => markLive("w1:p1"));
+
+    expect(screen.queryByText("Reconnect to answer.")).toBeNull();
+    expect(screen.getByRole("button", { name: /Red/ })).toBeEnabled();
+    expect(onAction).not.toHaveBeenCalled(); // reconnecting answers nothing by itself
+    await user.click(screen.getByRole("button", { name: /Green/ }));
+    expect(onAction).toHaveBeenCalledWith({ kind: "option", option: selectModel.options[1] });
+  });
+
+  it("stays locked while the parent says the screen is stale, even for a live pane", async () => {
+    markLive("w1:p1");
+    const onAction = vi.fn();
+    const user = userEvent.setup();
+    render(<PromptSelectBlock prompt={selectModel} paneId="w1:p1" stale onAction={onAction} />);
+    expect(screen.getByText("Reconnect to answer.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Red/ }));
+    expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it("asks nothing of liveness when no paneId is given (a presentational card)", () => {
+    render(<PromptSelectBlock prompt={selectModel} onAction={vi.fn()} />);
+    expect(screen.queryByText("Reconnect to answer.")).toBeNull();
+    expect(screen.getByRole("button", { name: /Red/ })).toBeEnabled();
   });
 });

@@ -23,8 +23,10 @@ Individual devices can also be authorized without a proxy via
 ## Variant B — identity-aware proxy + per-device authorisation
 
 Collie reads an opaque device ID from `COLLIE_DEVICE_HEADER` and checks `COLLIE_DEVICE_ALLOWLIST`.
-Allowlisted IDs receive write access; missing or unlisted IDs receive read-only access (reads,
-snapshots, session lists remain open; terminal input, uploads, and pane actions are blocked).
+Allowlisted IDs receive write access; missing or unlisted IDs receive read-only access (terminal
+input, uploads, and pane actions are blocked). Pairing is a second gate and always on: every device
+also needs a [pairing token](security.md#pair-a-device--the-write-credential) for every `/api` call,
+reads included.
 
 Collie configuration (`.env`):
 
@@ -63,22 +65,40 @@ location / {
 }
 ```
 
-Verify header injection and override from an external device:
+Verify header injection and override from an external device. Every `/api` call except
+`/api/health` and `/api/pair` needs a pairing token, so pair a terminal first. On the host, run
+`collie pair`. It prints an 8-character code. Claim the code from the device you test with. The
+`Origin` header must match the public URL. The answer holds the token. Keep it in a shell variable
+and never paste it into a file:
 
 ```console
-$ curl -s https://collie.example.com/api/snapshot | jq -c .device
-{"enforced":true,"device":"my-laptop","authorized":true}
-
-$ curl -s -H 'X-Device-Id: my-phone' https://collie.example.com/api/snapshot | jq -c .device
-{"enforced":true,"device":"my-laptop","authorized":true}
+$ collie pair                                   # on the host; note the code it prints
+$ TOKEN=$(curl -s -X POST https://collie.example.com/api/pair \
+    -H 'Content-Type: application/json' -H 'Origin: https://collie.example.com' \
+    -d '{"code":"ABCD1234","label":"header-check"}' | jq -r .token)
 ```
 
-If the second check returns `"device":"my-phone"`, the proxy is appending rather than overriding.
+Then run the header check with the token:
+
+```console
+$ curl -s -H "Authorization: Bearer $TOKEN" https://collie.example.com/api/snapshot | jq -c .device
+{"enforced":true,"device":"header-check","authorized":true}
+
+$ curl -s -H "Authorization: Bearer $TOKEN" -H 'X-Device-Id: not-listed' https://collie.example.com/api/snapshot | jq -c .device
+{"enforced":true,"device":"header-check","authorized":true}
+```
+
+With a token, `device` names the paired label (`header-check`), not the header value. No field
+returns the raw header value any more, so read `authorized`: it is true only when the header the
+bridge saw is on `COLLIE_DEVICE_ALLOWLIST` and the token is valid. If the second check returns
+`"authorized":false`, the proxy is appending the client's header instead of overriding it. When
+you finish, remove the test device with `collie devices revoke header-check`.
 
 Operational notes:
-- Direct loopback access (`http://127.0.0.1:$COLLIE_PORT`) sends no header and is read-only.
-- To execute commands locally via curl, pass the header explicitly to loopback:
-  `curl -H 'X-Device-Id: my-laptop' http://127.0.0.1:$COLLIE_PORT/api/...`
+- Direct loopback access (`http://127.0.0.1:$COLLIE_PORT`) sends no header and is read-only, and
+  it still needs a pairing token.
+- To execute commands locally via curl, pass the token and the header explicitly to loopback:
+  `curl -H "Authorization: Bearer $TOKEN" -H 'X-Device-Id: my-laptop' http://127.0.0.1:$COLLIE_PORT/api/...`
 - Revoke access by removing the ID from `COLLIE_DEVICE_ALLOWLIST` and restarting (Standalone:
   `bin/collie restart`; Herdr: `herdr plugin action invoke restart --plugin herdr.collie`).
 - Do not enable `COLLIE_DEVICE_HEADER` on plain `tailscale serve`; it does not override headers.
@@ -136,6 +156,9 @@ serve as the access gate.
   Service workers bypass caching for `/auth/*`.
 - Forward-auth redirects on API requests are treated as 401s to expose the login UI. Authentik
   setups should route `/auth/` to `/outpost.goauthentik.io/start`.
+- Without a proxy on `/auth/`, Collie answers `404` there. The page now tells an unpaired device
+  to run `collie pair` and enter the code in Settings. It never redirects, because the path
+  belongs to your proxy.
 
 ```caddyfile
 collie.example.com {
@@ -149,11 +172,13 @@ collie.example.com {
 }
 ```
 
-Verify the endpoint and caching rules:
+Verify the endpoint and caching rules. `$TOKEN` is a pairing token, claimed as in
+[Variant B](#variant-b--identity-aware-proxy--per-device-authorisation); `authorized` is true when your
+header is allowlisted:
 
 ```console
-$ curl -s https://collie.example.com/api/snapshot | jq -c .device
-{"enforced":true,"device":"my-phone","authorized":true}
+$ curl -s -H "Authorization: Bearer $TOKEN" https://collie.example.com/api/snapshot | jq -c .device
+{"enforced":true,"device":"header-check","authorized":true}
 
 $ curl -sI https://collie.example.com/sw.js | grep -i '^cache-control'
 cache-control: no-cache
@@ -217,21 +242,22 @@ COLLIE_ALLOWED_ORIGINS=https://collie.example.com
 
 Verification:
 
-From a non-ingress tailnet peer:
+From a non-ingress tailnet peer. `$TOKEN` is a pairing token, claimed as in
+[Variant B](#variant-b--identity-aware-proxy--per-device-authorisation):
 
 ```console
-$ curl -s https://collie.example.com/api/snapshot | jq -c .device
-{"enforced":true,"device":"my-phone","authorized":true}
+$ curl -s -H "Authorization: Bearer $TOKEN" https://collie.example.com/api/snapshot | jq -c .device
+{"enforced":true,"device":"header-check","authorized":true}
 
 $ curl -s --max-time 10 -H 'X-Tailnet-Device: my-phone' http://host.your-tailnet.ts.net:8787/api/snapshot
 curl: (28) Connection timed out
 ```
 
-On the agent host:
+On the agent host, a request sends no header, so `authorized` is false even with a valid token:
 
 ```console
-$ curl -s http://127.0.0.1:8787/api/snapshot | jq -c .device
-{"enforced":true,"device":null,"authorized":false}
+$ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/snapshot | jq -c .device
+{"enforced":true,"device":"header-check","authorized":false}
 ```
 
 ---
@@ -352,6 +378,47 @@ A tunnel made in the Zero Trust dashboard works too: set its public hostname's s
 
 > **Warning.** Without step 4, anyone who finds the hostname gets a shell on your machine.
 > Cloudflare Access is the door's lock; pairing then decides which device may type.
+
+5. Make Collie check the lock. In the Access application, copy the **Application Audience (AUD)
+   tag**. Add it and your team name to `.env`, then restart.
+
+   ```bash
+   COLLIE_ACCESS_TEAM=myteam          # from myteam.cloudflareaccess.com
+   COLLIE_ACCESS_AUD=<the AUD tag>
+   ```
+
+   Every request through the tunnel must now carry a token that Cloudflare signed for this
+   application. If the Access app is deleted, gets a bypass rule, or has not reached every edge yet,
+   Collie refuses the request instead of showing the panes. The audience check matters: every Access
+   app in a team signs with the same key, so a token for another app is refused too.
+
+   Collie fetches the team's public keys at start and every hour. Until the first fetch works,
+   every remote request gets `503`. If a later fetch fails, Collie keeps the keys it has. Set both
+   lines or neither: one alone refuses every remote request. Either way the bridge log names the
+   problem in one line, so check the log after the restart.
+
+   Only a process on this machine skips the token: a request to `127.0.0.1` or `localhost` that
+   carries no `Cf-*` and no forwarding header (`X-Forwarded-For`, `X-Forwarded-Host`,
+   `X-Forwarded-Proto`, `Forwarded`, `X-Real-Ip`). It still needs pairing to type. `/api/health`
+   and the crew links do not need a token either. `collie doctor` is such a local caller, so a green
+   doctor does not show that the keys loaded or that a token verifies. Open the hostname from the
+   phone to check that.
+   [ADR 0081](../.adr/0081-a-front-doors-signed-identity-is-verified-cloudflare-access-is-the-first-preset.md) has the reasons.
+
+   Keep these rules with the gate on:
+
+   - **One front door at a time.** With Access on, a request through `tailscale serve`, Caddy or
+     Traefik needs a token too, because they add a forwarding header by default.
+     A machine that serves both a tunnel and a tailnet name (`tailscale serve`) loses the tailnet
+     door for browsers: those requests carry no Access token and get `401`.
+   - **No second proxy between `cloudflared` and Collie that makes requests look local.** One that
+     rewrites `Host` to `127.0.0.1` or `localhost` and removes the `Cf-*` and forwarding headers
+     does it on purpose. A bare nginx `proxy_pass http://127.0.0.1:8787` does it by default: it
+     sends `Host: 127.0.0.1:8787` and adds no forwarding header unless you configure one. Those
+     requests skip the token. Point `cloudflared` at Collie directly.
+   - **Do not add Access bypass rules for Collie paths**, not for the manifest, the service worker
+     or the icons. Access adds the token to every request it lets through. A bypassed path carries
+     no token, so Collie answers `401`.
 
 Access redirects to `/cdn-cgi/access/` to log in. Keep `sw.js` and `index.html` uncached, as
 [Routing `/auth/` and caching](#routing-auth-and-caching) says.
@@ -571,7 +638,7 @@ It does not fall back to another instance's configuration.
 `collie pair` writes a pairing code to that instance's state directory. The QR it prints encodes
 that instance's own URL, since each instance has its own state directory and, via
 `COLLIE_PUBLIC_URL` or its own port, its own front door. Open that instance's specific URL on the
-phone and enter the code under Settings → Paired devices. A code minted for one instance cannot
+phone and enter the code under Settings → System → Paired devices. A code minted for one instance cannot
 pair a device to any other instance
 ([Pair a device](security.md#pair-a-device--the-write-credential)).
 

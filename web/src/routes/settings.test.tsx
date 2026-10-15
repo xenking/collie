@@ -1,20 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
 
-import { type DevicesData } from "@/lib/loaders";
 import { withHeaderHost } from "@/test/header-host";
 import { SettingsRoute } from "./settings";
-import { usePushControl } from "@/hooks/use-push";
-
-vi.mock("@/hooks/use-push", () => ({ usePushControl: vi.fn() }));
-
-beforeEach(() => {
-  vi.mocked(usePushControl).mockReturnValue({
-    state: { availability: "ready", subscribed: false, userDisabled: true },
-    busy: false,
-    setEnabled: vi.fn().mockResolvedValue({ ok: true }),
-  });
-});
 
 // Settings' HEADER, and only its header.
 //
@@ -25,12 +14,15 @@ beforeEach(() => {
 // that — a false comment in the code is worse than no comment, so the claim is asserted rather than
 // written down.
 
-const NO_DEVICES: DevicesData = { enforced: false, current: null, devices: [], error: false };
-
+// The index carries NO loader now — the paired-device registry belongs to the one page that
+// renders it (/settings/system). The section routes are stubs here: this file tests the index, and
+// what each section mounts is that section's own business.
 function renderSettings() {
   const router = createMemoryRouter(
     [
-      { path: "/settings", loader: () => NO_DEVICES, element: withHeaderHost(<SettingsRoute />) },
+      { path: "/settings", element: withHeaderHost(<SettingsRoute />) },
+      { path: "/settings/:section", element: <div data-testid="section" /> },
+      { path: "/machines", element: <div data-testid="machines" /> },
       { path: "/", element: <div data-testid="home" /> },
     ],
     { initialEntries: ["/settings"] },
@@ -73,51 +65,90 @@ describe("SettingsRoute — the update surfaces", () => {
     expect(screen.queryByRole("button", { name: /^Copy command/ })).toBeNull();
   });
 
-  it("holds exactly one Updates row, and neither the card nor the check control", async () => {
+  it("holds no update surface at all: they are one row on the System page now", async () => {
     renderSettings();
-    const rows = await screen.findAllByRole("button", { name: /Updates/ });
-    expect(rows).toHaveLength(1);
-    // Both of those live on /settings/updates now.
+    await screen.findByRole("button", { name: /Appearance/ });
+    // The row, the card and the check control all sit behind System. The word "Updates" IS still
+    // on this page — it is the first word of the System row's blurb — so the assertion is about
+    // the update ROW's own title, not about the string.
+    expect(screen.queryByText("Updates", { selector: ".font-medium" })).toBeNull();
     expect(screen.queryByText("Update Collie")).toBeNull();
     expect(screen.queryByRole("button", { name: "Check for updates" })).toBeNull();
   });
 });
 
-describe("SettingsRoute — recovering push setup", () => {
-  it("shows a thrown setup error and lets the user retry", async () => {
-    const setEnabled = vi.fn()
-      .mockRejectedValueOnce(new Error("Registration failed - push service error"))
-      .mockResolvedValueOnce({ ok: true });
-    vi.mocked(usePushControl).mockReturnValue({
-      state: { availability: "ready", subscribed: false, userDisabled: true },
-      busy: false, setEnabled,
-    });
+// ── THE INDEX ───────────────────────────────────────────────────────────────────────────────────
+//
+// Settings was one column of seventeen cards. The page is five rows now, and these cases pin the
+// two things that makes true: every section is reachable, and no setting is still rendered here.
+describe("SettingsRoute — the index", () => {
+  it("offers the five sections, in the order of how standing a choice is", async () => {
     renderSettings();
-    const toggle = await screen.findByRole("switch", { name: "Push notifications" });
-    fireEvent.click(toggle);
-    expect(await screen.findByRole("alert")).toHaveTextContent("push service error");
-    expect(toggle).toBeEnabled();
-    fireEvent.click(toggle);
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
-    expect(setEnabled).toHaveBeenCalledTimes(2);
+    await screen.findByRole("button", { name: /Appearance/ });
+    const rows = screen
+      .getAllByRole("button")
+      .map((b) => b.textContent ?? "")
+      .filter((text) => /Appearance|Device|Voice|Alerts|System/.test(text));
+    expect(rows).toHaveLength(5);
+    expect(rows[0]).toContain("Appearance");
+    expect(rows[1]).toContain("Device");
+    // Voice sits between Device and Alerts, and is always offered: a host with no speech gets a page that says so.
+    expect(rows[2]).toContain("Voice");
+    expect(rows[2]).toContain("Where your speech becomes text, and hands-free.");
+    expect(rows[3]).toContain("Alerts");
+    expect(rows[4]).toContain("System");
   });
 
-  it("keeps the toggle retryable when configuration could not be checked", async () => {
-    vi.mocked(usePushControl).mockReturnValue({
-      state: { availability: "unavailable", subscribed: false, userDisabled: true },
-      busy: false, setEnabled: vi.fn().mockResolvedValue({ ok: true }),
-    });
-    renderSettings();
-    expect(await screen.findByRole("switch", { name: "Push notifications" })).toBeEnabled();
-    expect(screen.getByText(/Could not check notification setup/)).toBeInTheDocument();
+  it("opens Voice at /settings/voice", async () => {
+    const router = renderSettings();
+    await userEvent.click(await screen.findByRole("button", { name: /Voice/ }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/settings/voice"));
   });
 
-  it("keeps a denied browser permission from being treated as a transient failure", async () => {
-    vi.mocked(usePushControl).mockReturnValue({
-      state: { availability: "denied", subscribed: false, userDisabled: true },
-      busy: false, setEnabled: vi.fn().mockResolvedValue({ ok: true }),
-    });
+  it("no longer mentions voice in the Device row's blurb", async () => {
     renderSettings();
-    expect(await screen.findByRole("switch", { name: "Push notifications" })).toBeDisabled();
+    const device = await screen.findByRole("button", { name: /Device/ });
+    expect(device.textContent).not.toMatch(/voice/i);
+  });
+
+  it("opens a section as a push, so back returns here rather than home", async () => {
+    const router = renderSettings();
+    await userEvent.click(await screen.findByRole("button", { name: /Appearance/ }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/settings/appearance"));
+    expect(screen.getByTestId("section")).toBeInTheDocument();
+  });
+
+  // The fifth row, and the only one that can be absent: it renders while `lib/experiments.ts` holds
+  // something, because a row that opens an empty page is noise. Chat was the last thing filed
+  // there and left in 1.17.0 (ADR 0082), so the index shows four rows.
+  it("shows no Experiments row while nothing is filed under it", async () => {
+    renderSettings();
+    await screen.findByRole("button", { name: /Appearance/ });
+    expect(screen.queryByRole("button", { name: /Experiments/ })).toBeNull();
+  });
+
+  // Machines is a page of its own and not a section, so its row is the one that opens `/machines`. It is
+  // always there, solo included: a solo collie is one machine with a load worth watching.
+  it("offers Machines on a solo install, after System, and opens its own page", async () => {
+    const router = renderSettings();
+    const row = await screen.findByRole("button", { name: /Machines/ });
+    const all = screen.getAllByRole("button").map((b) => b.textContent ?? "");
+    const at = (word: string) => all.findIndex((text) => text.includes(word));
+    expect(at("System")).toBeLessThan(at("Machines"));
+    // No Experiments row exists while the list is empty (ADR 0082), so Machines closes the index. When
+    // one returns it sits after Machines, which is where its section is placed.
+    expect(at("Experiments")).toBe(-1);
+    await userEvent.click(row);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/machines"));
+    expect(router.state.location.state).toMatchObject({ from: "/settings" });
+  });
+
+  it("renders no setting of its own: every switch moved behind a row", async () => {
+    // The regression this guards is a card being added back to the index out of habit. The index
+    // has exactly one interactive element per section and nothing else with a switch role.
+    renderSettings();
+    await screen.findByRole("button", { name: /Appearance/ });
+    expect(screen.queryAllByRole("switch")).toHaveLength(0);
+    expect(screen.queryByRole("combobox")).toBeNull();
   });
 });

@@ -17,6 +17,8 @@ import { SpaceOverview } from "./space-overview";
 import { SpaceStrip } from "./space-strip";
 import { TabActionsSheet } from "./tab-actions-sheet";
 import { TabStrip } from "./tab-strip";
+import { STRIP_TAP_TARGET_SQUARE, TAB_ROW_SQUARE_TAP_TARGET } from "./ui/labelled-strip";
+import { cn } from "@/lib/utils";
 
 // EVERY CAPABILITY-GATED CONTROL, IN BOTH STATES (M10/06). One file rather than a case bolted onto
 // each component's own suite, because the thing under test is a RULE that spans them — hide what is
@@ -49,6 +51,21 @@ function declares(
   const mux: MuxConfig = { name: "reference", capabilities, unsupportedKeys, notes };
   server.use(http.get("/api/config", () => HttpResponse.json({ push: false, vapidPublicKey: "", mux })));
 }
+
+/**
+ * The dashed "+" exactly as a strip drew it by hand before `ui/add-button.tsx` held it: the same
+ * `cn(reach, face)` call, so tailwind-merge drops the same overridden inset it dropped then. The
+ * class SET on the primitive's button must equal it, token for token, nothing added or lost.
+ */
+function handRolledPlus(reach: string, size: "size-7" | "size-8"): string[] {
+  return cn(
+    reach,
+    `flex ${size} shrink-0 items-center justify-center rounded-full border border-dashed border-border text-muted-foreground transition-colors hover:bg-accent active:scale-95 disabled:opacity-100`,
+  )
+    .split(/\s+/u)
+    .toSorted();
+}
+const classSet = (el: HTMLElement) => [...el.classList].toSorted();
 
 /** Serve a bridge that publishes no mux block at all — the older-bridge case. */
 function saysNothing(): void {
@@ -133,6 +150,21 @@ describe("New space — createSpace", () => {
     );
     expect(await screen.findByRole("button", { name: "New space" })).toBeInTheDocument();
   });
+
+  it("the strip's '+' is the shared dashed one, at its old 32px and its old reach", async () => {
+    declares({ createSpace: true });
+    render(
+      <SpaceStrip
+        workspaces={[workspace]}
+        agents={[]}
+        selected={null}
+        onSelect={vi.fn()}
+        onNewSpace={vi.fn()}
+      />,
+    );
+    const plus = await screen.findByRole("button", { name: "New space" });
+    expect(classSet(plus)).toEqual(handRolledPlus(STRIP_TAP_TARGET_SQUARE, "size-8"));
+  });
 });
 
 // ── How many spaces the multiplexer can hold → `spaces` ──────────────────────
@@ -215,6 +247,13 @@ describe("New tab — createTab", () => {
     tabStrip();
     await waitFor(() => expect(screen.queryByRole("button", { name: "New tab" })).toBeNull());
     expect(screen.queryByText("no tabs here.")).toBeNull();
+  });
+
+  it("is the shared dashed '+', at its old 28px and its old tab-row reach", async () => {
+    declares({ createTab: true });
+    tabStrip();
+    const plus = await screen.findByRole("button", { name: "New tab" });
+    expect(classSet(plus)).toEqual(handRolledPlus(TAB_ROW_SQUARE_TAP_TARGET, "size-7"));
   });
 });
 
@@ -431,5 +470,45 @@ describe("An empty herd — agentDetection", () => {
     declares({ agentDetection: false }, { agentDetection: "does not know what an agent is." });
     render(<AgentList agents={[]} bridge="disconnected" onOpen={vi.fn()} />);
     await waitFor(() => expect(screen.queryByText(/does not know what an agent is/i)).toBeNull());
+  });
+});
+
+// ── A pane with no screen → paneGrid (ADR 0099) ──────────────────────────────
+
+describe("A pane with no screen, paneGrid", () => {
+  const ask = {
+    id: "ask-1",
+    kind: "permission",
+    toolCallId: "c1",
+    revision: 1,
+    title: "Run the tests?",
+    itemId: "nowhere",
+    options: [{ id: "yes", label: "Run them", effect: "allow" as const }],
+  };
+
+  it("is Chat only: the durable composer replaces the terminal one, with no keys and no terminal row", async () => {
+    declares({ paneGrid: false });
+    chat({ turnId: "turn-1", status: "idle" });
+    expect(await screen.findByPlaceholderText("Message this conversation")).toBeEnabled();
+    expect(screen.queryByPlaceholderText(/type a reply/i)).toBeNull();
+    await openPaneMenu();
+    expect(screen.queryByRole("button", { name: /terminal/i })).toBeNull();
+    expect(screen.queryByRole("switch", { name: /terminal/i })).toBeNull();
+  });
+
+  it("draws an ask from the pane's data as a card", async () => {
+    declares({ paneGrid: false });
+    chat({ turnId: "turn-1", asks: [ask] });
+    expect(await screen.findByText("Run the tests?")).toBeInTheDocument();
+    // Not asserted enabled: this harness never stamps liveness, so the pane reads as still connecting
+    // and the buttons are off by design. The enabled card is pinned in ask-card.test.tsx.
+    expect(screen.getByRole("button", { name: /Run them/ })).toBeInTheDocument();
+  });
+
+  it("stays on the terminal composer, with the choice and no cards, where a screen exists", async () => {
+    declares({ paneGrid: true });
+    chat({ asks: [ask] });
+    expect(await screen.findByPlaceholderText(/type a reply/i)).toBeEnabled();
+    expect(screen.queryByPlaceholderText("Message this conversation")).toBeNull();
   });
 });

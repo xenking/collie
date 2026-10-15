@@ -170,12 +170,19 @@ Product details that shaped the loop:
   credential in the state dir and the outbound path carrying microphone audio — a local engine keeps
   that egress on loopback, and hands-free sends go through the same guarded reply path a typed reply
   takes ([ADR 0029](./.adr/0029-speech-to-text-is-a-provider-seam-collie-owns.md)).
+  A fourth provider, `whistle`, is Collie's own code: a vendored WebAssembly engine and a 16.9 MB model
+  that the host fetches once on a tap or `collie stt whistle`. It runs in two places, chosen per
+  device. The **Host** engine runs it in a short-lived child of Collie's binary and takes a 16 kHz WAV
+  upload. The **This phone** engine runs it in a worker with its own CSP, with no upload at all
+  ([ADR 0096](./.adr/0096-speech-can-stay-on-the-phone.md)).
 - **Quick replies are heuristics, not guarantees.** Different agents expect different input (a Y/n
   prompt vs a numbered menu vs an approval phrase), so there is always a **"send exactly what I
   type"** fallback.
-- **Opinionated triage.** The home screen leads with **"NEEDS YOU"** — blocked agents at top,
-  working/idle collapsed below. Simultaneous blocks batch into one summary notification, not three
-  races. The split rests on the `agentDetection` capability: a driver that cannot tell an agent from a
+- **Opinionated triage, without moving anything.** The home screen leads with one summary line that
+  counts what **needs you** and jumps to it; every pane stays where it sits, in the multiplexer's own
+  order, and urgency is a mark on the row, never a position
+  ([ADR 0063](./.adr/0063-a-pane-keeps-its-place-when-its-state-changes.md)). Simultaneous blocks
+  batch into one summary notification, not three races. The split rests on the `agentDetection` capability: a driver that cannot tell an agent from a
   shell says so, and the screen is panes rather than a triage it would have to invent.
 - **Close the trust loop.** A "Sent" state on the `POST`'s HTTP response, then the visible
   blocked→working transition. Without it, latency makes users double-tap.
@@ -282,7 +289,14 @@ graph TD
   `pane.agent_status_changed` subscription trigger an immediate debounced re-poll, while the interval
   relaxes to `COLLIE_POLL_IDLE_MS` (12 s default) whenever the stream is healthy and drops back to
   the fast `COLLIE_POLL_MS` when it isn't. **The snapshot poll stays the source of truth throughout —
-  a missed event costs one interval, never correctness.**
+  a missed event costs one interval, never correctness.** Some changes come with no event at all:
+  Herdr announces nothing when an agent reports its session (measured on 0.9.3). So two INTENTS
+  tighten the same interval to `COLLIE_POLL_MS` for `HOT_POLLS` (8) polls and then let it relax:
+  an input landed on a pane through `/reply` or `/keys` (on the member that owns the pane, and on a
+  lead that forwarded it, whose sweep rides this tick), and a pane that has just become an agent
+  with no session yet, whose hold also ends the moment its session is seen
+  (`bridge/state-engine.ts` § noteInput, § noteNewAgents). No second timer, and the hot spell
+  decays by counted polls, never by a deadline.
 - **Scrollback comes from the transcript, not the terminal.** An agent's TUI runs on the *alternate
   screen* (`ESC[?1049h`), so the emulator keeps no scrollback ring and a grid read can never return
   more than the visible viewport — the live mirror physically cannot scroll back past it. (Screen
@@ -315,7 +329,8 @@ graph TD
     path (`web/src/hooks/use-latest-reply.ts`), and switchable off in ⚙ View.
 - **The browser polls too.** `useRevalidator` → `/api/snapshot` on an adaptive interval. There is no
   WebSocket fan-out to the browser and no push of state; pulling is what makes the two recovery loops
-  below trivial.
+  below trivial. A snapshot poll that got no answer at all is retried on a short backoff (0.5, 1, 2,
+  4 s, never slower than the normal gap); a poll that got any answer, a 5xx included, keeps the gap.
 - **Two independent recovery loops, designed in from the start** (not retrofitted):
   - *bridge ↔ multiplexer*: the snapshot poll doubles as resync — a failed tick marks the herd
     disconnected (the UI's connection bar names the multiplexer that went away) and keeps retrying;
@@ -369,13 +384,13 @@ door (tailnet-only by default; one per **crew** — §2.1). These four are genui
   So a process running as a *different* user — an agent you deliberately put under
   `sudo -u agent-review` to contain it — cannot open your herdr socket but **can** open
   `127.0.0.1:$COLLIE_PORT` and drive any pane in the herd. Installing Collie removes that uid
-  boundary; if it is the containment you were relying on, the device gate below makes that port
-  **read-only** — the one write gate that doesn't rest on "local means trusted". Note its scope: it
-  gates writes and only writes, so that uid keeps reading snapshots, pane output and transcript
-  history. It bounds damage, not disclosure. Closing the read side is outside what the bridge does —
-  it needs the port not to be shared in the first place (its own network namespace, or a uid
-  owner-match filter such as nftables `meta skuid`); a plain port firewall rule won't stop a
-  same-host peer (raised in [#33](https://github.com/AltanS/collie/issues/33)).
+  boundary; if it is the containment you were relying on, pairing below is the gate that doesn't
+  rest on "local means trusted". Since ADR 0086 it gates reads as well as writes, so that uid reads
+  nothing but `/api/health` unless it holds a token. The token is then the boundary: a uid that can
+  read your browser profile can read the token too. Keeping the port unshared (its own network
+  namespace, or a uid owner-match filter such as nftables `meta skuid`) still closes even that; a
+  plain port firewall rule won't stop a same-host peer (raised in
+  [#33](https://github.com/AltanS/collie/issues/33)).
   **Named exception: the crew listener.** When crew federation is enabled, a peer's `/crew/v1/*`
   prefix shares the bridge's one listener and one bind — `COLLIE_HOST`, the operator's to set, with
   a loud warning on a wildcard bind — and admits a request only past two independent factors, pinned
@@ -395,12 +410,15 @@ door (tailnet-only by default; one per **crew** — §2.1). These four are genui
   read-only, so reaching the port is no longer sufficient to write. Device ids are names your proxy
   asserts, not secrets — treat them as guessable and keep the front door and its ACL as the real
   containment.
-  **Device pairing (`bridge/pairing.ts`) is the second, independent write factor**, and the one that
+  **Device pairing (`bridge/pairing.ts`) is the second, independent factor**, and the one that
   needs no proxy at all: `collie pair` mints a one-time code out of band (the operator's own
   terminal), the phone trades it at `POST /api/pair` for a 256-bit bearer token, and the bridge keeps
-  only its SHA-256. It is enforced exactly when the registry is non-empty, so an install that never
-  pairs anything is unchanged, and revocation (`collie devices revoke`) lands on the running service
-  without a restart because the registry is re-read per request. The two gates compose by AND —
+  only its SHA-256. It is always on, and reads need the pairing token as well as writes: every
+  `/api/*` route but `/api/health` and `/api/pair` answers `403 device not paired` without a valid
+  token, so an install that has paired nothing answers no device
+  ([ADR 0086](./.adr/0086-reads-need-the-pairing-token.md)). Revocation (`collie devices revoke`)
+  lands on the running service without a restart because the registry is re-read per request. The
+  header gate stays write-only (plus the Files view's `device-read`). The two gates compose by AND —
   neither weakens or replaces the other — and neither touches `/crew/v1/*`, whose two factors are its
   own. Where the header gate answers *is this device on the operator's list*, pairing answers *does
   this device hold a credential I issued*: a claim no proxy, DNS name or tailnet identity can forge.

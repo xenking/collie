@@ -212,6 +212,9 @@ collie update --rollback         # put the previous version back
 collie update --major            # cross one major, see below
 ```
 
+`collie update --help` prints the usage and starts nothing. Every `collie` command answers `-h` and
+`--help` the same way, before it does any work.
+
 On a Herdr-managed install the same verbs are Herdr actions:
 
 ```bash
@@ -319,6 +322,22 @@ Expect the newest tag.
 within about a minute, and it holds that reload for the length of an update run. If you are mid-task
 it shows a "tap to update" banner and waits for your tap.
 
+### On Windows
+
+**A source checkout never updates itself on Windows; a zip install does.** `collie update` and
+the phone's Update button say so in one sentence on a source checkout and change nothing. Moving to
+the zip install is a one-time manual step:
+
+```powershell
+collie uninstall
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+After that, `collie update` works from the terminal and from the phone. That chain was rehearsed
+on a Windows 11 VM against a local copy of the release files, and the move itself was not.
+Releases up to and including v1.15.0 also could not swap a running `collie.exe`. See
+[Collie on Windows](windows.md#update).
+
 ### If the version did not move
 
 `collie update` asks GitHub directly on every run, `git ls-remote` for a checkout, the GitHub tags
@@ -412,7 +431,7 @@ collie crew update --all
 ```
 
 That is the terminal path, for a peer the phone cannot level. From the phone, update the whole crew
-with one tap and one confirmation: open **Settings → Updates** on the lead and select
+with one tap and one confirmation: open **Settings → System → Updates** on the lead and select
 **Update crew to `<version>`**. The preflight above the button covers every member, not just the
 lead. If a check is red anywhere, the button is disabled and names the failing machine and the
 reason.
@@ -425,6 +444,11 @@ status by its first printed line, and a 1.7.0 member prints `crew   …` where a
 its own preflight, its own health gate and its own rollback. Peers move one at a time. The Updates
 page keeps a line per member: `waiting`, `checking`, `staging`, `restarting`, `verifying`, `updated`,
 `rolled back` or `unreachable`.
+
+A member updates itself at most once an hour. A member that updated within the hour, for example
+by hand, waits with `rate-limited, retries in about N min` under its line, and the run goes on once
+that time passes. If the lead's own update rolls back, the members are not touched, and their lines
+say so. A new update waits until the crew run has finished, 2 hours at most.
 
 **1.7.0 to 1.8.0.** Lead first again, for a second reason: 1.8.0 renames the wire paths, the two
 environment keys, the three state files and the journal prefix to crew. A 1.8.0 lead answers the old
@@ -496,13 +520,32 @@ The updater writes one record, `<state dir>/update.json` (by default
 state, the version the run came from, the version it was going to, the updater's pid, and on a
 failure a tail of the service log and the recovery command.
 
-An update the phone started does not print to your terminal at all. It runs under a transient
-systemd unit of its own, named `collie-api-update-<stamp>`, and `--collect` removes that unit as
-soon as it exits, so its transcript is only in the journal:
+An update the phone started does not print to your terminal at all. On Linux with a systemd user
+manager it runs under a transient unit of its own, named `collie-api-update-<stamp>`, and
+`--collect` removes that unit as soon as it exits, so its transcript is only in the journal:
 
 ```bash
 journalctl --user -u 'collie-api-update-*' --since '30 min ago'
 ```
+
+Everywhere else, macOS included, the updater's own output goes to a file in the state directory:
+
+```bash
+cat ~/.local/state/collie/update-runner.log
+```
+
+Each update the phone starts empties that file and keeps the run before it as
+`update-runner.log.1`. On the systemd tier the file holds only the one line `systemd-run` prints,
+and the journal above has the rest.
+
+A crew member can stay on the old version after a crew update. Its checkout then shows the new tag,
+but `/standby/health` or the footer still shows the old build. Check that no updater runs, with
+`systemctl --user list-units 'collie-api-update-*'`. If none runs, run `collie update` on that
+machine. It rebuilds a checkout whose build did not finish.
+
+A run that gives up before the switch, a new version that will not start on this machine for
+instance, changes nothing on disk. The phone that started it says that the update failed on that
+machine and gives the reason, and the same reason is the `reason` field of `update.json`.
 
 That is where to look when the phone reported success and something downstream did not happen — a
 warning that the run record could not be written, for instance, which is a lead that updated itself
@@ -594,6 +637,59 @@ To return to stable releases:
 herdr plugin install AltanS/collie --yes
 herdr plugin action invoke restart --plugin herdr.collie
 ```
+
+## Upgrading to 1.19.0
+
+Version 1.19.0 moves starting things to one page and lets each phone shape its own Keys and
+launchers. Nothing needs doing on upgrade day. What you will notice:
+
+- **The New sheet is a page.** **+ New** on the dashboard opens `/new`, with the machine, an Agent or
+  Command select, the folder and a **New worktree** switch. The new-space sheet, its space label and
+  its list of existing worktrees are gone. Open an existing worktree with `herdr worktree open` on the
+  machine ([Start an agent or a shell from the phone](claude-code-on-your-phone.md#start-an-agent-or-a-shell-from-the-phone)).
+- **A crew member must update to start agents by name.** The page lists a member that runs an older
+  Collie, with its choices disabled. Update the lead first, and the members follow
+  ([Starting something on a machine](crew.md#starting-something-on-a-machine)).
+- **Phones may add launchers.** With the default `[phone] adds = true`, a paired phone can add up to
+  20 rows to a machine, kept in `launchers-added.json`. Set `adds = false` in `launchers.toml` to turn
+  that off ([Launchers added from a phone](configure.md#launchers-added-from-a-phone)).
+- **The Keys pad is a board.** It starts as the pad you had, and each browser keeps its own
+  arrangement ([Your own key pad](configure.md#your-own-key-pad)). Presets in `keys.toml` are
+  unchanged.
+- **A bare folder name is a folder under home.** `projects` in the Folder field now means
+  `~/projects`, and a folder that is not there is refused with a notice.
+
+## Upgrading to 1.18.0
+
+Version 1.18.0 makes pairing mandatory for reads as well as writes
+([ADR 0086](../.adr/0086-reads-need-the-pairing-token.md)). What changes on upgrade day:
+
+- **Paired phones keep working.** Their stored token already satisfies the new rule. Nothing to do.
+- **Unpaired browsers see the pair screen.** A desktop browser that never paired, which could read
+  before, now gets `403 device not paired`. Run `collie pair` on the host, then enter the code in
+  Settings on that browser ([Pair a device](security.md#pair-a-device--the-write-credential)).
+- **An installed app can keep the old screens for one more load.** An installed app may still show
+  the previous version's screens until it loads once more. If it shows "Sign in" after the update to
+  1.18 or later, reload the app, or close and reopen it. Then pair it as above.
+- **Scripts must pair once.** A script that read the API without a token gets `403` now. Run
+  `collie pair --expires 30d`, then claim the code with a POST to `/api/pair` that carries
+  `{"code": "...", "label": "script"}` and a same-origin `Origin` header. The token comes back once,
+  in that answer. Send it as `Authorization: Bearer <token>` on every later call. Store it like a
+  password.
+- **Host CLIs need nothing.** `collie doctor`, `collie history` and the crew update sweep read their
+  own bridge with a local credential the bridge writes to the state directory.
+- **Rolling back below 1.18.0 ignores token expiries.** An older bridge does not know the
+  `expiresAt` field, so an expired device works again until the bridge is updated. Revoke it with
+  `collie devices revoke <label>` if that matters
+  ([Give a device an expiry](security.md#give-a-device-an-expiry)).
+- **Old audit files may hold typed characters.** Files written before 1.18.0 can list characters
+  typed on the phone. Rotate or delete `audit.log` files from before the update.
+- **Masking may get in the way.** File bodies in Files and diffs in Changes now pass through the
+  same secret mask as pane text. If it hides something you need, set `COLLIE_REDACT=off` in your
+  `.env` and restart ([configure](configure.md)).
+- **A 1.18.0 lead masks its members' text too.** A member still on 1.17.x does not mask, so the
+  lead masks that member's text before your phone gets it. To see a member's text unmasked, set
+  `COLLIE_REDACT=off` on the lead as well as on the member.
 
 ## Upgrading from 0.x to 1.0
 

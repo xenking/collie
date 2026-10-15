@@ -4,8 +4,10 @@ import { NavigationRoute, registerRoute } from "workbox-routing";
 import { clientsClaim } from "workbox-core";
 
 import { decidePush, notificationPath, type NotifData, type PushPayload } from "./lib/push-decision";
-import { openNotificationTarget, type OpenOutcome } from "./lib/notification-open";
+import { askInApp, openNotificationTarget, type OpenOutcome, type OpenTargetClient } from "./lib/notification-open";
+import { readPushTitles } from "./lib/push-title-store";
 import { FONT_URLS, navigationNetworkOnlyUnder } from "./lib/sw-routes";
+import { stripMount, sttCacheName, sttCopyToStore, sttStorable, sttSweepKeeps } from "./lib/stt-cache";
 
 // Where this worker is mounted (ADR 0052): the directory it was fetched from, which is the mount
 // the app registered it under (lib/pwa.ts) — `/` at the origin root, `/collie/` behind a proxy that
@@ -130,6 +132,58 @@ self.addEventListener("activate", (event: ExtendableEvent) => {
   );
 });
 
+// ── The phone's speech engine (ADR 0096 Decision 10) ────────────────────────────────────────────
+//
+// `stt/` holds the speech worker and the vendored engine. It is out of the precache (vite.config.ts,
+// `stt/**` in globIgnores): 1 MB is not something to charge every install for. It is cached here
+// instead, cache-first under its own name, and ONLY on a device whose person already copied the model
+// to the phone: the cache exists only then (lib/stt-model.ts creates it), and a device with no such
+// cache gets a plain network fetch and has nothing stored. So the engine also starts offline, and an
+// install that never turns the phone engine on never keeps a byte of it.
+//
+// The model itself is not served by this route. The page reads it from the same cache directly.
+// What may be stored is `sttStorable` (an unredirected 200 of the right type, the font cache's rule),
+// and the worker's response is stored whole, headers included: its own `Content-Security-Policy` is
+// what lets it compile wasm, and the copy must carry it. The two engine files are stored only when
+// their bytes hash to the pins (`sttCopyToStore`); a response that does not is passed through
+// uncached, so a wrong engine served once is never the engine from then on.
+const STT_CACHE = sttCacheName(MOUNT);
+
+registerRoute(
+  ({ url, sameOrigin }) => sameOrigin && url.pathname.startsWith(under("/stt/")),
+  async ({ request, url }) => {
+    if (!(await caches.has(STT_CACHE))) return fetch(request);
+    const cache = await caches.open(STT_CACHE);
+    const hit = await cache.match(request);
+    if (hit) return hit;
+    const response = await fetch(request);
+    const path = stripMount(url.pathname, MOUNT);
+    // Hashing and writing are off the response path, like the font cache's write: a failure costs the
+    // cached copy, never this load.
+    if (sttStorable(response, path)) {
+      void sttCopyToStore(response.clone(), path)
+        .then((copy) => (copy === null ? null : cache.put(request, copy)))
+        .catch(() => null);
+    }
+    return response;
+  },
+);
+
+// An update must not strand the speech cache. The model stays while this build still accepts its
+// hash, and so do this build's engine files; an older engine, another model and the old worker
+// script (its name carries the build hash) go. The next load of the new worker stores the new one.
+self.addEventListener("activate", (event: ExtendableEvent) => {
+  event.waitUntil(
+    (async () => {
+      if (!(await caches.has(STT_CACHE))) return;
+      const cache = await caches.open(STT_CACHE);
+      for (const req of await cache.keys()) {
+        if (!sttSweepKeeps(stripMount(new URL(req.url).pathname, MOUNT))) await cache.delete(req);
+      }
+    })(),
+  );
+});
+
 // `registerType: "autoUpdate"` means a fresh build should take over without a user gesture. With
 // injectManifest we own that lifecycle: skip the waiting phase on install, claim open clients on
 // activate. The message handler backs lib/pwa.ts's manual "tap to update" (postMessage SKIP_WAITING).
@@ -176,7 +230,12 @@ async function handlePush(event: PushEvent): Promise<void> {
     payload = { body: event.data?.text() };
   }
 
-  const decision = decidePush(payload, await anyVisibleClient());
+  // The title in this device's language, from the table the page left (lib/push-titles.ts, ADR 0074).
+  // Read only for a push that names a code: a retraction or an operator-typed test has nothing to
+  // translate, and must not wait on storage.
+  const templates =
+    payload.titleCode === undefined ? {} : await readPushTitles(self.caches, self.location.origin, MOUNT);
+  const decision = decidePush(payload, await anyVisibleClient(), templates);
   if (decision.kind === "suppress") return; // a visible Collie tab already surfaces it in-app
   if (decision.kind === "clear") {
     // Retraction: close the slot and show nothing. Chrome's silent-push budget tolerates this.
@@ -193,6 +252,7 @@ async function handlePush(event: PushEvent): Promise<void> {
       session: decision.session,
       host: decision.host,
       target: decision.target,
+      machine: decision.machine,
     } satisfies NotifData,
     icon: ICON,
     badge: BADGE,
@@ -229,6 +289,19 @@ self.addEventListener("notificationclick", (event: NotificationEvent) => {
   );
 });
 
+// A window as lib/notification-open sees it: the WindowClient itself, plus `openInApp`, which asks
+// the running app to push the URL in its own router (ADR 0067) and waits briefly for its answer.
+function asTarget(client: WindowClient): OpenTargetClient {
+  return {
+    url: client.url,
+    visibilityState: client.visibilityState,
+    focused: client.focused,
+    navigate: (target) => client.navigate(target),
+    focus: () => client.focus(),
+    openInApp: (target) => askInApp(client, target),
+  };
+}
+
 // Focus an existing Collie tab (navigating it to `path`) or open a new one. `path` is
 // origin-relative. The choice lives in lib/notification-open, which also documents why a window is
 // opened before any discarded client is navigated (#147, and the Android regression that fix grew).
@@ -241,7 +314,7 @@ async function openPath(path: string): Promise<OpenOutcome> {
   const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
   return openNotificationTarget({
     url,
-    clients: windows,
+    clients: windows.map(asTarget),
     openWindow: (target) => self.clients.openWindow(target),
   });
 }

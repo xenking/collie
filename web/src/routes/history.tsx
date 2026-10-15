@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useLoaderData, useNavigate, useParams } from "react-router";
+import { useLoaderData, useParams } from "react-router";
 import { ArrowUpToLine, ChevronDown, ChevronUp, Loader2, ScrollText, Search, X } from "lucide-react";
 
 import { RouteHeader } from "@/components/app-header";
@@ -16,6 +16,7 @@ import type { TranscriptEntry } from "@/lib/types";
 import { useRootData } from "@/lib/route-data";
 import { t } from "@/lib/i18n";
 import { useLocale } from "@/hooks/use-locale";
+import { useNav } from "@/hooks/use-nav";
 import { mirrorFont, useDisplayPrefs } from "@/hooks/use-display-prefs";
 import { cn } from "@/lib/utils";
 
@@ -58,7 +59,7 @@ export function HistoryRoute() {
   useLocale();
   const root = useRootData();
   const { paneId = "" } = useParams();
-  const navigate = useNavigate();
+  const nav = useNav();
   const scope = data.scope;
   // Whether an agent session log can exist here at all — a property of the multiplexer THIS PANE's
   // machine runs (M22/03), not of the pane. See the empty-state branch below for what it changes.
@@ -78,10 +79,19 @@ export function HistoryRoute() {
   const [older, setOlder] = useState<TranscriptEntry[]>([]);
   const [hasMore, setHasMore] = useState(data.hasMore);
   const [loading, setLoading] = useState(false);
-  const entries = useMemo(
-    () => (older.length ? [...older, ...data.entries] : data.entries),
-    [older, data.entries],
-  );
+  const entries = useMemo(() => {
+    const all = older.length ? [...older, ...data.entries] : data.entries;
+    // A turn the agent REWOUND PAST is not part of this conversation any more, so it is not part of
+    // this view, this find or this jump either. Only pi can say so (`abandoned`, set by its reader
+    // when a row's parent is not the row before it), and the journal KEEPS the turn rather than
+    // dropping it, because a `?before=` cursor still has to resolve its uuid on the bridge. So hiding
+    // is the reader's job, and it belongs here: this is the one array the view, `matchingEntries`,
+    // `userTurnIndices`, the render window and the paging cursor all read.
+    //
+    // The `some` guard keeps the array IDENTITY for every session that never forked, which is almost
+    // all of them, and this value is a dependency of five memos below.
+    return all.some((e) => e.abandoned === true) ? all.filter((e) => e.abandoned !== true) : all;
+  }, [older, data.entries]);
 
   // How many of the NEWEST turns are rendered. Everything else is held in memory, unrendered.
   const [renderCount, setRenderCount] = useState(INITIAL_RENDER);
@@ -215,7 +225,7 @@ export function HistoryRoute() {
     // where it is never the wider of the two.
     <div className="mx-auto flex min-h-0 w-full min-w-0 max-w-[100dvw] flex-1 flex-col md:max-w-screen-md lg:max-w-screen-lg xl:max-w-screen-xl 2xl:max-w-[1400px]">
       <RouteHeader
-        onHome={() => navigate(panePath(paneId, scope))}
+        onHome={() => nav.up(panePath(paneId, scope))}
         width="wide"
         override={
           findOpen ? (
@@ -255,7 +265,7 @@ export function HistoryRoute() {
         rightTrail={
           <button
             type="button"
-            onClick={() => navigate(panePath(paneId, scope))}
+            onClick={() => nav.up(panePath(paneId, scope))}
             aria-label={t("history.closeAria")}
             className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors active:bg-muted/60"
           >
@@ -273,7 +283,7 @@ export function HistoryRoute() {
       </RouteHeader>
 
       <div className={cn("relative min-h-0 min-w-0 flex-1", mirrorFace.className)} style={mirrorFace.style}>
-        <ChatMessageList ref={listRef} className="px-3 py-3">
+        <ChatMessageList ref={listRef} clearBand={12} className="px-3 py-3">
           {entries.length === 0 ? (
             <div className="px-2 py-16 text-center text-sm leading-relaxed text-muted-foreground">
               {/* The route is reachable by URL — a bookmark, a back button, an older cached bundle

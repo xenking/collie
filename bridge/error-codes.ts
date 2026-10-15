@@ -35,7 +35,9 @@
 //     exactly what this change promised not to do.
 //   • Crew-link errors (`bridge/crew/`). That surface is versioned separately (CREW_PROTOCOL.md) and
 //     is guarded at commit time (ADR 0025); it keeps today's bodies in this release.
-//   • Push/OS notification text (`bridge/notifications.ts`). Different surface, different follow-up.
+//   • Push notification titles. Same rule, different surface: `bridge/push-titles.ts` is their catalogue.
+
+import { renderTemplate } from "./template.ts";
 
 /** The values a sentence may need interpolated — named, so a translated sentence can use them too. */
 export type ApiErrorDetail = Readonly<Record<string, string | number>>;
@@ -87,10 +89,62 @@ export const ERROR_CODES = {
    * snapshot — closed, or never existed. Nothing was created.
    */
   "launch.pane_unknown": "pane not found",
+  /**
+   * A launch named a `harness` id this host does not start (`bridge/harness-launch.ts`). The ids are
+   * the list `GET /api/launchers` answered, so nothing a phone was shown is refused (ADR 0091).
+   */
+  "launch.unknown_harness": "unknown agent: {harness}",
+  /** A launch's `cwd` carries a control character, a `..` segment, or `~name`. A path with no leading `/` or `~` is a folder under home. */
+  "launch.bad_folder": "the folder cannot be used: no .. and no control characters",
+  /** A launch's folder is not a directory on the machine that runs it. Nothing was created. */
+  "launch.folder_missing": "there is no folder {folder} on this machine",
 
-  // ── Worktrees: /api/workspace/:id/worktree[s|/open|/remove] (ADR 0032) ─────────────
-  /** The list could not be read — the space is not in a Git work tree, or the mux refused. */
-  "worktree.list_failed": "{reason}",
+  // ── One-off runs and their history: POST /api/launch `{ run }`, /api/launch/recent/* (ADR 0095) ──
+  /** A one-off run came with no paired device to attribute it to. Nothing ran. */
+  "launch.no_device": "this request names no paired device",
+  /** The operator turned one-off runs off on this machine (`[phone] run = false`). Nothing ran. */
+  "launch.run_off": "running a one-off command from a phone is turned off on this machine",
+  /** The line breaks the character rule, is empty, or is longer than {max} characters. Nothing ran. */
+  "launch.bad_line": "the command cannot be run: {problem}",
+  /** A one-off run never starts on a new branch. Nothing was created. */
+  "launch.run_no_branch": "a one-off command cannot start on a new branch",
+  /** No history entry has this line on this machine. */
+  "launch.recent_unknown": "that command is not in this machine's history",
+  /** `commands-recent.json` is there and is not a file this Collie may write over. */
+  "launch.recent_unreadable": "commands-recent.json cannot be read; move it away to keep a history",
+
+  // ── Rows added from a phone: POST /api/launchers/added, /remove, /rename (ADR 0094) ──────────
+  // Each refusal is answered before the store is written: nothing was added, removed or renamed.
+  /** The operator turned phone-added rows off on this machine (`[phone] adds = false`). */
+  "launcher.adds_off": "adding launchers from a phone is turned off on this machine",
+  /** The operator has not turned free lines on (`[phone] free_text`, off by default). */
+  "launcher.free_text_off": "a command typed by hand is turned off on this machine",
+  /** The line or the label breaks the character rule, is empty, or is too long. */
+  "launcher.bad_text": "{field}: {problem}",
+  /** A recipe named an agent Collie does not start, an option its table does not list, or two of one group. */
+  "launcher.bad_recipe": "{reason}",
+  /** The same line is already a row, in `launchers.toml` or added before. */
+  "launcher.duplicate": "this command is already a launcher",
+  /** This machine keeps at most {max} phone-added rows. */
+  "launcher.added_full": "this machine already has {max} added launchers; remove one first",
+  /** No added row has this id on this machine. */
+  "launcher.unknown_row": "no such launcher",
+  /** `launchers-added.json` is there and is not a file this Collie may write over. */
+  "launcher.store_unreadable": "launchers-added.json cannot be read; move it away to add launchers",
+  /** The write came with no device name, so the row could not be attributed. */
+  "launcher.no_device": "this request names no paired device",
+
+  // ── The new-space folder list: POST /api/folders/star (#289, M40/02) ───────────────
+  /**
+   * The folder is in neither list. Only a folder a space already opened in can be starred, so this
+   * is a RACE GUARD: the sheet offers a star only on a row it read, and this is the tap that landed
+   * after that row aged out of Recent on another device's create. Nothing was stored.
+   */
+  "folders.unknown": "{folder} is not in Recent, so it cannot be starred",
+  /** Twelve favourites already. A star never drops one the operator chose, so nothing was stored. */
+  "folders.favourites_full": "favourites are full ({max}); remove one first",
+
+  // ── Worktrees: /api/worktree and its plan (ADR 0032, ADR 0093) ─────────────────────
   /** Creation refused. `{reason}` is the multiplexer's own words, Git's sentence included. */
   "worktree.create_failed": "{reason}",
   /**
@@ -99,7 +153,6 @@ export const ERROR_CODES = {
    * (a second create answers `create_failed`, the path being taken). Probed on herdr 0.8.2.
    */
   "worktree.created_not_opened": "the worktree was created but could not be opened: {reason}",
-  "worktree.open_failed": "{reason}",
   /** Another worktree operation is still running — herdr serialises them. Try again in a moment. */
   "worktree.busy": "{reason}",
   /** The branch name matched more than one thing, so the multiplexer would not guess. */
@@ -108,6 +161,35 @@ export const ERROR_CODES = {
   "worktree.branch_required": "branch required",
   /** This space is not in a Git work tree, so it has no worktrees to show. */
   "worktree.not_a_repo": "{reason}",
+  /**
+   * The branch name would read as a flag or is one Git refuses (`bridge/worktree-branch.ts`). Checked
+   * before the multiplexer is touched, so nothing was created (ADR 0089).
+   */
+  "worktree.invalid_branch": "invalid branch",
+  /**
+   * The starting point is not `{ kind: "default" }` or `{ kind: "ref", ref }`, the ref is one Git
+   * refuses, or it names no commit in this repo. Checked before the multiplexer is touched, so
+   * nothing was created (ADR 0089, amended).
+   */
+  "worktree.invalid_base": "invalid base",
+
+  // ── A branch's own folder: POST /api/worktree with a parent (ADR 0093) ────────────────
+  // Each is a refusal of the parent folder the phone named, checked on every use by
+  // `bridge/worktree-folder.ts` before the multiplexer is touched. Nothing was created.
+  /** Empty, too long, a control character, relative, or a `..` segment. */
+  "worktree.folder_invalid": "the folder must be an absolute path with no ..",
+  /** Nothing is there, or it is not a directory. */
+  "worktree.folder_missing": "the folder does not exist",
+  /** A link sits somewhere in the path below the home folder. */
+  "worktree.folder_link": "the folder goes through a link",
+  /** The folder is not inside the home folder. */
+  "worktree.folder_outside_home": "the folder must be inside the home folder",
+  /** A folder whose name starts with a dot, `.git` included, is on the path. */
+  "worktree.folder_hidden": "the folder may not be or sit inside a hidden folder",
+  /** The folder is inside the repository the branch is cut from. */
+  "worktree.folder_in_repo": "the folder may not be inside the repository",
+  /** The branch's folder already exists there. */
+  "worktree.target_exists": "{path} already exists",
 
   // ── Attachment upload: POST /api/pane/:id/upload → UploadResponse ──────────────────
   /**
@@ -132,6 +214,38 @@ export const ERROR_CODES = {
   "stt.empty": "the recording is empty",
   /** The provider itself failed. `detail.kind` is the SttError kind; the sentence is its own words. */
   "stt.provider_failed": "{reason}",
+  /** The whistle provider takes 16 kHz mono 16-bit PCM WAV only, and the upload was not that (415). */
+  "stt.wav_required": "the speech engine on this collie takes a 16 kHz mono 16-bit WAV recording only",
+
+  // ── The Whistle model and the host engine: /api/stt/whistle, /api/stt/model/:sha256 (ADR 0096) ──
+  /** The hash in the path is not the hash of the model this collie holds, or it holds none (404). */
+  "stt.model_unknown": "this collie holds no speech model with that hash",
+  /** Two copies of the model are already leaving this collie (503, `retry-after`). Try again in a moment. */
+  "stt.model_busy": "two copies of the speech model are already being sent — try again in a moment",
+  /** The host engine needs the model first (409). Nothing changed. */
+  "stt.whistle_not_ready": "the Whistle model is not on this collie yet",
+  /** The download could not even start (the folder could not be made, a symlink was in the way). */
+  "stt.whistle_download_failed": "the Whistle model could not be downloaded: {reason}",
+
+  // ── The host's speech provider: PUT /api/stt/host (bridge/stt/host-http.ts, ADR 0097) ──────────
+  /** Codex was asked for without the id of the consent text the app showed, or with another id (400). Nothing ran. */
+  "stt.consent_required": "turning on Codex needs the consent shown in Settings, accepted with I accept",
+  /** Another change of the provider is still running, a Codex probe say (409). Nothing changed. */
+  "stt.host_busy": "the speech provider is already being changed; try again in a moment",
+  /** The provider was set up in a terminal, by the environment, or `stt.json` cannot be read (409). Nothing changed. */
+  "stt.host_provider_locked": "this speech provider was set up on the host; change it there with `collie stt`",
+  /** `stt.json` or the environment changed while the switch was checking (409). Nothing was written. */
+  "stt.host_changed": "the speech settings on this collie changed while this was checked; nothing was written",
+  /** No `codex` binary on the host (409). */
+  "stt.codex_missing": "no `codex` binary was found on this collie",
+  /** `codex login status` says it is not signed in (409). */
+  "stt.codex_signed_out": "Codex is not signed in on this collie; run `codex login` there",
+  /** Signed in, but not with ChatGPT, which this endpoint needs (409). */
+  "stt.codex_other_login": "Codex on this collie is not signed in with ChatGPT; run `codex login` there and pick ChatGPT",
+  /** The sign-in could not be checked: a timeout, or an answer Collie does not understand (409). */
+  "stt.codex_unknown": "Collie could not check the Codex sign-in on this collie",
+  /** The honest-first identity probe failed (502). `detail.reason` is Collie's own sentence. Nothing was written. */
+  "stt.codex_probe_failed": "the Codex endpoint did not accept the probe: {reason}",
 
   // ── Device pairing: POST /api/pair, POST /api/devices/revoke ───────────────────────
   //
@@ -247,21 +361,3 @@ export function apiError(code: ErrorCode, detail?: ApiErrorDetail): ApiErrorBody
   return body;
 }
 
-/**
- * Fill `{name}` slots from `detail`, in ONE pass.
- *
- * One pass is the load-bearing part: several templates are `{reason}` filled with a multiplexer's
- * own words, and those words are not Collie's to trust. A second pass over the result would let a
- * refusal that happens to contain `{maxBytes}` reach into this table's other values.
- *
- * A slot with no matching field renders empty. That is a programming error, not a runtime condition
- * — `error-codes.test.ts` fails any `apiError` call that names a slotted code without passing a
- * detail object — so it does not throw here, where throwing would turn a wording bug into a 500 on
- * a live phone.
- */
-function renderTemplate(template: string, detail: ApiErrorDetail | undefined): string {
-  return template.replace(/\{(\w+)\}/g, (_match, name: string) => {
-    const value = detail?.[name];
-    return value === undefined ? "" : String(value);
-  });
-}

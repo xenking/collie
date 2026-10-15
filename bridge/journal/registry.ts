@@ -12,8 +12,11 @@
 
 import { claudeJournal } from "./claude.ts";
 import { codexJournal } from "./codex.ts";
+import { durableJournal } from "./durable.ts";
 import { grokJournal } from "./grok.ts";
 import { hermesJournal } from "./hermes.ts";
+import { museJournal } from "./muse.ts";
+import { openclawJournal } from "./openclaw.ts";
 import { opencodeJournal } from "./opencode.ts";
 import { piJournal } from "./pi.ts";
 import type { JournalAdapter } from "./types.ts";
@@ -41,6 +44,17 @@ export interface JournalRoots {
   grok: readonly string[];
   /** Hermes' SessionDB directory — `state.db` lives at its top level. */
   hermes: readonly string[];
+  /** Muse's `sessions` directory — `YYYY/MM/DD/<uuid>/session.jsonl` lives under it. */
+  muse: readonly string[];
+  /**
+   * The folder of the bridge's own pane logs for a `durable` peer (`bridge/durable/log.ts`). ABSENT
+   * for every caller that has no state dir to name, and the adapter is then not in the registry: it
+   * is not a harness, so `KNOWN_HARNESS_NAMES` (built with no roots) never lists it.
+   */
+  durable?: readonly string[];
+  /** OpenClaw's state folder (`$OPENCLAW_STATE_DIR`, `~/.openclaw`), one SQLite per agent under
+   *  `agents/<id>/agent/`. */
+  openclaw: readonly string[];
 }
 
 /**
@@ -50,14 +64,17 @@ export interface JournalRoots {
  * never drift from the adapter it points at — the same guarantee the frontend registry gives.
  */
 export function buildJournalRegistry(roots: JournalRoots): Record<string, JournalAdapter> {
-  const adapters = [
+  const adapters: JournalAdapter[] = [
     claudeJournal(roots.claude),
     codexJournal(roots.codex),
     piJournal(roots.pi),
     opencodeJournal(roots.opencode),
     grokJournal(roots.grok),
     hermesJournal(roots.hermes),
+    museJournal(roots.muse),
+    openclawJournal(roots.openclaw),
   ];
+  if (roots.durable !== undefined) adapters.push(durableJournal(roots.durable));
   return Object.fromEntries(adapters.map((a) => [a.agent, a]));
 }
 
@@ -71,9 +88,54 @@ export function buildJournalRegistry(roots: JournalRoots): Record<string, Journa
  * COULD have a transcript (registry.test.ts fails when the two drift).
  *
  * An alias never adds an adapter, so it is absent from {@link KNOWN_HARNESS_NAMES}: that list
- * answers "which adapters does this build have", and the answer is still five.
+ * answers "which adapters does this build have", and the answer is still eight.
  */
 export const AGENT_ALIASES = { omp: "pi" } as const;
+
+/**
+ * Agents that report their session to Herdr on the FIRST PROMPT, not when they start (issue #294).
+ *
+ * Codex fires its SessionStart hook only when the first prompt is submitted (openai/codex#15266), and
+ * Herdr's codex hook reports from SessionStart alone. So a Codex pane that has not had a turn yet has
+ * no session, and that is not a fault: the hook is fine, the agent has simply not reported yet. The
+ * phone's note and `collie doctor` both read this list, so neither blames the integration for a pane
+ * that has not had a turn. Codex has a second silent cause as well: when its hooks change it asks to
+ * review them, and "Continue without trusting" disables the Herdr hook while `herdr integration
+ * status` still says current. `/hooks` in Codex is where that is reviewed.
+ *
+ * `web/src/lib/journal-agents.ts` mirrors it by hand (registry.test.ts fails when the two drift).
+ */
+export const REPORTS_SESSION_ON_FIRST_PROMPT: readonly string[] = ["codex"];
+
+/**
+ * Agents that draw a picture the live mirror cannot see, and whose journal records it (#292).
+ *
+ * pi-tui 0.87.1 draws an image only by direct Kitty placement (`a=T`, no `U=1`). A direct placement
+ * leaves nothing on the grid `pane.read` returns: no placeholder cell, only the blank rows pi keeps
+ * for it. So the mirror's placeholder path never sees the picture, and the only copy the phone can
+ * reach is the journal, where pi's adapter yields it as a tool result's `imageUrl` (or an `image`
+ * part). Oh My Pi draws the same way unless `PI_KITTY_PLACEHOLDERS=1` is set, and writes pi's log.
+ *
+ * The phone reads the newest turn's picture out of the journal after each finished turn, for these
+ * agents only. The list is what bounds that cost: every other agent draws no picture at all, so a
+ * read per finished turn would buy nothing there. It keys a read, never a grammar or a pane's
+ * identity. `web/src/lib/journal-agents.ts` mirrors it by hand (registry.test.ts fails when the
+ * two drift).
+ */
+export const DRAWS_IMAGES_OFF_GRID: readonly string[] = ["omp", "pi"];
+
+/**
+ * Agents whose adapter finds the session itself when the pane names none.
+ *
+ * Herdr reports a session only for agents with an integration; Muse has none, so its panes never
+ * carry a ref and the adapter discovers the log by cwd instead (`JournalAdapter.discover`). OpenClaw
+ * reports through a source of its own, which Herdr drops (#401), so its adapter reads the session
+ * off the pane's footer. The
+ * name list exists for the one consumer that works from names alone: `collie doctor`, whose
+ * history section must not advise `herdr integration install` for an agent no hook could ever
+ * report. Pinned against the adapters themselves in registry.test.ts, so the two cannot drift.
+ */
+export const DISCOVERS_OWN_SESSIONS: readonly string[] = ["muse", "openclaw"];
 
 /**
  * The same pairs as a Map, which is how {@link adapterFor} asks.
@@ -118,5 +180,5 @@ export function journalAgents(registry: Record<string, JournalAdapter>): string[
  * identity off a match against it — see `bridge/mux/types.ts` § `MuxPane.agent`.
  */
 export const KNOWN_HARNESS_NAMES: readonly string[] = journalAgents(
-  buildJournalRegistry({ claude: [], codex: [], pi: [], opencode: [], grok: [], hermes: [] }),
+  buildJournalRegistry({ claude: [], codex: [], pi: [], opencode: [], grok: [], hermes: [], muse: [], openclaw: [] }),
 );

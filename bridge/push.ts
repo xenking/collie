@@ -1,7 +1,10 @@
 import type { JsonObject, JsonValue } from "./json.ts";
 import { mkdir, rename, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
+import type { PushTitleCode, PushTitleDetail } from "./push-titles.ts";
+import { redactText } from "./redact.ts";
 
 // Optional Web Push (VAPID). Zero hard dependency: if `web-push` isn't installed or VAPID keys
 // aren't configured, push is silently disabled and the rest of the bridge works unchanged.
@@ -59,7 +62,13 @@ export type PushDeliveryResult = { statusCode?: number; body?: string; headers?:
 export type SubscriptionRow = { endpoint: string; createdAt?: string; userAgent?: string };
 
 /** The deep-link fields the service worker reads off a push payload (see web/src/sw.ts). */
-type PushPayloadData = { paneId?: string; session?: string; host?: string; target?: "settings" };
+type PushPayloadData = {
+  paneId?: string;
+  session?: string;
+  host?: string;
+  machine?: string;
+  target?: "settings" | "machine";
+};
 
 /** The HTTP status a `web-push` rejection carries, or undefined when it carries none. */
 function sendErrorStatus<T>(err: T): number | undefined {
@@ -120,6 +129,32 @@ const SEND_OPTIONS = { TTL: 21_600, topic: "collie-herd", urgency: "high" } as c
 // update stays relevant far longer than a transient "needs you". The trailing "s" is not a typo:
 // "collie-update" is 13 characters, which Apple refuses outright — see the base64 note above.
 const UPDATE_SEND_OPTIONS = { TTL: 259_200, topic: "collie-updates" } as const;
+// A machine's sustained load (ADR 0084) rides its own topics, for the update push's reason: sharing
+// "collie-herd" would let a queued load alert and a queued herd summary overwrite each other. One hour
+// of TTL, because a load alert older than that describes a minute the Machines page shows better, and
+// `high` urgency for the herd's reason: it is one push per episode, and a deferred one is late for the
+// only thing it is for. The topic is one per machine and metric ({@link machineTopic}), carried on the
+// message's `topic`; "collie-machines" (15 characters, which base64 can produce) is only the fallback
+// for a machine message that names none.
+const MACHINE_SEND_OPTIONS = { TTL: 3_600, topic: "collie-machines", urgency: "high" } as const;
+
+/** The fixed start of every per-machine topic. 16 characters, plus {@link MACHINE_TOPIC_HASH} = 28. */
+const MACHINE_TOPIC_PREFIX = "collie-machines-";
+/** Base64url characters of the hash kept: 72 bits, so two machines' topics do not meet by chance. */
+const MACHINE_TOPIC_HASH = 12;
+
+/**
+ * The collapse topic of one machine's alert on one metric: `collie-machines-` and the first 12
+ * base64url characters of the SHA-256 of `<id>:<metric>`. One topic per machine and metric, so a
+ * phone that is offline while two machines (or CPU and memory on one) alert gets both, where one
+ * shared topic kept only the last. A machine id is free text and can be longer than a topic may be,
+ * which is why it is hashed and not spelled. 28 characters, inside RFC 8030's alphabet and 32-char
+ * ceiling and a length base64 can produce ({@link topicIsSendable}).
+ */
+export function machineTopic(id: string, metric: string): string {
+  const hash = createHash("sha256").update(`${id}:${metric}`).digest("base64url");
+  return `${MACHINE_TOPIC_PREFIX}${hash.slice(0, MACHINE_TOPIC_HASH)}`;
+}
 
 /** Whether a collapse topic is one every push service will accept: RFC 8030's alphabet and 32-char
  *  ceiling, plus the length base64 can actually produce (Apple decodes it; ≡ 1 mod 4 is impossible).
@@ -173,12 +208,21 @@ export type PushSender = (
 /**
  * A notification instruction for the service worker (see web/src/sw.ts). `type:"clear"` closes the
  * notification on `tag` instead of showing one; `type:"update"` is an update-available alert (its own
- * collapse topic; taps open Settings); otherwise the SW renders `{ title, body }` into the `tag` slot,
+ * collapse topic; taps open Settings); `type:"machine"` is a sustained-load alert (its own topic; taps
+ * open that machine's page); otherwise the SW renders `{ title, body }` into the `tag` slot,
  * deep-links to `paneId` on tap, and re-alerts when `renotify` is set.
  */
 export interface PushMessage {
-  type?: "clear" | "update";
+  type?: "clear" | "update" | "machine";
   title?: string;
+  /**
+   * The stable code `title` was rendered from, and the values it was filled with (`push-titles.ts`).
+   * The service worker shows its own translation of the code when it has one and `title` otherwise,
+   * so an older cached SW — which ignores both — keeps showing exactly what it did. A title the
+   * operator typed (`collie push-test "…"`) is not Collie's to translate and carries no code.
+   */
+  titleCode?: PushTitleCode;
+  titleDetail?: PushTitleDetail;
   body?: string;
   /** Notification slot. Same tag replaces (rather than stacks) the previous notification. */
   tag?: string;
@@ -202,9 +246,45 @@ export interface PushMessage {
    *
    *  The client resolves this name to `/settings/updates` (web/src/lib/push-decision.ts). The name
    *  itself is frozen: an old cached service worker resolves it to `/settings` and lands one row
-   *  away from the page it wanted, which renaming the field would have turned into `/`. */
-  target?: "settings";
+   *  away from the page it wanted, which renaming the field would have turned into `/`.
+   *
+   *  `"machine"` opens `/machines/<machine>` (ADR 0084). An old service worker does not know it and
+   *  reads only `host`, which a machine push never carries, so it takes the pane path with no pane
+   *  and no `?h=`: the dashboard. */
+  target?: "settings" | "machine";
+  /**
+   * The machine a load alert is about (ADR 0084), threaded into the payload `data` as `machine`. It
+   * is deliberately NOT `host`: an old cached service worker reads `host` as a crew member and opens
+   * `/?h=<id>`, which on a solo Collie (id `local`) names no member at all.
+   */
+  machine?: string;
+  /**
+   * The push service's collapse topic for this one message ({@link machineTopic}), in place of the
+   * type's own. Never sent to the device. A topic {@link topicIsSendable} refuses is ignored.
+   */
+  topic?: string;
   renotify?: boolean;
+}
+
+/**
+ * A push message with its words masked (`bridge/redact.ts`): the body, and the title. A push crosses
+ * a third-party push service and shows on a lock screen, so it is the last place a secret should be.
+ *
+ * A title is a catalogue sentence filled from `titleDetail` (`push-titles.ts`), and the phone renders
+ * its own translation from the code and the detail when it has one. So a title the mask CHANGED drops
+ * its code and detail and travels as the masked English: a translated title rebuilt from the raw
+ * detail would put back exactly what was masked. A title the mask left alone keeps both.
+ *
+ * Pure and exported for the test; {@link Push.send} calls it when `COLLIE_REDACT` is on.
+ */
+export function redactPushMessage(message: PushMessage): PushMessage {
+  const out: PushMessage = { ...message };
+  if (message.body !== undefined) out.body = redactText(message.body);
+  if (message.title === undefined) return out;
+  const title = redactText(message.title);
+  if (title === message.title) return out;
+  const { titleCode: _titleCode, titleDetail: _titleDetail, ...plain } = out;
+  return { ...plain, title };
 }
 
 export class Push {
@@ -313,16 +393,21 @@ export class Push {
   }
 
   /** Send a notification instruction (render, clear, or update) to every subscribed device. */
-  async send(msg: PushMessage): Promise<void> {
+  async send(message: PushMessage): Promise<void> {
     // The SW reads deep-link fields from `data`. `session` is omitted for the primary and `host` for
     // this collie's own sessions (both absent on the message), keeping that payload identical to the
     // pre-multi-session, pre-crew shape.
+    const { topic, ...raw } = message;
+    const msg = this.cfg.redact ? redactPushMessage(raw) : raw;
     const data: PushPayloadData = { paneId: msg.paneId };
     if (msg.session !== undefined) data.session = msg.session;
     if (msg.host !== undefined) data.host = msg.host;
+    if (msg.machine !== undefined) data.machine = msg.machine;
     if (msg.target !== undefined) data.target = msg.target;
-    // Per-message collapse topic — update alerts must not share the herd slot (see UPDATE_SEND_OPTIONS).
-    const options = msg.type === "update" ? UPDATE_SEND_OPTIONS : SEND_OPTIONS;
+    // Per-message collapse topic — update and load alerts must not share the herd slot (see above).
+    const base =
+      msg.type === "update" ? UPDATE_SEND_OPTIONS : msg.type === "machine" ? MACHINE_SEND_OPTIONS : SEND_OPTIONS;
+    const options = topic !== undefined && topicIsSendable(topic) ? { ...base, topic } : base;
     await this.broadcast(JSON.stringify({ ...msg, data }), options);
   }
 

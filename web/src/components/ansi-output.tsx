@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 import { parseAnsi } from "@/lib/ansi";
-import { buildBlocks, rendersNativeMirror } from "@/lib/harness";
+import { adapterFor, buildBlocks, rendersNativeMirror } from "@/lib/harness";
 import {
   dropLeadingLines,
   lineText,
@@ -28,8 +28,45 @@ import {
   segmentClassName,
   segmentStyle,
 } from "@/components/mirror-space";
+import { renderCells } from "@/components/painted-cells";
+import { widePieces } from "@/lib/text-width";
+import { AuthedImageCard } from "@/components/authed-image-card";
 import { findMatches, splitSegment, type FindMatch } from "@/lib/find";
-import { findLinks } from "@/lib/links";
+import { findLinks, type LinkMatch } from "@/lib/links";
+import { findFilePaths } from "@/lib/file-paths";
+import { isPlainClick, useFileLinks, type FileLinkOpener } from "@/components/file-links";
+
+/**
+ * A link in the mirror: an autolinked URL (opens a new tab), or a path the agent printed that
+ * resolves under the Changes root and exists there (`onOpen`, ADR 0088), which opens Files inside
+ * the app.
+ */
+type MirrorLink = LinkMatch & { onOpen?: () => void };
+
+/**
+ * The URL links plus the file paths, in one sorted list over the same haystack. Paths are found per
+ * mirror ROW: a path the terminal wrapped onto two rows is two pieces and is not joined this round
+ * (the URL repair through `logicalText` has no file counterpart yet). A path that overlaps a URL
+ * gives way to it. With no opener this is the URL list, unchanged.
+ */
+function mirrorLinks(haystack: string, urls: LinkMatch[], open: FileLinkOpener | null): MirrorLink[] {
+  if (open === null || !haystack.includes("/")) return urls;
+  const files: MirrorLink[] = [];
+  let base = 0;
+  for (const row of haystack.split("\n")) {
+    for (const f of findFilePaths(row)) {
+      const target = open(f);
+      if (target === null) continue;
+      const start = base + f.start;
+      const end = base + f.end;
+      if (urls.some((u) => u.start < end && start < u.end)) continue;
+      files.push({ start, end, href: target.href, onOpen: target.onOpen });
+    }
+    base += row.length + 1;
+  }
+  if (files.length === 0) return urls;
+  return [...urls, ...files].toSorted((a, b) => a.start - b.start);
+}
 
 /** A raw block, narrowed off the Block union (the highlight/offset paths only touch these). */
 type RawBlock = Extract<Block, { kind: "raw" }>;
@@ -154,10 +191,32 @@ function preClass(
   const native = rendersNativeMirror(agent, nativeMirror);
   return cn(
     "m-0 font-mono leading-[1.25] tracking-normal text-foreground [font-variant-ligatures:none]",
+    // Opt the mirror back INTO text selection, so an operator can long-press a line and Copy it
+    // straight off the phone. An installed iOS PWA (display:standalone, which Collie is) suppresses
+    // long-press selection app-wide unless the element sets -webkit-user-select:text — the exact
+    // inverse of the `select-none [-webkit-touch-callout:none]` the strip pills carry to STOP the
+    // loupe. Both spellings, like those pills, so the -webkit prefix is present whatever the build
+    // does. The pane menu's "Copy output" is the one-tap path (robust while output keeps arriving);
+    // this is the direct-selection one, best on a pane you have scrolled up to freeze.
+    "select-text [-webkit-user-select:text]",
     native ? MUSE_MIRROR : MIRROR_SPACE,
     native ? null : MIRROR_INVERT,
     wrap
-      ? "whitespace-pre-wrap break-words"
+      ? // `text-pretty` (#302): a 133-column agent row rewraps at phone width, and greedy breaking
+        // strands one word on its last line ("form." alone under a bullet). Pretty pulls a word
+        // down instead. Line breaking only: the text nodes, find offsets, link hrefs and copied
+        // text are untouched, and no capture screen gained or lost a line, so the mirror's height
+        // and the tail-follow hold.
+        //
+        // WHERE IT ACTS, measured on 2026-09-27 at 390px over the 212 Claude, Codex, Muse and Grok
+        // screens in `fixtures/panes`: Chromium changes the breaks on 35, WebKit 26.5 on 12, and
+        // the stranded words drop from 220 to 141 and to 217. WebKit drops `pretty` for the whole
+        // <pre> once any row in it cannot break to fit (a rule wider than the phone, a status line
+        // padded with spaces, a table run), and nearly every screen holds one. Safari before 26
+        // ignores the value and breaks greedily. `web/e2e/issue-302.spec.ts` pins the prose case in
+        // both engines. Don't add `hyphens-none` for "multi-" / "session": `hyphens` governs soft
+        // and automatic hyphenation, never the break a printed hyphen allows.
+        "whitespace-pre-wrap break-words text-pretty"
       : // Horizontal pan for wide TUI tables. `overflow-x-auto` forces `overflow-y` to compute to
         // `auto` (CSS overflow quirk), and a flex item with non-visible overflow may shrink below its
         // content height — the <pre> then becomes the vertical scroller and ChatMessageList's
@@ -197,6 +256,27 @@ function preClass(
 const TABLE_RUN_CLASS =
   "inline-block w-full max-w-full align-bottom whitespace-pre break-normal overflow-x-auto overflow-y-hidden overscroll-x-contain [touch-action:pan-x_pan-y] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
 
+// The mirror's monospace stack carries no CJK face, so a double-width character falls back to a
+// font whose advance is not two ASCII cells, and every wall to its right drifts off the column the
+// terminal put it in. Inside a table run each one is held to exactly `2ch`, which is two cells of the
+// monospace face, so a CJK table's walls line up again. Only inside a run: in prose an inline-block
+// per ideograph would change how the line wraps, and nothing there needs the column back.
+const WIDE_CELL_CLASS = "inline-block w-[2ch] text-center";
+
+function renderWideCells(run: string): ReactNode {
+  const pieces = widePieces(run);
+  if (!pieces.some((p) => p.wide)) return renderCells(run);
+  return pieces.map((p, k) =>
+    p.wide ? (
+      <span key={k} className={WIDE_CELL_CLASS}>
+        {p.text}
+      </span>
+    ) : (
+      <Fragment key={k}>{renderCells(p.text)}</Fragment>
+    ),
+  );
+}
+
 // Faithful, colored mirror of a pane's recent terminal output. Rendering flows through the Block AST
 // (blocks.ts): parseAnsi → styled lines → typed blocks → React. Text is always rendered as React
 // text nodes (escaped); only color/weight come from the ANSI parse — no XSS surface.
@@ -214,22 +294,26 @@ const TABLE_RUN_CLASS =
 // can't contain a newline, so no match straddles the inter-line separators.)
 //
 // Autolinked URLs (lib/links.ts) live in that SAME coordinate space and are applied over the raw
-// blocks too, as anchors wrapping the find-highlighted runs. Only `http(s)://` text becomes a link,
-// and the href is the matched text itself — no scheme can appear that wasn't printed by the agent.
+// blocks too, as anchors wrapping the find-highlighted runs. Only `http(s)://` text becomes a web
+// link, and the href is the matched text itself — no scheme can appear that wasn't printed by the agent.
+// The one other link is a file path the agent printed (ADR 0088): its href is an in-app Files
+// address the screen's opener built from a root-relative path, never the printed text.
 //
 // Performance: parseAnsi + block-building run once per unique `text` (and `agent`) value (useMemo),
 // as does the link scan; React.memo prevents re-renders when props are unchanged — critical for the
 // polling cadence on mobile. With no query and no links the render skips splitSegment entirely and
-// emits the segment's own string, exactly as the pre-find flat renderer did.
+// emits the segment's own string, exactly as the pre-find flat renderer did — unless the segment
+// holds a Block or Powerline character, which is wrapped in a painted span
+// (components/painted-cells.tsx).
 
 // One terminal-graphics image: the picture when the caller has one for this cluster, and the
 // "[Image]" badge when it does not. The badge is not a failure state — a cluster the ordering
 // could not match, or a journal read that has not answered yet, still has to say "a picture is
 // here", which is the whole difference from the black box this replaces.
 //
-// The card is an ANCHOR to the blob, so it is keyboard reachable and long-pressable, and the href
-// is a URL `imageSrc` already vetted (`lib/api.ts`) — a blob path on the owning host, or inline
-// bytes. Never a URL the agent's log supplied.
+// The picture is the shared `ImageCard` (ui/image-card.tsx), loaded with the pairing token through
+// `AuthedImageCard`. Its source is a URL `imageSrc` already vetted (`lib/api.ts`) — a blob path on
+// the owning host, or inline bytes. Never a URL the agent's log supplied.
 const renderImageCluster = (
   url: string | null,
   key: string,
@@ -243,37 +327,19 @@ const renderImageCluster = (
       {t("mirror.imageBadge")}
     </span>
   ) : (
-    <span
+    // THE CARD SAYS IT IS A GUESS. The placeholder carries a Kitty image id no journal maps to a
+    // blob, so the picture is matched by ORDER (`lib/mirror-images.ts` § "why the match is by
+    // order"). The operator is told that on the card itself, and pointed at History, which reads
+    // the journal turn by turn and is exact. A load that fails falls back to the badge (see FAILED
+    // IMAGES in the component); the handler reports the URL, not the cluster, because the same blob
+    // can sit under two clusters.
+    <AuthedImageCard
       key={key}
-      className="my-2 block select-none overflow-hidden rounded-md border border-border/40 bg-black/20 text-center"
-    >
-      <a
-        href={url}
-        target="_blank"
-        rel="noopener noreferrer"
-        // The same sentence as the caption, as the anchor's tooltip: a pointer that hovers the
-        // picture asks about the picture, and the caption may be scrolled out of the tap target.
-        title={t("mirror.imageMatchedByOrder")}
-        className="inline-block cursor-zoom-in"
-      >
-        <img
-          src={url}
-          alt={t("mirror.imageAlt")}
-          className="mx-auto max-h-80 w-auto max-w-full rounded object-contain"
-          loading="lazy"
-          // A load that fails falls back to the badge (see FAILED IMAGES in the component). The
-          // handler reports the URL, not the cluster: the same blob can sit under two clusters.
-          onError={() => onImageError(url)}
-        />
-      </a>
-      {/* THE CARD SAYS IT IS A GUESS. The placeholder carries a Kitty image id no journal maps to a
-          blob, so the picture is matched by ORDER (`lib/mirror-images.ts` § "why the match is by
-          order"). The operator is told that here, on the card itself, and pointed at History, which
-          reads the journal turn by turn and is exact. */}
-      <span className="block px-2 pb-1 text-xs text-muted-foreground">
-        {t("mirror.imageMatchedByOrder")}
-      </span>
-    </span>
+      src={url}
+      alt={t("mirror.imageAlt")}
+      caption={t("mirror.imageMatchedByOrder")}
+      onError={() => onImageError(url)}
+    />
   );
 
 export const AnsiOutput = memo(function AnsiOutput({
@@ -304,14 +370,17 @@ export const AnsiOutput = memo(function AnsiOutput({
     [builtBlocks, text, agent, grammars, nativeMirror],
   );
 
-  const rawBlocks = useMemo(
-    () =>
-      dropLeadingLines(
-        blocks.filter((b): b is RawBlock => b.kind === "raw"),
-        hideLeadingLines,
-      ),
-    [blocks, hideLeadingLines],
-  );
+  const rawBlocks = useMemo(() => {
+    const visible = dropLeadingLines(
+      blocks.filter((b): b is RawBlock => b.kind === "raw"),
+      hideLeadingLines,
+    );
+    // Hide the replaced reply by the raw row coordinates first, then tidy for display, so Find and
+    // the links read one and the same text.
+    const prepareDisplay = adapterFor(agent)?.prepareDisplay;
+    if (!prepareDisplay || !grammars || !wrap) return visible;
+    return visible.map((block) => ({ kind: block.kind, lines: prepareDisplay(block.lines) }));
+  }, [blocks, hideLeadingLines, agent, grammars, wrap]);
   // The table runs of each raw block, by block index. Only while wrapping: with Wrap off the whole
   // <pre> already pans column-faithfully, and a nested scroller would just trap the gesture — so
   // that branch computes nothing at all and every block falls through to NO_RUNS below.
@@ -363,7 +432,12 @@ export const AnsiOutput = memo(function AnsiOutput({
   // Autolinked URLs, in the SAME offset space as find matches — both are ranges over `haystack`, so
   // one running offset serves both splits. Recomputed only when the mirror text changes. `logicalText`
   // (when the bridge sent it) lets a URL the pane wrapped be linked as the single URL it was.
-  const links = useMemo(() => findLinks(haystack, logicalText), [haystack, logicalText]);
+  const urls = useMemo(() => findLinks(haystack, logicalText), [haystack, logicalText]);
+  // Paths the agent printed, opened in Files (ADR 0088), in that same offset space. The opener is
+  // stable across polls (components/file-links.tsx), so this re-runs when the text does, and when a
+  // path it asked about turns out to exist.
+  const openFile = useFileLinks();
+  const links = useMemo(() => mirrorLinks(haystack, urls, openFile), [haystack, urls, openFile]);
 
   useEffect(() => {
     onMatchCount?.(matches.length);
@@ -385,17 +459,21 @@ export const AnsiOutput = memo(function AnsiOutput({
   // Thread a running global offset through raw blocks → lines → segments (advancing by 1 for each
   // inter-line/inter-block "\n" separator) so both splits below can map a segment's slices back to
   // the haystack. With no query and no links this costs one addition per segment and allocates
-  // nothing beyond the spans — the polling path stays as cheap as the old flat render.
+  // nothing beyond the spans — the polling path stays as cheap as the old flat render. A segment
+  // holding a Block or Powerline character is the one exception: it allocates its pieces and one
+  // span per painted run, with no style object (components/painted-cells.tsx).
   let offset = 0;
   let currentAssigned = false;
+  // Set per line by renderLine: a table run's rows hold their wide characters to two columns.
+  let paintCells = renderCells;
 
   // A run of plain text at global offset `start` → nodes, with find matches split out and
   // highlighted. `currentAssigned` refs only the first slice of the focused match (a match can span
   // segments on a colour change) so scrollIntoView targets one stable node.
   const renderFind = (run: string, start: number): ReactNode => {
-    if (matches.length === 0) return run;
+    if (matches.length === 0) return paintCells(run);
     return splitSegment(run, start, matches).map((p, j) => {
-      if (p.matchIndex === null) return p.text;
+      if (p.matchIndex === null) return <Fragment key={j}>{paintCells(p.text)}</Fragment>;
       const isCurrent = p.matchIndex === currentMatch;
       const attach = isCurrent && !currentAssigned;
       if (attach) currentAssigned = true;
@@ -428,7 +506,7 @@ export const AnsiOutput = memo(function AnsiOutput({
               : "bg-yellow-400/30",
           )}
         >
-          {p.text}
+          {paintCells(p.text)}
         </span>
       );
     });
@@ -444,8 +522,27 @@ export const AnsiOutput = memo(function AnsiOutput({
       const pieceStart = at;
       at += p.text.length;
       if (p.matchIndex === null) return <Fragment key={i}>{renderFind(p.text, pieceStart)}</Fragment>;
+      const link = links[p.matchIndex]!;
+      const onOpen = link.onOpen;
+      if (onOpen !== undefined) {
+        // A file path stays in the app: a plain tap opens Files, a modified click is the browser's.
+        return (
+          <a
+            key={i}
+            href={link.href}
+            onClick={(e) => {
+              if (e.defaultPrevented || !isPlainClick(e)) return;
+              e.preventDefault();
+              onOpen();
+            }}
+            className={LINK_CLASS}
+          >
+            {renderFind(p.text, pieceStart)}
+          </a>
+        );
+      }
       return (
-        <a key={i} href={links[p.matchIndex]!.href} target="_blank" rel="noopener noreferrer" className={LINK_CLASS}>
+        <a key={i} href={link.href} target="_blank" rel="noopener noreferrer" className={LINK_CLASS}>
           {renderFind(p.text, pieceStart)}
         </a>
       );
@@ -467,6 +564,7 @@ export const AnsiOutput = memo(function AnsiOutput({
   // untouched: a detected table owns its own rows, and nothing beyond them.
   const renderLine = (line: StyledLine, li: number, lead: boolean, inRun: boolean): ReactNode => {
     if (li > 0) offset += 1; // the "\n" separating this line from the previous
+    paintCells = inRun ? renderWideCells : renderCells;
     const segNodes = line.segments.map((s, si) => {
       const segStart = offset;
       offset += s.text.length;

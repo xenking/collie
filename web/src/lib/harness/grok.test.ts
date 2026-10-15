@@ -40,9 +40,18 @@ const PINNED = [
   "grok--ask-z-parked.txt",
   "grok--ask-z-typed.txt",
   "grok--done.txt",
+  "grok--draft-scrollbar-partial.txt",
+  "grok--draft-scrollbar.txt",
   "grok--draft-single.txt",
   "grok--draft-wrapped.txt",
   "grok--fresh-idle.txt",
+  "grok--model-effort-moved.txt",
+  "grok--model-effort.txt",
+  "grok--model-picker-moved.txt",
+  "grok--model-picker.txt",
+  "grok--model-window-moved.txt",
+  "grok--model-window.txt",
+  "grok--output-scrollbar.txt",
   "grok--permission-edit.txt",
   "grok--permission-rm-feedback.txt",
   "grok--permission-rm-moved.txt",
@@ -50,6 +59,9 @@ const PINNED = [
   "grok--plan-approval.txt",
   "grok--plan-request-changes.txt",
   "grok--plan-tab-prompt.txt",
+  "grok--reply-table-highlighted.txt",
+  "grok--reply-table-scrollbar.txt",
+  "grok--reporter-294-draft-newline-hint.txt",
   "grok--startup.txt",
   "grok--user-bubble.txt",
   "grok--working.txt",
@@ -65,6 +77,12 @@ const DIALOG = [
   "grok--ask-z-focused.txt",
   "grok--ask-z-parked.txt",
   "grok--ask-z-typed.txt",
+  "grok--model-effort-moved.txt",
+  "grok--model-effort.txt",
+  "grok--model-picker-moved.txt",
+  "grok--model-picker.txt",
+  "grok--model-window-moved.txt",
+  "grok--model-window.txt",
   "grok--permission-edit.txt",
   "grok--permission-rm-feedback.txt",
   "grok--permission-rm-moved.txt",
@@ -77,10 +95,18 @@ const DIALOG = [
 const ownFixtures = DIALOG;
 const neutralFixtures = allGrokFixtures.filter((f) => !DIALOG.includes(f));
 
+// Every opencode capture must stay raw under the grok adapter too — the cross-adapter leg.
+const allOpencodeFixtures = readdirSync(PANES_DIR)
+  .filter((f) => f.startsWith("oc--") && f.endsWith(".txt"))
+  .toSorted();
+
 describeAdapterConformance(grokAdapter, {
   ownFixtures,
-  foreignFixtures: [...allClaudeFixtures, ...allOmpFixtures, ...allCodexFixtures],
+  foreignFixtures: [...allClaudeFixtures, ...allOmpFixtures, ...allCodexFixtures, ...allOpencodeFixtures],
   neutralFixtures,
+  // A long draft pushes the hint row out of the tail the bridge binds to, so these captures must
+  // not be read as a short composer that can be bound.
+  unboundComposerFixtures: ["grok--draft-scrollbar.txt", "grok--draft-scrollbar-partial.txt"],
 });
 
 describe("the grok corpus", () => {
@@ -170,12 +196,15 @@ describe("grokBuildBlocks", () => {
     }
   });
 
-  it("the question rows stay in the raw mirror above the lifted options", () => {
+  it("the card starts at the question row when it is the only text above the options, so the mirror does not repeat it", () => {
+    // The card prints the question (PromptSubject, 2026-10-06), so a question left in the mirror above
+    // it shows twice in the Terminal view. The status row `◆ Waiting on answers for <question>` is not
+    // the dialog: only the `┃` rows are checked.
     const cases: [string, string][] = [
-      ["grok--permission-rm.txt", "Remove hello.txt as requested"],
       ["grok--permission-edit.txt", "Allow Edit to"],
       ["grok--ask-color.txt", "Which color theme should the dashboard use?"],
       ["grok--ask-wizard-q2.txt", "Dark mode?"],
+      ["grok--ask-size.txt", "Pick a size?"],
     ];
     for (const [name, question] of cases) {
       const lines = splitLines(parseAnsi(readFileSync(join(PANES_DIR, name), "utf8")));
@@ -185,11 +214,24 @@ describe("grokBuildBlocks", () => {
       expect(raw?.kind, name).toBe("raw");
       expect(prompt?.kind, name).toBe("prompt-select");
       if (raw?.kind !== "raw" || prompt?.kind !== "prompt-select") return;
-      // The renderer never repeats the question (aria only) — the mirror above must carry it,
-      // and the replaced region must begin at the first lifted row.
-      expect(raw.lines.map(lineText).join("\n"), name).toContain(question);
-      expect(lineText(prompt.lines[0]!), name).toMatch(/^\s*┃\s+[1-9z]\s/);
+      const gutterRows = raw.lines.map(lineText).filter((t) => t.includes("┃"));
+      expect(gutterRows.join("\n"), name).not.toContain(question);
+      expect(lineText(prompt.lines[0]!), name).toContain(question);
+      expect(prompt.prompt.question, name).toContain(question);
     }
+  });
+
+  it("a second text row above the options keeps the card at the first option, so no row disappears", () => {
+    // `rm hello.txt` sits under the title and the card does not print it: the mirror must keep both.
+    const lines = splitLines(parseAnsi(readFileSync(join(PANES_DIR, "grok--permission-rm.txt"), "utf8")));
+    const blocks = grokAdapter.buildBlocks(lines);
+    const raw = blocks[0];
+    const prompt = blocks.find((b) => b.kind === "prompt-select");
+    if (raw?.kind !== "raw" || prompt?.kind !== "prompt-select") throw new Error("expected raw + prompt-select");
+    const mirror = raw.lines.map(lineText).join("\n");
+    expect(mirror).toContain("Remove hello.txt as requested");
+    expect(mirror).toContain("rm hello.txt");
+    expect(lineText(prompt.lines[0]!)).toMatch(/^\s*┃\s+[1-9z]\s/);
   });
 
   it("checkbox asks stay raw — a digit submits rather than toggles", () => {

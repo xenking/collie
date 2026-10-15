@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 import { fetchStandbyRun, fetchUpdateState } from "./api";
-import { legsStillMoving, runInFlight } from "./update-ribbon";
+import { getUpdateStarted, legsStillMoving, runInFlight, subscribeUpdateStarted } from "./update-ribbon";
 import type { UpdateScreenCrewRun } from "./update-screen";
 import type { UpdateCheckResponse, UpdateCrewMember, UpdateInfo, UpdateRun } from "./types";
 
@@ -92,6 +92,20 @@ export interface UpdateRunSnapshot {
   /** Has the front door answered once? A card cannot claim anything about this machine before it has. */
   readonly checked: boolean;
   /**
+   * Did the LAST read of `GET /api/update/check` fail (a timeout, the network, a non-2xx)? That is
+   * not the same fact as `check.preflight === null`, which is the bridge ANSWERING that it could not
+   * run the preflight (issue 400). A failed read says nothing about this machine; the card shows
+   * "couldn't reach the bridge" and a Retry, and never the preflight's own sentence.
+   */
+  readonly readFailed: boolean;
+  /**
+   * Has ANY source said anything about the run: the front door, the snapshot, the standby door or a
+   * 202? `checked` is true after a failed read too, which is right for the card and wrong for update
+   * mode: a document that boots during the restart gap has heard nothing, and must not read that as
+   * "there is no run" (ADR 0064).
+   */
+  readonly answered: boolean;
+  /**
    * What this machine is called, or null while nothing has said.
    *
    * Published by `routes/root.tsx` off the snapshot's roster ({@link noteLeadName}), because the
@@ -111,6 +125,8 @@ const EMPTY: UpdateRunSnapshot = {
   run: undefined,
   crew: [],
   checked: false,
+  readFailed: false,
+  answered: false,
   leadName: null,
   crewRun: null,
 };
@@ -196,6 +212,8 @@ function recompute(): void {
     run,
     crew: snapshot.check?.crew ?? [],
     checked: snapshot.checked,
+    readFailed: snapshot.readFailed,
+    answered: snapshot.answered || run !== undefined || snapshotCrew !== undefined,
     leadName: snapshot.leadName,
     // The same object while it says the same thing, so a poll that changed nothing about the crew
     // does not hand every reader a new one.
@@ -262,21 +280,111 @@ export function getUpdateRunSnapshot(): UpdateRunSnapshot {
   return snapshot;
 }
 
+/**
+ * How long the card's own read may take before it gives up (issue 400). The bridge can need most of
+ * 40 s to answer it: 5 s for the release check, 5 s for the crew sweep and 30 s for a fresh preflight
+ * when its 60 s cache has expired. The client's default GET leash is 10 s, so the card used to
+ * report "could not be run" about a bridge that was still working on the answer.
+ */
+export const READ_TIMEOUT_MS = 45_000;
+
+/**
+ * The wait before each automatic retry of a failed read, while a card is mounted. The last entry
+ * repeats. Growing, so a bridge that is down is not asked every few seconds for an hour, and short
+ * at first, so a read that lost one race is made good before the operator has looked twice.
+ */
+export const READ_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 30_000, 60_000];
+
+/** Front-door reads in flight, so the poll interval never stacks a request on a slow one. */
+let frontReads = 0;
+
 /** Ask the front door now. Used on mount and on every settle — the preflight's answer after an
  *  update is a different answer from the one before it. */
 export async function readUpdateState(signal?: AbortSignal): Promise<void> {
   const askedAt = Date.now();
+  frontReads += 1;
   try {
-    const check = await fetchUpdateState(signal);
+    const check = await fetchUpdateState(signal, READ_TIMEOUT_MS);
     checkRun = check.run;
     checkCrew = { crew: crewRunOf(check), at: askedAt };
-    snapshot = { ...snapshot, check, checked: true };
+    snapshot = { ...snapshot, check, checked: true, readFailed: false, answered: true };
+    retryAttempt = 0;
+    clearRetryTimer();
   } catch {
-    // A failed read is not an error to render: the versions come from the snapshot anyway, and the
-    // preflight simply stays unknown, which disables nothing and claims nothing.
-    snapshot = { ...snapshot, checked: true };
+    // A failed read is not an error to render as a verdict: the versions come from the snapshot
+    // anyway, and the preflight simply stays unknown. It is recorded as its own fact (issue 400),
+    // so the card can say the bridge was not reached, and a mounted card asks again.
+    //
+    // A read that a caller aborted (the card left, or asked again) is not a failure of the bridge.
+    const aborted = signal?.aborted === true;
+    snapshot = { ...snapshot, checked: true, readFailed: aborted ? snapshot.readFailed : true };
+    if (!aborted) scheduleRetry();
+  } finally {
+    frontReads -= 1;
   }
   recompute();
+}
+
+// ── THE RETRY OF A FAILED READ (issue 400) ──────────────────────────────────────────────────────
+//
+// The card asked once when it opened, and a read that failed left the button blocked until the page
+// was reloaded. While a card is mounted and the last read failed, ask again after a growing wait.
+// One timer, one request: the next wait starts when the last request has ended, so reads never
+// overlap, and a success or the card leaving stops it.
+
+let retryUsers = 0;
+let retryAttempt = 0;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let retryRead: Promise<void> | undefined;
+
+function clearRetryTimer(): void {
+  if (retryTimer !== undefined) clearTimeout(retryTimer);
+  retryTimer = undefined;
+}
+
+function scheduleRetry(): void {
+  if (retryUsers === 0 || retryTimer !== undefined || retryRead !== undefined) return;
+  const delay = READ_RETRY_DELAYS_MS[Math.min(retryAttempt, READ_RETRY_DELAYS_MS.length - 1)]!;
+  retryTimer = setTimeout(() => {
+    retryTimer = undefined;
+    retryAttempt += 1;
+    void retryUpdateRead();
+  }, delay);
+}
+
+/**
+ * Read again now, for the card's Retry button and for the timer. Joins a retry already in flight
+ * rather than starting a second one. A manual call starts the schedule over.
+ */
+export function retryUpdateRead(manual = false): Promise<void> {
+  if (manual) {
+    retryAttempt = 0;
+    clearRetryTimer();
+  }
+  if (retryRead !== undefined) return retryRead;
+  const read = readUpdateState().finally(() => {
+    retryRead = undefined;
+    // The failure inside the read could not schedule while this one was still marked in flight.
+    if (snapshot.readFailed) scheduleRetry();
+  });
+  retryRead = read;
+  return read;
+}
+
+/**
+ * A card is mounted and wants a failed read made good. Returns the stop: when the last card leaves,
+ * the pending timer goes. Nothing is asked here; the read that fails is what starts the schedule, and
+ * a read that had already failed before the card mounted starts it now.
+ */
+export function holdReadRetry(): () => void {
+  retryUsers += 1;
+  if (snapshot.readFailed) scheduleRetry();
+  return () => {
+    retryUsers -= 1;
+    if (retryUsers > 0) return;
+    retryAttempt = 0;
+    clearRetryTimer();
+  };
 }
 
 let timers: ReturnType<typeof setInterval>[] = [];
@@ -291,7 +399,9 @@ function stopTimers(): void {
 /** Start or stop the two intervals, so they exist exactly while a run is in flight and somebody is
  *  looking. Called after every change, and idempotent. */
 function arm(): void {
-  const wanted = listeners.size > 0 && (runInFlight(snapshot.run) || crewStillMoving());
+  // A CLAIM ASKS TOO (ADR 0064). A document that boots holding one, mid-restart, knows of no run yet:
+  // without this it would never ask the standby door, the one reader that answers in that window.
+  const wanted = listeners.size > 0 && (runInFlight(snapshot.run) || crewStillMoving() || getUpdateStarted() !== null);
   if (wanted === driving) return;
   if (!wanted) {
     stopTimers();
@@ -309,7 +419,11 @@ function arm(): void {
         }
       })();
     }, STANDBY_POLL_MS),
-    setInterval(() => void readUpdateState(), FRONT_POLL_MS),
+    // Not on top of a read that has not ended: its leash is 45 s now, and a dark network would
+    // otherwise stack a request every four seconds behind it.
+    setInterval(() => {
+      if (frontReads === 0) void readUpdateState();
+    }, FRONT_POLL_MS),
   ];
 }
 
@@ -335,8 +449,15 @@ function arm(): void {
  */
 function crewStillMoving(): boolean {
   const crew = snapshot.crewRun;
-  return crew !== null && legsStillMoving(crew.legs, crew.settledAt);
+  if (crew !== null && legsStillMoving(crew.legs, crew.settledAt)) return true;
+  // THE LEAD'S OWN RUN, AFTER ITS OWN `done` (ADR 0064). Its members ride its record, and update mode
+  // stays on step 5 while one of them moves, so the front door is asked for as long as they do.
+  const run = snapshot.run;
+  return run !== undefined && legsStillMoving(run.peers ?? [], run.settledAt ?? null);
 }
+
+// The claim comes and goes on its own store; the intervals follow it.
+subscribeUpdateStarted(() => arm());
 
 export function subscribeUpdateRun(listener: () => void): () => void {
   const first = listeners.size === 0;
@@ -366,6 +487,11 @@ export function __resetUpdateRunStore(): void {
   checkCrew = undefined;
   begun = null;
   setAside = null;
+  retryUsers = 0;
+  retryAttempt = 0;
+  retryRead = undefined;
+  clearRetryTimer();
+  frontReads = 0;
   if (begunTimer !== undefined) clearTimeout(begunTimer);
   begunTimer = undefined;
 }

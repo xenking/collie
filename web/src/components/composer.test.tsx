@@ -13,7 +13,18 @@ import { server } from "@/test/setup";
 import { fixtureServers, recordReply } from "@/test/handlers";
 import { CrewProvider } from "./crew-provider";
 import { Composer, TUI_SETTLE_MS } from "./composer";
+import { addRow, chordKey, DEFAULT_BOARD, setCell } from "@/lib/key-board";
+import { resetKeyBoard, setKeyBoard } from "@/lib/key-board-store";
 import { type ServerSummary } from "@/lib/types";
+
+// M46 spec 11 turns every send off for a pane the bridge has not answered lately (lib/liveness.ts).
+// These suites drive sends against a mocked network and never poll first, so they pin the pane live;
+// the gating itself is covered by liveness.test.ts and the *-offline suites.
+vi.mock("@/lib/liveness", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/liveness")>()),
+  isLive: () => true,
+  useLive: () => true,
+}));
 
 // A guarded send is TWO reply calls: type (submit:false), then — once the text is verified on the
 // input line — submit-only (empty text). Overriding the reply handler therefore has to keep the fake
@@ -68,14 +79,8 @@ function renderComposer(overrides: Partial<ComponentProps<typeof Composer>> = {}
     text: "pane output",
     terminalDraft: null,
     rawTerminalDraft: null,
-    prefs: { wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
-    setWrap: vi.fn(),
-    stepFontSize: vi.fn(),
-    setRawTerminal: vi.fn(),
-    setTapToFocus: vi.fn(),
-    mirrorNative: false,
-    setMirrorNative: vi.fn(),
-    setExpandClippedReply: vi.fn(),
+    prefs: { wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
+    display: { open: false, onToggle: vi.fn() },
     onSent: vi.fn(),
     ...overrides,
   };
@@ -122,14 +127,8 @@ function renderComposerWithStatus(
     text: "pane output",
     terminalDraft: null,
     rawTerminalDraft: null,
-    prefs: { wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
-    setWrap: vi.fn(),
-    stepFontSize: vi.fn(),
-    setRawTerminal: vi.fn(),
-    setTapToFocus: vi.fn(),
-    mirrorNative: false,
-    setMirrorNative: vi.fn(),
-    setExpandClippedReply: vi.fn(),
+    prefs: { wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
+    display: { open: false, onToggle: vi.fn() },
     onSent: vi.fn(),
     ...overrides,
   };
@@ -566,14 +565,8 @@ describe("Composer — send", () => {
               text="pane output"
               terminalDraft={null}
               rawTerminalDraft="leftover"
-              prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
-              setWrap={vi.fn()}
-              stepFontSize={vi.fn()}
-              setRawTerminal={vi.fn()}
-              setTapToFocus={vi.fn()}
-              mirrorNative={false}
-              setMirrorNative={vi.fn()}
-              setExpandClippedReply={vi.fn()}
+              prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
+              display={{ open: false, onToggle: vi.fn() }}
               onSent={vi.fn()}
             />
           </>
@@ -627,7 +620,10 @@ describe("Composer — send", () => {
         callLog.push("keys");
         return HttpResponse.json({ ok: true });
       }),
-      replyHandler((typed) => callLog.push(`reply:${typed}`)),
+      replyHandler(
+        (typed) => callLog.push(`reply:${typed}`),
+        () => callLog.push("submit"),
+      ),
     );
     renderComposer();
     const box = screen.getByPlaceholderText(/type a reply/i);
@@ -635,6 +631,9 @@ describe("Composer — send", () => {
     await user.type(box, "first");
     await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(callLog).toContain("reply:first"));
+    // The guard holds the submit for its settle window; the second send must wait for the
+    // first to complete, as sequential human taps do.
+    await waitFor(() => expect(callLog).toContain("submit"));
 
     await user.type(box, "second");
     await user.click(screen.getByRole("button", { name: "Send" }));
@@ -662,14 +661,8 @@ describe("Composer — send", () => {
       text: "pane output",
       terminalDraft: null,
       rawTerminalDraft: null,
-      prefs: { wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
-      setWrap: vi.fn(),
-      stepFontSize: vi.fn(),
-      setRawTerminal: vi.fn(),
-      setTapToFocus: vi.fn(),
-    mirrorNative: false,
-    setMirrorNative: vi.fn(),
-      setExpandClippedReply: vi.fn(),
+      prefs: { wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
+      display: { open: false, onToggle: vi.fn() },
       onSent: vi.fn(),
     };
     const router = createMemoryRouter([
@@ -761,14 +754,8 @@ describe("Composer — typing into the terminal", () => {
             text="pane output"
             terminalDraft={null}
             rawTerminalDraft={null}
-            prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
-            setWrap={vi.fn()}
-            stepFontSize={vi.fn()}
-            setRawTerminal={vi.fn()}
-            setTapToFocus={vi.fn()}
-              mirrorNative={false}
-              setMirrorNative={vi.fn()}
-            setExpandClippedReply={vi.fn()}
+            prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
+            display={{ open: false, onToggle: vi.fn() }}
             onSent={vi.fn()}
           />
         </>
@@ -865,7 +852,8 @@ describe("Composer — typing into the terminal", () => {
       Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
       fireEvent(document, new Event("visibilitychange"));
       fireEvent.click(screen.getByRole("button", { name: /^type into terminal$/i })); // re-arm
-      act(() => vi.runOnlyPendingTimers());
+      // Run the zero-delay blur, and stop well short of the re-armed session's 60s watchdog.
+      act(() => vi.advanceTimersByTime(1000));
     } finally {
       vi.useRealTimers();
     }
@@ -896,14 +884,8 @@ describe("Composer — typing into the terminal", () => {
             text="pane output"
             terminalDraft={null}
             rawTerminalDraft={null}
-            prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
-            setWrap={vi.fn()}
-            stepFontSize={vi.fn()}
-            setRawTerminal={vi.fn()}
-            setTapToFocus={vi.fn()}
-              mirrorNative={false}
-              setMirrorNative={vi.fn()}
-            setExpandClippedReply={vi.fn()}
+            prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
+            display={{ open: false, onToggle: vi.fn() }}
             onSent={vi.fn()}
           />
         </>
@@ -921,6 +903,98 @@ describe("Composer — typing into the terminal", () => {
 
     await waitFor(() => expect(screen.getByPlaceholderText(/type a reply/i)).toBeInTheDocument());
     expect(screen.getByTestId("status")).not.toHaveTextContent(/backgrounded/i);
+  });
+
+  // AltanS #379: the mode belongs to the session that armed it. When the
+  // agent under the pane changes (exit to shell), the mode disarms with a
+  // notice instead of streaming into the stranger. Mounting with an agent
+  // already set is not a change — no disarm, no notice.
+  it("disarms with a notice when the pane's agent changes", async () => {
+    function Harness() {
+      const [agent, setAgent] = useState<string | undefined>("claude");
+      return (
+        <>
+          <StatusSentinel />
+          <button type="button" onClick={() => setAgent(undefined)}>
+            agent exits
+          </button>
+          <Composer
+            paneId="w1:p1"
+            agent={agent}
+            isShell={false}
+            gone={false}
+            readOnly={false}
+            dialogPresent={false}
+            text="pane output"
+            terminalDraft={null}
+            rawTerminalDraft={null}
+            prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
+            display={{ open: false, onToggle: vi.fn() }}
+            onSent={vi.fn()}
+          />
+        </>
+      );
+    }
+    const router = createMemoryRouter([{ path: "/", element: <Harness /> }]);
+    render(<RouterProvider router={router} />);
+    startDirectTyping();
+    expect(screen.getByPlaceholderText(/type into the terminal/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "agent exits" }));
+
+    await waitFor(() =>
+      expect(screen.queryByPlaceholderText(/type into the terminal/i)).toBeNull(),
+    );
+    expect(screen.getByTestId("status")).toHaveTextContent(/agent changed/i);
+  });
+
+  // Same pane, same agent, a minute without a key: the mode disarms with a
+  // notice. The clock starts at the arming, because arming and then typing
+  // chat after the agent exited is the trap. A keystroke at 59s restarts it,
+  // so only 60s of true silence fires. Fake timers: the watchdog is the only
+  // clock under test.
+  it("disarms after 60 seconds without a keystroke, restarted by activity", async () => {
+    server.use(
+      http.post<never, { keys: string[] }>(/\/api\/pane\/[^/]+\/keys$/, async () => {
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+    renderComposerWithStatus();
+    vi.useFakeTimers();
+    const box = startDirectTyping();
+    try {
+      act(() => vi.advanceTimersByTime(59_000));
+      expect(screen.getByPlaceholderText(/type into the terminal/i)).toBeInTheDocument();
+      fireEvent.change(box, { target: { value: "y" } });
+      act(() => vi.advanceTimersByTime(59_000));
+      expect(screen.getByPlaceholderText(/type into the terminal/i)).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(1000));
+    } finally {
+      vi.useRealTimers();
+    }
+
+    await waitFor(() =>
+      expect(screen.queryByPlaceholderText(/type into the terminal/i)).toBeNull(),
+    );
+    expect(screen.getByTestId("status")).toHaveTextContent(/no key for 60 seconds/i);
+  });
+
+  it("disarms an armed mode that was never touched after 60 seconds", async () => {
+    renderComposerWithStatus();
+    vi.useFakeTimers();
+    startDirectTyping();
+    try {
+      act(() => vi.advanceTimersByTime(59_000));
+      expect(screen.getByPlaceholderText(/type into the terminal/i)).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(1000));
+    } finally {
+      vi.useRealTimers();
+    }
+
+    await waitFor(() =>
+      expect(screen.queryByPlaceholderText(/type into the terminal/i)).toBeNull(),
+    );
+    expect(screen.getByTestId("status")).toHaveTextContent(/no key for 60 seconds/i);
   });
 
   it("sends committed keyboard text as literal ordered keys with no implicit Enter", async () => {
@@ -1090,14 +1164,8 @@ describe("Composer — typing into the terminal", () => {
             text="pane output"
             terminalDraft={null}
             rawTerminalDraft={null}
-            prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
-            setWrap={vi.fn()}
-            stepFontSize={vi.fn()}
-            setRawTerminal={vi.fn()}
-            setTapToFocus={vi.fn()}
-              mirrorNative={false}
-              setMirrorNative={vi.fn()}
-            setExpandClippedReply={vi.fn()}
+            prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
+            display={{ open: false, onToggle: vi.fn() }}
             onSent={vi.fn()}
           />
         </>
@@ -1201,6 +1269,7 @@ describe("Composer — the draft field wears its own size", () => {
         wrap: true,
         fontSize: 11,
         draftFontSize: 13,
+        chatFontSize: 14,
         fontFamily: "jetbrains",
         expandClippedReply: true,
         rawTerminal: false,
@@ -1611,14 +1680,8 @@ function renderDraftHarness(overrides: Partial<ComponentProps<typeof Composer>> 
       readOnly: false,
       dialogPresent: false,
       text: "pane output",
-      prefs: { wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
-      setWrap: vi.fn(),
-      stepFontSize: vi.fn(),
-      setRawTerminal: vi.fn(),
-      setTapToFocus: vi.fn(),
-    mirrorNative: false,
-    setMirrorNative: vi.fn(),
-      setExpandClippedReply: vi.fn(),
+      prefs: { wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
+      display: { open: false, onToggle: vi.fn() },
       onSent: vi.fn(),
       ...rest,
       terminalDraft: stable,
@@ -1948,14 +2011,8 @@ describe("Composer — in-flight echo suppression (match-last-sent)", () => {
       text: "pane output",
       terminalDraft: draft,
       rawTerminalDraft: draft,
-      prefs: { wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
-      setWrap: vi.fn(),
-      stepFontSize: vi.fn(),
-      setRawTerminal: vi.fn(),
-      setTapToFocus: vi.fn(),
-    mirrorNative: false,
-    setMirrorNative: vi.fn(),
-      setExpandClippedReply: vi.fn(),
+      prefs: { wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
+      display: { open: false, onToggle: vi.fn() },
       onSent: vi.fn(),
     };
     return (
@@ -1981,7 +2038,10 @@ describe("Composer — in-flight echo suppression (match-last-sent)", () => {
         callLog.push("keys");
         return HttpResponse.json({ ok: true });
       }),
-      replyHandler((typed) => callLog.push(`reply:${typed}`)),
+      replyHandler(
+        (typed) => callLog.push(`reply:${typed}`),
+        () => callLog.push("submit"),
+      ),
     );
     renderEcho("/rename");
     const box = screen.getByPlaceholderText(/type a reply/i);
@@ -1990,6 +2050,8 @@ describe("Composer — in-flight echo suppression (match-last-sent)", () => {
     await user.type(box, "/rename");
     await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(callLog).toContain("reply:/rename"));
+    // Let the first send clear its settle window before the follow-up, as a human pause does.
+    await waitFor(() => expect(callLog).toContain("submit"));
 
     // The mirror now echoes the in-flight "/rename" back onto the ❯ line — no stranded-draft chip.
     await user.click(screen.getByRole("button", { name: "__set-draft" }));
@@ -2037,6 +2099,103 @@ describe("Composer — in-flight echo suppression (match-last-sent)", () => {
     await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(callLog).toContain("reply:someone else's leftover"));
     expect(callLog).toContain("keys");
+  });
+});
+
+// While a send is still in flight, the terminal line carries OUR staging text (attachments go
+// out as host paths) — the draft preview must stay off for it, or a slow photo send flashes the
+// card while the guard verifies. The gate only hides DURING the send; afterwards the ordinary
+// echo/handled path resumes, so a foreign draft that is still there surfaces again once its line
+// changes (pinned for the non-sending case by the test above).
+describe("Composer — no draft preview while its own send is in flight", () => {
+  function FlightHarness({ staged }: { staged: string }) {
+    // The parent strands the staged line while the send is held, the way the mirror would once
+    // the guard has typed the text and Enter is still pending. The second button strands a
+    // DIFFERENT line afterwards, proving the gate delays rather than permanently suppresses.
+    const [draft, setDraft] = useState<string | null>(null);
+    const props: ComponentProps<typeof Composer> = {
+      paneId: "w1:p1",
+      agent: "claude",
+      isShell: false,
+      gone: false,
+      readOnly: false,
+      dialogPresent: false,
+      text: "pane output",
+      terminalDraft: draft,
+      rawTerminalDraft: draft,
+      prefs: { wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
+      display: { open: false, onToggle: vi.fn() },
+      onSent: vi.fn(),
+    };
+    return (
+      <>
+        <button onClick={() => setDraft(staged)}>__strand-staged</button>
+        <button onClick={() => setDraft("host typed more afterwards")}>__strand-other</button>
+        <Composer {...props} />
+      </>
+    );
+  }
+
+  function renderFlight(staged: string) {
+    const router = createMemoryRouter([{ path: "/", element: <FlightHarness staged={staged} /> }]);
+    render(<RouterProvider router={router} />);
+  }
+
+  // Hold the type call: the send stays staged (sending) until the returned release runs.
+  // The submit call passes straight through, so releasing the gate always lets the send complete.
+  function holdTypeCall(callLog: string[]) {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.post(/\/api\/pane\/[^/]+\/keys$/, async () => HttpResponse.json({ ok: true })),
+      http.post<never, { text: string; submit?: boolean }>(/\/api\/pane\/[^/]+\/reply$/, async ({ request }) => {
+        const body = await request.json();
+        recordReply(body);
+        callLog.push(body.submit ? "submit" : `reply:${body.text}`);
+        if (!body.submit) await gate;
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+    return { release };
+  }
+
+  it("hides its own staged photo path for the whole send, and stays quiet after", async () => {
+    const user = userEvent.setup();
+    const callLog: string[] = [];
+    const { release } = holdTypeCall(callLog);
+    const staged = "schau mal /home/andiw/.local/state/collie/uploads/w4_p2-abc123.jpg";
+    renderFlight(staged);
+    await user.type(screen.getByPlaceholderText(/type a reply/i), staged);
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(callLog).toContain(`reply:${staged}`));
+    // The guard has typed the line and Enter is pending — the staged text must not surface.
+    await user.click(screen.getByRole("button", { name: "__strand-staged" }));
+    expect(screen.queryByText(/draft in terminal/i)).not.toBeInTheDocument();
+    release();
+    await waitFor(() => expect(callLog).toContain("submit"));
+    expect(screen.queryByText(/draft in terminal/i)).not.toBeInTheDocument();
+  });
+
+  it("hides even a foreign draft while the send is in flight", async () => {
+    // The send moment belongs to the phone: a host draft that appears mid-send waits until the
+    // send completes rather than fighting it for the mirror.
+    const user = userEvent.setup();
+    const callLog: string[] = [];
+    const { release } = holdTypeCall(callLog);
+    renderFlight("someone else's leftover");
+    await user.type(screen.getByPlaceholderText(/type a reply/i), "hello");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(callLog).toContain("reply:hello"));
+    await user.click(screen.getByRole("button", { name: "__strand-staged" }));
+    expect(screen.queryByText(/draft in terminal/i)).not.toBeInTheDocument();
+    release();
+    await waitFor(() => expect(callLog).toContain("submit"));
+    // The delay is bounded, not permanent: a genuinely new line after the send surfaces again.
+    // (This doubles as the in-harness positive control — a latch that never fires could not pass.)
+    await user.click(screen.getByRole("button", { name: "__strand-other" }));
+    expect(await screen.findByText(/draft in terminal/i)).toBeInTheDocument();
   });
 });
 
@@ -2301,6 +2460,69 @@ describe("Composer — keys dock (in-flow, not an overlay)", () => {
     expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
   });
 
+  it("the pencil sits beside the KEYS label on the same line, ahead of the close X, and opens the editor", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    await user.click(screen.getByRole("button", { name: "Keys" }));
+
+    const pencil = screen.getByRole("button", { name: "Edit keys" });
+    const close = screen.getByRole("button", { name: "Close Keys" });
+    // The pencil and the label share one group, which is on the header row; the close X is the row's far end.
+    const group = pencil.parentElement;
+    expect(group).toHaveClass("items-center");
+    expect(group?.textContent).toContain("Keys");
+    expect(group?.contains(close)).toBe(false);
+    expect(group?.parentElement).toBe(close.parentElement);
+    expect(pencil.compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    // 28px drawn, 44px reached, like the X beside it.
+    expect(pencil).toHaveClass("size-7");
+    expect(pencil.className).toContain("before:-inset-2");
+    // Quick has no pencil.
+    expect(screen.queryByRole("dialog", { name: "Edit keys" })).toBeNull();
+
+    await user.click(pencil);
+    expect(screen.getByRole("dialog", { name: "Edit keys" })).toBeInTheDocument();
+    // The dock stays put behind the sheet.
+    expect(screen.getAllByRole("button", { name: "Esc" }).length).toBeGreaterThan(0);
+  });
+
+  it("the Keys dock header holds the KEYS label and the pencil and no machine name, on a crew too", async () => {
+    const user = userEvent.setup();
+    renderComposerWithStatus({ scope: { host: "workshop" } }, fixtureServers);
+    await user.click(screen.getByRole("button", { name: "Keys" }));
+
+    const pencil = screen.getByRole("button", { name: "Edit keys" });
+    const group = pencil.parentElement!;
+    // The group is the label and the pencil, nothing else: two children, no chip, no machine word.
+    expect(group.children).toHaveLength(2);
+    expect(group.textContent).toBe("Keys");
+    const header = group.parentElement!;
+    expect(header.textContent).not.toMatch(/workshop/i);
+    expect(header.querySelector("[data-slot='host-chip']")).toBeNull();
+  });
+
+  it("a custom key from the board goes out through the same pane.send_keys, a sequence in order", async () => {
+    const user = userEvent.setup();
+    let sentKeys: string[] | null = null;
+    server.use(
+      http.post<never, { keys: string[] }>(/\/api\/pane\/[^/]+\/keys$/, async ({ request }) => {
+        sentKeys = (await request.json()).keys;
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+    const seq = chordKey(["ctrl+b", "c"]);
+    if (seq === null) throw new Error("bad key");
+    setKeyBoard(setCell(addRow(DEFAULT_BOARD), 14, seq));
+    try {
+      renderComposer();
+      await user.click(screen.getByRole("button", { name: "Keys" }));
+      await user.click(screen.getByRole("button", { name: "Ctrl+B, then C" }));
+      await waitFor(() => expect(sentKeys).toEqual(["ctrl+b", "c"]));
+    } finally {
+      resetKeyBoard();
+    }
+  });
+
   it("routes a docked key press through pane.send_keys", async () => {
     const user = userEvent.setup();
     let sentKeys: string[] | null = null;
@@ -2381,7 +2603,8 @@ describe("Composer — quick dock (in-flow, matches the keys dock)", () => {
     await user.click(screen.getByRole("button", { name: "continue" }));
 
     await waitFor(() => expect(replyText).toBe("continue"));
-    expect(props.onSent).toHaveBeenCalled();
+    // onSent fires on send completion, which waits out the submit settle past the type POST.
+    await waitFor(() => expect(props.onSent).toHaveBeenCalled());
     // The dock deliberately OUTLIVES the send — the ✓ has to land somewhere the user is still
     // looking — and closes itself once the echo has been seen.
     await waitFor(
@@ -2441,42 +2664,52 @@ describe("Composer — quick dock (in-flow, matches the keys dock)", () => {
   });
 });
 
-describe("Composer — display prefs behind the gear", () => {
-  it("the View row is gone; wrap/raw/font live behind the Display gear as labelled controls", async () => {
-    const user = userEvent.setup();
+// The gear is the composer's; the PANEL it opens is not any more. It became a BottomSheet on
+// 2026-09-30 and a sheet cannot be mounted inside the composer's animated, sticky ancestry, so
+// AgentChat owns it and this file owns only the button. What the rows themselves draw is pinned in
+// display-prefs.test.tsx.
+describe("Composer — the Display gear", () => {
+  it("nothing display-related sits on the permanent rows", () => {
     renderComposer();
-
-    // Nothing display-related is on the permanent rows any more.
     expect(screen.queryByRole("button", { name: "Decrease font size" })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Display settings" }));
-
-    // Named controls, not bare glyphs — the whole point of the move.
-    expect(screen.getByRole("switch", { name: "Wrap lines" })).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: "Raw terminal" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Decrease font size" })).toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: "Wrap lines" })).not.toBeInTheDocument();
   });
 
-  it("the Display dock shares the single drawer slot with Keys", async () => {
+  it("the gear asks its owner to toggle the sheet", async () => {
     const user = userEvent.setup();
-    renderComposer();
+    const onToggle = vi.fn();
+    renderComposer({ display: { open: false, onToggle } });
 
-    await user.click(screen.getByRole("button", { name: "Display settings" }));
-    expect(screen.getByRole("switch", { name: "Wrap lines" })).toBeInTheDocument();
+    const gear = screen.getByRole("button", { name: "Display settings" });
+    expect(gear).toHaveAttribute("aria-expanded", "false");
+    await user.click(gear);
+    expect(onToggle).toHaveBeenCalledOnce();
+  });
+
+  it("an open sheet is reported on the gear, and closes the Keys tray under it", async () => {
+    const user = userEvent.setup();
+    const onToggle = vi.fn();
+    renderComposer({ display: { open: true, onToggle } });
+    expect(screen.getByRole("button", { name: "Display settings" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
 
     await user.click(screen.getByRole("button", { name: "Keys" }));
-    expect(screen.queryByRole("switch", { name: "Wrap lines" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Esc" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Display settings" }));
+    expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
   });
 
-  it("display prefs stay reachable on a read-only device", async () => {
+  it("the gear stays reachable on a read-only device", async () => {
     const user = userEvent.setup();
-    renderComposer({ readOnly: true });
+    const onToggle = vi.fn();
+    renderComposer({ readOnly: true, display: { open: false, onToggle } });
 
     // Keys/Quick are write affordances and lock; the gear is local view state and must not.
     expect(screen.getByRole("button", { name: "Keys" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Display settings" }));
-    expect(screen.getByRole("switch", { name: "Wrap lines" })).toBeInTheDocument();
+    expect(onToggle).toHaveBeenCalledOnce();
   });
 });
 
@@ -2582,6 +2815,7 @@ describe("Composer — quick replies follow the pane kind", () => {
 
     expect(screen.getByRole("button", { name: "continue" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "commit and push" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "drastically simplify" })).toBeInTheDocument();
   });
 
   it("a shell pane gets y/n, not the agent phrases", async () => {
@@ -2592,6 +2826,7 @@ describe("Composer — quick replies follow the pane kind", () => {
     expect(screen.getByRole("button", { name: "y" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "n" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "commit and push" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "drastically simplify" })).not.toBeInTheDocument();
   });
 });
 
@@ -2613,14 +2848,8 @@ describe("Composer — draft persistence", () => {
       text: "pane output",
       terminalDraft: null,
       rawTerminalDraft: null,
-      prefs: { wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
-      setWrap: vi.fn(),
-      stepFontSize: vi.fn(),
-      setRawTerminal: vi.fn(),
-      setTapToFocus: vi.fn(),
-    mirrorNative: false,
-    setMirrorNative: vi.fn(),
-      setExpandClippedReply: vi.fn(),
+      prefs: { wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true },
+      display: { open: false, onToggle: vi.fn() },
       onSent: vi.fn(),
       ...overrides,
     };
@@ -3195,6 +3424,24 @@ describe("Composer — an attachment is a chip (ADR 0060)", () => {
     expect(typed).toEqual(["[Image #7] is a label"]);
   });
 
+  // 2026-10-14, minibuch: a draft carried a stale `[Image #1]` with no chip behind it (text copied
+  // from a pane that was closed), the next photo was numbered #1 again, and Send swapped BOTH copies
+  // for its path. Two trailing paths became two images in Claude's box, and the send stalled.
+  it("numbers a new chip past every marker already in the text, so a stale one is never its twin", async () => {
+    const user = userEvent.setup();
+    const typed: string[] = [];
+    uploadAnswers("/a.png");
+    server.use(replyHandler((t) => typed.push(t)));
+    const props = renderComposer();
+    fireEvent.change(field(), { target: { value: "look at this [Image #1]" } });
+    pick(png("a.png"));
+    await waitFor(() => expect(field()).toHaveValue("look at this [Image #1] [Image #2] "));
+
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(props.onSent).toHaveBeenCalled());
+    expect(typed).toEqual(["look at this [Image #1] /a.png"]);
+  });
+
   it("chips alone are something to send: Send is enabled and sends the paths", async () => {
     const user = userEvent.setup();
     const typed: string[] = [];
@@ -3380,5 +3627,453 @@ describe("Composer — an attachment is a chip (ADR 0060)", () => {
       expect(screen.getByRole("list", { name: "Attachments" })).toHaveTextContent("a-rather-long…");
     });
 
+  });
+});
+
+// THE BELT'S X AND ITS UNDO (M40 spec 04, issue #291; Altan, 2026-09-26/27). An icon-only X on the
+// belt's pinned block while the phone's box holds text or chips. One tap empties the text, the chips
+// and the stored draft of this pane and sends nothing to the pane; the slot then shows Undo until the
+// next act (no timer), and Undo puts all three back.
+describe("Composer — the belt's clear control (M40 spec 04, #291)", () => {
+  const chip = { n: 1, path: "/tmp/a.png", name: "a.png", kind: "image" as const };
+  // SAFETY: the composer's only placeholder-bearing control is its ChatInput, a `<textarea>`, and
+  // `getByPlaceholderText` throws when it is absent.
+  const field = () => screen.getByPlaceholderText(/type a reply/i) as HTMLTextAreaElement;
+  const xButton = () => screen.queryByRole("button", { name: "Clear message" });
+  const undoButton = () => screen.queryByRole("button", { name: "Undo clear" });
+
+  /** Every request that is not a read, as `METHOD /path`. The X and Undo must add none: no key, no
+   *  reply, no upload reaches any pane. */
+  const writes: string[] = [];
+  function logWrites({ request }: { request: Request }) {
+    if (request.method !== "GET") writes.push(`${request.method} ${new URL(request.url).pathname}`);
+  }
+  beforeEach(() => {
+    writes.length = 0;
+    server.events.on("request:start", logWrites);
+  });
+  afterEach(() => {
+    server.events.removeListener("request:start", logWrites);
+    vi.useRealTimers();
+  });
+
+  function pick(...files: File[]) {
+    // SAFETY: `getByTestId` throws when the element is absent, and this id is on an `<input>`.
+    const photos = screen.getByTestId("attach-photos") as HTMLInputElement;
+    fireEvent.change(photos, { target: { files } });
+  }
+
+  it("draws no X on an empty box", () => {
+    renderComposer();
+    expect(xButton()).not.toBeInTheDocument();
+    expect(undoButton()).not.toBeInTheDocument();
+  });
+
+  it("draws the X on the belt once the box holds text, and takes it away when the text goes", () => {
+    renderComposer();
+    fireEvent.change(field(), { target: { value: "half a thought" } });
+    const x = xButton();
+    expect(x).toBeInTheDocument();
+    expect(x!.closest('[data-slot="composer-actions"]')).not.toBeNull();
+    fireEvent.change(field(), { target: { value: "" } });
+    expect(xButton()).not.toBeInTheDocument();
+  });
+
+  it("draws the X for a box that holds only a chip", () => {
+    saveDraft(undefined, "w1:p1", "", [chip], 2);
+    renderComposer();
+    expect(field()).toHaveValue("");
+    expect(xButton()).toBeInTheDocument();
+  });
+
+  it("one tap clears the text, the chips and the stored draft, and sends nothing to the pane", async () => {
+    const user = userEvent.setup();
+    saveDraft(undefined, "w1:p1", "see [Image #1] this", [chip], 2);
+    renderComposer();
+    expect(screen.getByRole("button", { name: "Remove a.png" })).toBeInTheDocument();
+
+    await user.click(xButton()!);
+
+    expect(field()).toHaveValue("");
+    expect(screen.queryByRole("button", { name: "Remove a.png" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Attachments" })).not.toBeInTheDocument();
+    expect(loadDraftEntry(undefined, "w1:p1")).toBeNull();
+    // The slot is Undo now, and the empty box is back to its microphone-or-Send rest.
+    expect(undoButton()).toBeInTheDocument();
+    expect(xButton()).not.toBeInTheDocument();
+    expect(writes).toEqual([]);
+  });
+
+  it("clear, then Undo: the text, the chips, their numbering and the stored draft all come back", async () => {
+    const user = userEvent.setup();
+    saveDraft(undefined, "w1:p1", "see [Image #1] this", [chip], 2);
+    renderComposer();
+
+    await user.click(xButton()!);
+    await user.click(undoButton()!);
+
+    expect(field()).toHaveValue("see [Image #1] this");
+    expect(screen.getByRole("button", { name: "Remove a.png" })).toBeInTheDocument();
+    expect(loadDraftEntry(undefined, "w1:p1")).toEqual({ text: "see [Image #1] this", attachments: [chip], next: 2 });
+    // The window is spent: the box holds a draft again, so the slot is the X again.
+    expect(undoButton()).not.toBeInTheDocument();
+    expect(xButton()).toBeInTheDocument();
+    expect(writes).toEqual([]);
+  });
+
+  it("clear keeps the numbering it restarted: a chip after an Undo continues from the old next", async () => {
+    const user = userEvent.setup();
+    saveDraft(undefined, "w1:p1", "[Image #1] [Image #2] ", [chip, { ...chip, n: 2, name: "b.png" }], 3);
+    renderComposer();
+    await user.click(xButton()!);
+    // Cleared, the draft is gone from the store, numbering and all.
+    expect(loadDraftEntry(undefined, "w1:p1")).toBeNull();
+    await user.click(undoButton()!);
+    expect(loadDraftEntry(undefined, "w1:p1")?.next).toBe(3);
+  });
+
+  it("clear: Undo has no timer, it stands until the next act", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    renderComposer();
+    fireEvent.change(field(), { target: { value: "never mind" } });
+
+    await user.click(xButton()!);
+    expect(undoButton()).toBeInTheDocument();
+
+    // Altan, 2026-09-27: a slot that left on a clock narrowed the pinned block under a tap on its way.
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(undoButton()).toBeInTheDocument();
+  });
+
+  it("clear: a tap on another belt control ends Undo, and the draft stays gone", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    fireEvent.change(field(), { target: { value: "never mind" } });
+    await user.click(xButton()!);
+    expect(undoButton()).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Keys" }));
+
+    expect(undoButton()).not.toBeInTheDocument();
+    // An empty box after the window: the slot empties, nothing comes back.
+    expect(xButton()).not.toBeInTheDocument();
+    expect(field()).toHaveValue("");
+    expect(loadDraftEntry(undefined, "w1:p1")).toBeNull();
+  });
+
+  it("clear: the next keystroke ends the Undo window, and the slot is the X again", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    fireEvent.change(field(), { target: { value: "first try" } });
+    await user.click(xButton()!);
+
+    await user.type(field(), "n");
+
+    expect(field()).toHaveValue("n");
+    expect(undoButton()).not.toBeInTheDocument();
+    expect(xButton()).toBeInTheDocument();
+    // The keystroke's draft is the stored one, never the cleared text.
+    expect(loadDraftEntry(undefined, "w1:p1")?.text).toBe("n");
+  });
+
+  it("clear: a new chip ends the Undo window, and numbers from #1 again", async () => {
+    const user = userEvent.setup();
+    server.use(http.post(/\/api\/pane\/[^/]+\/upload$/, () => HttpResponse.json({ ok: true, path: "/tmp/new.png" })));
+    saveDraft(undefined, "w1:p1", "[Image #1] ", [chip], 2);
+    renderComposer();
+    await user.click(xButton()!);
+
+    pick(new File(["x"], "new.png", { type: "image/png" }));
+
+    await waitFor(() => expect(field()).toHaveValue("[Image #1] "));
+    expect(screen.getByRole("button", { name: "Remove new.png" })).toBeInTheDocument();
+    expect(undoButton()).not.toBeInTheDocument();
+    expect(xButton()).toBeInTheDocument();
+  });
+
+  it("clear: a pane switch ends the Undo window, and the cleared draft never comes back", async () => {
+    const user = userEvent.setup();
+    let swap: ((id: string) => void) | null = null;
+    function Harness() {
+      const [paneId, setPaneId] = useState("w1:p1");
+      swap = setPaneId;
+      return (
+        <Composer
+          paneId={paneId}
+          agent="claude"
+          isShell={false}
+          gone={false}
+          readOnly={false}
+          dialogPresent={false}
+          text="pane output"
+          terminalDraft={null}
+          rawTerminalDraft={null}
+          prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
+          display={{ open: false, onToggle: vi.fn() }}
+          onSent={vi.fn()}
+        />
+      );
+    }
+    render(<RouterProvider router={createMemoryRouter([{ path: "/", element: <Harness /> }])} />);
+    fireEvent.change(field(), { target: { value: "for pane A" } });
+    await user.click(xButton()!);
+    expect(undoButton()).toBeInTheDocument();
+
+    act(() => swap?.("w1:p2"));
+    expect(undoButton()).not.toBeInTheDocument();
+    act(() => swap?.("w1:p1"));
+    expect(field()).toHaveValue("");
+    expect(undoButton()).not.toBeInTheDocument();
+    expect(loadDraftEntry(undefined, "w1:p1")).toBeNull();
+  });
+
+  it("clear keeps the field focused, so the phone keyboard stays up", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    await user.click(field());
+    await user.keyboard("hello");
+    expect(field()).toHaveFocus();
+
+    await user.click(xButton()!);
+    expect(field()).toHaveValue("");
+    expect(field()).toHaveFocus();
+
+    await user.click(undoButton()!);
+    expect(field()).toHaveValue("hello");
+    expect(field()).toHaveFocus();
+  });
+
+  it("clear disarms a pending Really send? confirm, because the draft it was about is gone", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    fireEvent.change(field(), { target: { value: "rm -rf build" } });
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(screen.getByRole("button", { name: "Really send?" })).toBeInTheDocument();
+
+    await user.click(xButton()!);
+    expect(screen.queryByRole("button", { name: "Really send?" })).not.toBeInTheDocument();
+    expect(writes).toEqual([]);
+  });
+
+  describe("when the X is inert, and when it is not", () => {
+    it("is inert while a send is in flight: aria-disabled, and a tap clears nothing", async () => {
+      const user = userEvent.setup();
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      server.use(
+        http.post<never, { text: string; submit?: boolean }>(/\/api\/pane\/[^/]+\/reply$/, async ({ request }) => {
+          const body = await request.json();
+          await held;
+          recordReply(body);
+          return HttpResponse.json({ ok: true });
+        }),
+      );
+      const props = renderComposer();
+      fireEvent.change(field(), { target: { value: "looks good" } });
+      await user.click(screen.getByRole("button", { name: "Send" }));
+
+      const x = xButton()!;
+      await waitFor(() => expect(x).toHaveAttribute("aria-disabled", "true"));
+      await user.click(x);
+      expect(field()).toHaveValue("looks good");
+      expect(undoButton()).not.toBeInTheDocument();
+
+      release();
+      await waitFor(() => expect(props.onSent).toHaveBeenCalled());
+      // The request log is live: the send itself is in it, so the empty logs above are real.
+      expect(writes.some((w) => /^POST \/api\/pane\/[^/]+\/reply$/.test(w))).toBe(true);
+      // The verified send emptied the box itself, so the slot is empty, not Undo.
+      expect(xButton()).not.toBeInTheDocument();
+      expect(undoButton()).not.toBeInTheDocument();
+    });
+
+    it("is inert while Type is armed: the field is a live keyboard then, not a draft", async () => {
+      const user = userEvent.setup();
+      // Chips alone with no text: the one draft Type can still arm over.
+      saveDraft(undefined, "w1:p1", "", [chip], 2);
+      renderComposer();
+      await user.click(screen.getByRole("button", { name: "Type into terminal" }));
+      const x = xButton()!;
+      expect(x).toHaveAttribute("aria-disabled", "true");
+      await user.click(x);
+      expect(screen.getByRole("button", { name: "Remove a.png" })).toBeInTheDocument();
+    });
+
+    it("arming Type ends an open Undo window", async () => {
+      const user = userEvent.setup();
+      renderComposer();
+      fireEvent.change(field(), { target: { value: "draft" } });
+      await user.click(xButton()!);
+      expect(undoButton()).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Type into terminal" }));
+      expect(undoButton()).not.toBeInTheDocument();
+    });
+
+    it("is not inert on a locked composer: the draft is this phone's own", async () => {
+      const user = userEvent.setup();
+      saveDraft(undefined, "w1:p1", "typed before the pane went", [], 1);
+      renderComposer({ gone: true });
+      // A gone pane has its own placeholder, so the field is addressed by its role here.
+      const box = screen.getByRole("textbox");
+      expect(box).toBeDisabled();
+      const x = xButton()!;
+      expect(x).not.toHaveAttribute("aria-disabled");
+      await user.click(x);
+      expect(box).toHaveValue("");
+      expect(loadDraftEntry(undefined, "w1:p1")).toBeNull();
+      await user.click(undoButton()!);
+      expect(box).toHaveValue("typed before the pane went");
+      expect(writes).toEqual([]);
+    });
+  });
+
+  describe("with object URLs", () => {
+    const revoked: string[] = [];
+    beforeEach(() => {
+      revoked.length = 0;
+      let n = 0;
+      Object.defineProperty(URL, "createObjectURL", {
+        value: () => `blob:test/${++n}`,
+        configurable: true,
+        writable: true,
+      });
+      Object.defineProperty(URL, "revokeObjectURL", {
+        value: (url: string) => revoked.push(url),
+        configurable: true,
+        writable: true,
+      });
+    });
+    afterEach(() => {
+      Reflect.deleteProperty(URL, "createObjectURL");
+      Reflect.deleteProperty(URL, "revokeObjectURL");
+    });
+
+    it("clear holds a photo's preview for Undo, and releases it only when the window ends without one", async () => {
+      const user = userEvent.setup();
+      server.use(http.post(/\/api\/pane\/[^/]+\/upload$/, () => HttpResponse.json({ ok: true, path: "/tmp/a.png" })));
+      renderComposer();
+      pick(new File(["x"], "a.png", { type: "image/png" }));
+      expect(await screen.findByRole("img", { name: "a.png" })).toHaveAttribute("src", "blob:test/1");
+
+      await user.click(xButton()!);
+      expect(screen.queryByRole("img", { name: "a.png" })).not.toBeInTheDocument();
+      expect(revoked).toEqual([]);
+
+      await user.click(undoButton()!);
+      expect(screen.getByRole("img", { name: "a.png" })).toHaveAttribute("src", "blob:test/1");
+      expect(revoked).toEqual([]);
+
+      // Cleared again, and this time a keystroke ends the window: now the preview goes.
+      await user.click(xButton()!);
+      await user.type(field(), "x");
+      expect(revoked).toEqual(["blob:test/1"]);
+    });
+
+    it("clear: an Undo window open at unmount releases the previews it held", async () => {
+      const user = userEvent.setup();
+      server.use(http.post(/\/api\/pane\/[^/]+\/upload$/, () => HttpResponse.json({ ok: true, path: "/tmp/a.png" })));
+      renderComposer();
+      pick(new File(["x"], "a.png", { type: "image/png" }));
+      await screen.findByRole("img", { name: "a.png" });
+      await user.click(xButton()!);
+      cleanup();
+      expect(revoked).toEqual(["blob:test/1"]);
+    });
+  });
+});
+
+// THE LEFT-HAND COMPOSER (Settings -> Hand). The box runs mirrored in CSS and the DOM keeps the
+// right-hand order, so the tab and reading order are the same for both hands: field, Attach, Send.
+describe("Composer — hand", () => {
+  beforeEach(() => __resetOperatorCommands());
+  afterEach(() => __resetOperatorCommands());
+
+  const box = () => document.querySelector<HTMLElement>('[data-slot="composer-box"]')!;
+  const publishUpload = () =>
+    server.use(
+      http.get("/api/config", () =>
+        HttpResponse.json({
+          push: false,
+          vapidPublicKey: "",
+          upload: { maxBytes: 10 * 1024 * 1024, imageTypes: ["png"], textTypes: ["md"] },
+        }),
+      ),
+    );
+
+  it("is the right hand by default: the box is not mirrored and the attach panel opens right-aligned", async () => {
+    const user = userEvent.setup();
+    publishUpload();
+    renderComposer();
+    expect(box().className).not.toMatch(/(?:^|\s)flex-row-reverse(?=\s|$)/);
+    expect(document.body.innerHTML).not.toMatch(/direction:(?:rtl|ltr)/);
+    await user.click(await screen.findByRole("button", { name: "Attach file" }));
+    const panel = await screen.findByRole("dialog", { name: "Attach" });
+    expect(panel.className).toMatch(/(?:^|\s)right-0(?=\s|$)/);
+    expect(panel.className).not.toMatch(/(?:^|\s)left-0(?=\s|$)/);
+  });
+
+  it("left: mirrors the box so Send, Attach, then the field read left to right, in the same DOM order", () => {
+    renderComposer();
+    const order = (el: HTMLElement) =>
+      [...el.children]
+        .map((c) => c.getAttribute("aria-label") ?? c.tagName)
+        .filter((n) => ["TEXTAREA", "Attach file", "Send"].includes(n));
+    const right = order(box());
+    cleanup();
+    renderComposer({ hand: "left" });
+    expect(box().className).toMatch(/(?:^|\s)flex-row-reverse(?=\s|$)/);
+    expect(order(box())).toEqual(right);
+    // DOM: field, Attach, Send. Mirrored on screen that is Send, Attach, field.
+    expect(right).toEqual(["TEXTAREA", "Attach file", "Send"]);
+  });
+
+  it("left: opens the attach panel left-aligned, against the side Attach stands on", async () => {
+    const user = userEvent.setup();
+    publishUpload();
+    renderComposer({ hand: "left" });
+    await user.click(await screen.findByRole("button", { name: "Attach file" }));
+    const panel = await screen.findByRole("dialog", { name: "Attach" });
+    expect(panel.className).toMatch(/(?:^|\s)left-0(?=\s|$)/);
+    expect(panel.className).not.toMatch(/(?:^|\s)right-0(?=\s|$)/);
+  });
+
+  it("left: hands the belt the same hand, so it runs right to left with its block at the left", () => {
+    renderComposer({ hand: "left" });
+    const belt = document.querySelector<HTMLElement>('[data-slot="composer-actions"]')!;
+    expect(belt.querySelector(".overflow-x-auto")!.className).toContain("[direction:rtl]");
+  });
+});
+
+// A line copied off the mirror carries the bridge's dots, not the secret behind them. The composer
+// warns, and never blocks: reply-action.ts accepts `•` as a mask slot on purpose.
+describe("Composer — a draft that holds masked text", () => {
+  const CAUTION = /this reply holds masked text/i;
+
+  it("warns under the box while the draft holds a run of dots, and goes when they are deleted", async () => {
+    renderComposerWithStatus();
+    const box = screen.getByPlaceholderText(/type a reply/i);
+    expect(screen.queryByText(CAUTION)).toBeNull();
+    fireEvent.change(box, { target: { value: "export KEY=sk-o••••••••" } });
+    const caution = await screen.findByText(CAUTION);
+    expect(caution).toHaveTextContent("The pane gets the dots, not the secret.");
+    await waitFor(() => expect(caution.closest('[data-slot="collapse"]')!.getAttribute("data-state")).toBe("open"));
+    fireEvent.change(box, { target: { value: "export KEY=" } });
+    expectLeaving(screen.queryByText(CAUTION));
+  });
+
+  it("does not warn for three dots or an ordinary sentence", () => {
+    renderComposerWithStatus();
+    const box = screen.getByPlaceholderText(/type a reply/i);
+    fireEvent.change(box, { target: { value: "wait for it ••• then run the tests" } });
+    expect(screen.queryByText(CAUTION)).toBeNull();
+  });
+
+  it("does not block Send", () => {
+    renderComposerWithStatus();
+    fireEvent.change(screen.getByPlaceholderText(/type a reply/i), { target: { value: "ghp_••••••••" } });
+    expect(screen.getByRole("button", { name: "Send" })).not.toBeDisabled();
   });
 });

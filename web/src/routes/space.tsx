@@ -1,22 +1,23 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate, useParams, useRevalidator } from "react-router";
+import { useParams, useRevalidator } from "react-router";
 
 import { RouteHeader, SettingsGear } from "@/components/app-header";
 import { ReadOnlyBanner } from "@/components/read-only-banner";
 import { SpaceStrip } from "@/components/space-strip";
 import { SpaceView } from "@/components/space-view";
 import { TabStrip } from "@/components/tab-strip";
-import { NewSpaceSheet } from "@/components/new-space-sheet";
 import { StatusArea } from "@/components/status-area";
 import { ToastViewport } from "@/components/ui/toast-viewport";
 import { BuildStamp } from "@/components/build-stamp";
 import { UpdateBanner } from "@/components/update-banner";
-import { useSpaceActions } from "@/hooks/use-spaces";
+import { tabCreateKey, useSpaceActions } from "@/hooks/use-spaces";
+import { useNav } from "@/hooks/use-nav";
+import { usePaneOpen } from "@/hooks/use-pane-open";
 import { useScrollMemory } from "@/hooks/use-scroll-memory";
-import { homePath, panePath, spacePath } from "@/lib/nav";
-import { ambientHost, paneScope } from "@/lib/hosts";
+import { prefetchFolders } from "@/lib/folders";
+import { homePath, newPath, spacePath } from "@/lib/nav";
+import { ambientHost } from "@/lib/hosts";
 import { scopeKey } from "@/lib/scope";
-import type { AgentView } from "@/lib/types";
 import { setStatus } from "@/lib/status";
 import { isReadOnly } from "@/lib/types";
 import { usePairing } from "@/lib/pairing";
@@ -28,10 +29,16 @@ import { useRootData } from "@/lib/route-data";
 export function SpaceRoute() {
   const data = useRootData();
   const { spaceId = "" } = useParams();
-  const navigate = useNavigate();
+  const nav = useNav();
   const revalidator = useRevalidator();
-  const { newTab, newSpace, creatingTab, creatingSpace } = useSpaceActions();
-  const [newSpaceOpen, setNewSpaceOpen] = useState(false);
+  const { newTab, creatingTab, creatingSpace } = useSpaceActions();
+  // The New page's Favourites and Recent, read once ahead of the tap so the page opens at its final
+  // height (lib/folders.ts). Once per mount, for the machine this view shows.
+  const folderHost = data.scope?.host;
+  const folderSession = data.scope?.session;
+  useEffect(() => {
+    prefetchFolders({ host: folderHost, session: folderSession });
+  }, [folderHost, folderSession]);
   // Either write gate refusing locks the tab strip's rename/close the same way (see ReadOnlyBanner).
   const { refused: notPaired } = usePairing();
 
@@ -48,8 +55,9 @@ export function SpaceRoute() {
 
   const selectedWs = data.workspaces.find((w) => w.workspaceId === spaceId);
 
-  const toDashboard = () => navigate(homePath(data.scope));
-  const switchSpace = (id: string) => navigate(spacePath(id, data.scope));
+  // ADR 0067: the dashboard is up, another space is sideways, a pane is down.
+  const toDashboard = () => nav.up(homePath(data.scope));
+  const switchSpace = (id: string) => nav.side(spacePath(id, data.scope));
   const switchTab = (id: string | null) => setTab(id);
   // The machine THIS space is addressed on, not necessarily the one leading the crew. The loader's
   // `ambientSpaces` narrows `data.workspaces`/`data.tabs` to the host `?h=` names before this route
@@ -59,8 +67,9 @@ export function SpaceRoute() {
   // re-derive one from the workspace row. Keying on the lead instead matched nothing and drew every
   // tab as "(empty tab)" (#209). Undefined when solo, which is `undefined` both ways.
   const navHost = ambientHost(data.servers, data.scope.host);
-  const open = (pane: AgentView) =>
-    navigate(panePath(pane.paneId, paneScope(data.scope, pane, data.servers, data.sessions)));
+  // A pane is down, and its tap glides the row into the pane header when the pane's read is in time
+  // (use-pane-open.ts); the header's back arrow glides it back into this list.
+  const paneOpen = usePaneOpen(data.scope, data.servers, data.sessions);
 
   // Same fix as home.tsx's dashboard scroller, same cause: ScreenTransition remounts this route on
   // every space<->pane move, so the scroller below is a fresh DOM node each time. Keyed on scope +
@@ -78,12 +87,15 @@ export function SpaceRoute() {
   const gone = !selectedWs;
   const everExisted = useRef(false);
   if (selectedWs) everExisted.current = true;
+  // Up, once per space: an up can be a step back, and a second one would climb past the dashboard.
+  const exited = useRef<string | null>(null);
   useEffect(() => {
-    if (gone && data.bridge === "connected" && !data.error) {
+    if (gone && data.bridge === "connected" && !data.error && exited.current !== spaceId) {
+      exited.current = spaceId;
       setStatus(everExisted.current ? "Space closed" : "Space not found", "info");
-      navigate(homePath(data.scope), { replace: true });
+      nav.up(homePath(data.scope));
     }
-  }, [gone, data.bridge, data.error, data.scope, navigate]);
+  }, [gone, data.bridge, data.error, data.scope, nav, spaceId]);
 
   return (
     <div className="mx-auto flex min-h-0 w-full max-w-screen-sm flex-1 flex-col">
@@ -113,7 +125,7 @@ export function SpaceRoute() {
               host={navHost}
               selected={spaceId}
               onSelect={(id) => (id === null ? toDashboard() : switchSpace(id))}
-              onNewSpace={() => setNewSpaceOpen(true)}
+              onNewSpace={() => nav.down(newPath({ machine: data.scope.host, session: data.scope.session }))}
               creatingSpace={creatingSpace}
               onBack={toDashboard}
             />
@@ -125,9 +137,10 @@ export function SpaceRoute() {
               selected={tab}
               onSelect={switchTab}
               onNewTab={newTab}
-              creatingTab={creatingTab.has(selectedWs.workspaceId)}
+              creatingTab={creatingTab.has(tabCreateKey(selectedWs.workspaceId, data.scope))}
               scope={data.scope}
               readOnly={isReadOnly(data.device) || notPaired}
+              savedCopy={data.stale === true}
               onRenamed={() => revalidator.revalidate()}
               // Closing the tab you're filtered to would strand you on an empty view — fall back to
               // "All" (setTab(null)) in that case; either way revalidate so it drops out of the strip.
@@ -143,7 +156,9 @@ export function SpaceRoute() {
                 agents={data.agents}
                 shellPanes={data.shellPanes}
                 selectedTab={tab}
-                onOpen={open}
+                onOpen={paneOpen.open}
+                glideKeyOf={paneOpen.glideKeyOf}
+                onPress={paneOpen.press}
                 host={navHost}
               />
             </main>
@@ -162,8 +177,6 @@ export function SpaceRoute() {
       <ToastViewport>
         <StatusArea />
       </ToastViewport>
-
-      <NewSpaceSheet open={newSpaceOpen} onClose={() => setNewSpaceOpen(false)} onCreate={newSpace} />
     </div>
   );
 }

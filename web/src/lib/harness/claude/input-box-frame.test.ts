@@ -5,10 +5,11 @@ import { describe, expect, it } from "vitest";
 import { parseAnsi } from "../../ansi";
 import { splitLines, type StyledLine } from "../../blocks";
 import { detectAutocompleteRegion } from "./autocomplete";
-import { namesAMenuKey } from "../menu-hints";
-import { extractInputDraft, extractStatusLines, hasInputBox, inputBoxTail } from "./chrome";
-import { claudeBuildBlocks } from "./index";
+import { extractInputDraft, extractStatusLines, hasInputBox, inputBoxTail, namesAModalKey } from "./chrome";
+import { draftCarriesSend } from "../../reply-action";
+import { claudeAdapter, claudeBuildBlocks } from "./index";
 import { lineText } from "./markers";
+import { detectMarketplacesRegion } from "./marketplaces";
 import { detectMenuRegion } from "./menu";
 import { detectMultiSelectRegion } from "./multi-select";
 import { detectPreviewSelectRegion } from "./preview-select";
@@ -50,6 +51,7 @@ function claimedByADialog(lines: StyledLine[]): boolean {
     detectWizardRegion(lines) !== null ||
     detectMultiSelectRegion(lines) !== null ||
     detectPromptSelectRegion(lines) !== null ||
+    detectMarketplacesRegion(lines) !== null ||
     detectMenuRegion(lines) !== null
   );
 }
@@ -65,6 +67,10 @@ describe("parity with the old walk on the real corpus", () => {
     "claude--draft-footer-empty.txt",
     "claude--draft-footer-single.txt",
     "claude--draft-footer-wrapped.txt",
+    // Claude Code 2.1.293's POINTED agents-footer row (`❯ ◯ …`): step 1 of the walk steps over it,
+    // and the box is kept because `steppedMarksAreOwned` now owns a mark the peeled footer run
+    // draws. Before that it was the one capture where a live box read as no box at all.
+    "claude--footer-pointed-agent.txt",
     "claude--draft-paste-placeholder.txt",
     "claude--draft-paste-split-partial.txt",
     "claude--draft-paste-split-tail.txt",
@@ -72,10 +78,26 @@ describe("parity with the old walk on the real corpus", () => {
     "claude--fresh-idle.txt",
     "claude--ghost-suggestion.txt",
     "claude--ghost-typed-over.txt",
+    // Claude Code 2.1.287 default footer: "esc to interrupt" mid-turn and "↓ to manage" with a
+    // background task are the composer's own status hints, not a modal's keys.
+    "claude--idle-background-shell.txt",
     "claude--menu-model-picker-dismissed.txt",
     "claude--model-alias.txt",
     "claude--rename-resolved.txt",
     "claude--send-inflight.txt",
+    // Claude Code 2.1.283 drafts holding a pasted rule and a pasted shell prompt: an indented row
+    // inside the frame is draft text (ADR 0048 addendum 2026-09-26).
+    "claude--v2283-draft-prompt.txt",
+    "claude--v2283-draft-rule.txt",
+    // Claude Code 2.1.283 after the `/plugin` Marketplaces tab applied an update: the menu closed and
+    // the chat holds "✔ Updated 1 marketplace" above an ordinary box, in both renderers.
+    "claude--v2283-fullscreen-plugin-marketplaces-updated--w120.txt",
+    "claude--v2283-fullscreen-plugin-marketplaces-updated--w40.txt",
+    "claude--v2283-fullscreen-plugin-marketplaces-updated--w82.txt",
+    "claude--v2283-plugin-marketplaces-updated--w120.txt",
+    "claude--v2283-plugin-marketplaces-updated--w40.txt",
+    "claude--v2283-plugin-marketplaces-updated--w82.txt",
+    "claude--working-esc-to-interrupt.txt",
     "claude--working.txt",
   ]);
 
@@ -180,6 +202,26 @@ describe("shell mode paints the prompt row with a bang", () => {
   });
 });
 
+describe("the completion popup's pointer row does not hide the box (Claude Code 2.1.291)", () => {
+  // 2.1.291 paints the selected popup entry as "  ❯ /model …". Step 1 steps over a "❯"-led row and
+  // used to keep the box only under a statusline tail, so on these six captures, each taller than
+  // MAX_STATUS_LINES, the box was refused and `composerReady` read false while a slash command was
+  // typed. The row is now kept as the popup's own pointer, and only that row.
+  it.each([
+    ["claude-lab--popup-slash-all--w40.txt", "/"],
+    ["claude-lab--popup-slash-all--w82.txt", "/"],
+    ["claude-lab--popup-slash-all--w82--h30.txt", "/"],
+    ["claude-lab--popup-slash-mo--w82.txt", "/mo"],
+    ["claude-lab--popup-slash-model-exact--w82.txt", "/model"],
+    ["claude-lab--working-popup-open--w82.txt", "/ref"],
+  ])("%s: the box stands under the popup", (name, draft) => {
+    const lines = load(name);
+    expect(claudeAdapter.composerReady?.(lines)).toBe(true);
+    expect(inputBoxTail(lines)).toBe("autocomplete");
+    expect(extractInputDraft(lines)).toBe(draft);
+  });
+});
+
 describe("a bang is a prompt row only with a separator", () => {
   it.each([
     ["a bang glued to a word", "!important"],
@@ -260,7 +302,7 @@ describe("a statusline-shaped tail still carries no menu", () => {
       if (inputBoxTail(lines) !== "statusline") continue;
       for (const row of extractStatusLines(lines).map(lineText)) {
         rows++;
-        expect(namesAMenuKey(row), `${name}: ${row}`).toBe(false);
+        expect(namesAModalKey(row), `${name}: ${row}`).toBe(false);
         expect(/^\s*(?:❯\s*)?\d+\.\s+\S/.test(row), `${name}: ${row}`).toBe(false);
       }
     }
@@ -284,8 +326,16 @@ describe("the search is bounded to the screen's final region", () => {
 describe("invariant: rows appended below a box never change the box or its draft", () => {
   const BOX_FIXTURES = CLAUDE_FIXTURES.filter((name) => hasInputBox(load(name)));
   const neutral = (n: number) => Array.from({ length: n }, (_, i) => `  compiled module ${i} in ${i * 7}ms`);
+  // The one class the invariant does not hold on, by design. A capture whose own tail carries a
+  // "❯"-led row keeps its box only while the walk can NAME the run that row belongs to — the
+  // statusline, or the background-agents footer it peeled. Rows appended below the footer push its
+  // blank separator past MAX_FOOTER_LINES, the tail turns `unknown`, and an unknown tail holding a
+  // "❯" mark refuses: the rule pinned by "a ❯-led row in an unknown tail refuses" above. The stall
+  // that follows is this module's designed failure mode (a false refusal, never a blind keystroke),
+  // and the capture's own test below pins both halves of the bound.
+  const POINTER_TAILS = { "claude--footer-pointed-agent.txt": true } satisfies Record<string, true>;
 
-  it.each(BOX_FIXTURES)("%s", (name) => {
+  it.each(BOX_FIXTURES.filter((name) => !Object.hasOwn(POINTER_TAILS, name)))("%s", (name) => {
     const base = textRows(load(name));
     const draft = extractInputDraft(fromTexts(base));
     for (const n of [1, 3, 8, 9, 20]) {
@@ -293,6 +343,26 @@ describe("invariant: rows appended below a box never change the box or its draft
       expect(hasInputBox(lines), `${n} rows`).toBe(true);
       expect(extractInputDraft(lines), `${n} rows`).toBe(draft);
     }
+  });
+
+  it("the pointed-footer tail holds inside the footer bound, and refuses past it", () => {
+    const name = "claude--footer-pointed-agent.txt";
+    const base = textRows(load(name));
+    const draft = extractInputDraft(fromTexts(base));
+    expect(draft).toBe("the agents footer hides the input box");
+    for (const n of [1, 3]) {
+      const lines = fromTexts([...base, ...neutral(n)]);
+      expect(hasInputBox(lines), `${n} rows`).toBe(true);
+      expect(extractInputDraft(lines), `${n} rows`).toBe(draft);
+    }
+    // Past the bound the pointer's run can no longer be named, so the walk fails closed.
+    for (const n of [8, 9, 20]) {
+      expect(hasInputBox(fromTexts([...base, ...neutral(n)])), `${n} rows`).toBe(false);
+    }
+    // Control: the very same screen without the pointer glyph keeps its box past the bound (it is an
+    // ordinary `unknown` tail then, and unknown tails without a frame mark are tolerated).
+    const noPointer = base.map((row) => (row.startsWith("❯ ◯") ? `  ${row.slice(2)}` : row));
+    expect(hasInputBox(fromTexts([...noPointer, ...neutral(8)]))).toBe(true);
   });
 });
 
@@ -349,5 +419,59 @@ describe("property: popup mutations never hide the box", () => {
       expect(extractInputDraft(lines), `${name} case ${k}`).toBe(draft);
       expect(inputBoxTail(lines), `${name} case ${k}`).not.toBeNull();
     }
+  });
+});
+
+describe("an indented row inside the frame is draft text (ADR 0048 addendum 2026-09-26)", () => {
+  // Claude paints both borders and the prompt row from column 0 and indents every wrapped-draft
+  // continuation row by two spaces. A draft that holds a pasted rule or a pasted shell prompt used
+  // to stop the frame walk on that row, so the box vanished and a send from the phone stalled.
+  it.each([
+    [
+      "claude--v2283-draft-rule.txt",
+      "see this output: ──────────────────── some text ──────────────────── end",
+      "see this output:\n────────────────────\nsome text\n────────────────────\nend",
+    ],
+    [
+      "claude--v2283-draft-prompt.txt",
+      "my shell said: ❯ ls -la and then nothing",
+      "my shell said:\n❯ ls -la\nand then nothing",
+    ],
+  ])("%s: the box stands and the whole draft is read", (name, draft, sent) => {
+    const lines = load(name);
+    expect(hasInputBox(lines)).toBe(true);
+    expect(claudeAdapter.composerReady?.(lines)).toBe(true);
+    expect(inputBoxTail(lines)).toBe("statusline");
+    expect(extractInputDraft(lines)).toBe(draft);
+    // The send guard compares the draft with what was typed; the full draft must vouch for it.
+    expect(draftCarriesSend(sent, extractInputDraft(lines))).toBe(true);
+    expect(claudeBuildBlocks(lines).map((b) => b.kind)).toEqual(["raw"]);
+  });
+
+  it.each([
+    ["a bare rule", ["  " + "─".repeat(20)]],
+    ["a labelled rule", [`  ${"─".repeat(6)} section ${"─".repeat(6)}`]],
+    ["a chevron prompt", ["  ❯ ls -la"]],
+    ["a bang prompt", ["  ! rm -rf build"]],
+    ["a rule as the last draft row", ["  more", "  " + "─".repeat(20)]],
+    ["a rule and a chevron together", ["  " + "─".repeat(20), "  ❯ 1. Yes", "  " + "─".repeat(20)]],
+  ])("a draft continuation holding %s keeps the box", (_label, continuation) => {
+    const lines = fromTexts(["● earlier turn", RULE, "❯ look at this:", ...continuation, RULE, "  [Opus 5] ~/src"]);
+    expect(hasInputBox(lines)).toBe(true);
+    expect(extractInputDraft(lines)).toBe(["look at this:", ...continuation.map((r) => r.trim())].join(" "));
+  });
+
+  it("the prompt row must sit at column 0: an indented one between two borders is no box", () => {
+    expect(hasInputBox(fromTexts([RULE, "  ❯ draft", RULE]))).toBe(false);
+  });
+
+  it("the top border must sit at column 0: an indented one closes no box", () => {
+    expect(hasInputBox(fromTexts([`  ${RULE}`, "❯ draft", RULE]))).toBe(false);
+  });
+
+  it("an unindented border inside the draft still ends the walk: a stale box stays refused", () => {
+    // The column-0 rule is the frame of an OLDER box; the walk must not reach past it.
+    const lines = fromTexts(["❯ old", RULE, "stray row", RULE]);
+    expect(hasInputBox(lines)).toBe(false);
   });
 });

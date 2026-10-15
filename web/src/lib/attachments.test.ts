@@ -6,6 +6,8 @@ import {
   extensionOf,
   insertMarker,
   markerFor,
+  markerMissing,
+  nextMarkerNumber,
   removeMarker,
   shortName,
   limitMb,
@@ -187,10 +189,52 @@ describe("composeLine", () => {
   });
 });
 
+describe("markerMissing", () => {
+  const a = { n: 1, kind: "image" as const };
+
+  it("is false while the marker stands anywhere in the text", () => {
+    expect(markerMissing("see [Image #1] here", a)).toBe(false);
+  });
+
+  it("is true once the marker is edited away, and for a different number or kind", () => {
+    expect(markerMissing("see here", a)).toBe(true);
+    expect(markerMissing("see [Image #1", a)).toBe(true);
+    expect(markerMissing("[Image #11]", { n: 2, kind: "image" })).toBe(true);
+    expect(markerMissing("[File #1]", a)).toBe(true);
+  });
+
+  it("agrees with composeLine on which chips go in front", () => {
+    const chips = [
+      { n: 1, path: "/a.png", kind: "image" as const },
+      { n: 2, path: "/b.md", kind: "file" as const },
+    ];
+    const text = "read [File #2]";
+    const inFront = chips.filter((chip) => markerMissing(text, chip)).map((chip) => chip.path);
+    expect(inFront).toEqual(["/a.png"]);
+    expect(composeLine(text, chips).startsWith(`${inFront.join(" ")} `)).toBe(true);
+  });
+});
+
 describe("shortName", () => {
   it("cuts a long name to fit a chip and keeps a short one whole", () => {
     expect(shortName("screenshot-2026-09-22.png")).toBe("screenshot-20…");
     expect(shortName("screenshot-2026-09-22.png")).toHaveLength(14);
     expect(shortName("a.png")).toBe("a.png");
+  });
+});
+
+describe("nextMarkerNumber — a new chip never twins a marker already in the text", () => {
+  it("keeps the counter when the text holds no higher marker", () => {
+    expect(nextMarkerNumber("", 1)).toBe(1);
+    expect(nextMarkerNumber("see [Image #1]", 2)).toBe(2);
+  });
+
+  it("steps past a marker with no chip behind it, of either kind", () => {
+    expect(nextMarkerNumber("look at this [Image #1]", 1)).toBe(2);
+    expect(nextMarkerNumber("[File #4] and [Image #2]", 1)).toBe(5);
+  });
+
+  it("ignores what is not a marker", () => {
+    expect(nextMarkerNumber("[Image 3] [Image #x] Image #9", 1)).toBe(1);
   });
 });

@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ArrowUpCircle, CheckCircle2, Loader2, RotateCcw } from "lucide-react";
-import { useRevalidator } from "react-router";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -9,19 +8,20 @@ import { SectionHeader } from "@/components/section-header";
 import { useLocale } from "@/hooks/use-locale";
 import { useTick } from "@/hooks/use-tick";
 import { t, tn } from "@/lib/i18n";
-import { snoozeUpdate, startUpdate } from "@/lib/api";
-import { describeThrownError } from "@/lib/api-error-message";
+import { snoozeUpdate } from "@/lib/api";
 import { timeAgoShort } from "@/lib/format";
 import { useOptionalRootData } from "@/lib/route-data";
+import { openUpdateMode, type UpdateAsk } from "@/lib/update-ask";
 import {
-  noteCrewRunBegun,
+  holdReadRetry,
   noteSnapshotCrew,
   noteSnapshotRun,
-  noteStartedRun,
   readUpdateState,
+  retryUpdateRead,
   useUpdateRun,
 } from "@/lib/update-run-store";
 import { noteUpdateRun } from "@/lib/self-update";
+import { leadPieces, notesView, type NotesView } from "@/lib/update-notes";
 import {
   crewAction,
   crewActionLabel,
@@ -31,18 +31,22 @@ import {
   type PeerRow,
 } from "@/lib/update-crew";
 import {
-  clearUpdateStarted,
+  getUpdateClaim,
   linkChangeNote,
   minutesWord,
-  noteUpdateStarted,
   crewMoving,
   readRun,
   runInFlight,
+  subscribeUpdateStarted,
 } from "@/lib/update-ribbon";
+import { legStillFailed, memberBehind } from "@/lib/crew-level";
+import { BUILD } from "@/lib/build";
+import { earlierRunOnHand } from "@/lib/update-screen";
 import { cn } from "@/lib/utils";
 import type {
   PreflightCheck,
   PreflightReport,
+  UpdateCrewMember,
   UpdatePeerLeg,
   UpdateRun,
   UpdateRunState,
@@ -50,10 +54,12 @@ import type {
 
 // ── UPDATE COLLIE, from the phone ───────────────────────────────────────────────────────────────
 //
-// One tap plus one confirm: the card on `/settings/updates` that names the version you are on, the
-// version you would move to, what the preflight says about this machine, what it says about every
-// peer, and the button that starts it. The route behind it is `POST /api/update`
-// (bridge/update-action.ts), gated exactly like a send.
+// The card on `/settings/updates` that names the version you are on, the version you would move to,
+// what the preflight says about this machine, what it says about every peer, and the button that
+// opens update mode (ADR 0064). The confirm is no longer here: the button opens the mode at "Ready to
+// start", and "Start update" there sends `POST /api/update` (bridge/update-action.ts), gated exactly
+// like a send. The confirm used to grow inside this card, and that moved the page about 100px under
+// a thumb already on its way to the next control.
 //
 // ── ONE CONFIRM COVERS THE CREW, AND PEERS ARE LINES IN THIS CARD ────────────
 // The peer lines sit inside the card rather than in a table beside it, because the card is what the
@@ -66,9 +72,8 @@ import type {
 // updates COLLIE — the program, on the host, with a service restart in the middle of it. Two things
 // called "update" in one UI is the confusion this card exists to avoid, so it never borrows those
 // words: it is titled "Update Collie", it names versions, and it takes a confirm. The two are
-// coordinated in `lib/self-update.ts`, which holds the bundle reload for the length of a run and
-// lets it fire once the run is `done`. What this card owes the band is one stamp: `noteUpdateStarted()`
-// on a successful POST, which is the band's "Starting update…" and nothing else.
+// coordinated in `lib/self-update.ts` and in update mode, which hold the bundle reload until the
+// phone's own step of the update.
 //
 // ── THE RESTART GAP IS NOT AN OUTAGE ─────────────────────────────────────────
 // The bridge goes away during `restarting`. A poll that fails in that window is the update working,
@@ -110,24 +115,6 @@ const RUN_PHASES: readonly UpdateRunState[] = ["preflight", "staging", "restarti
 const RESTART_BOUND_MS = 90_000;
 
 
-/**
- * How long the card waits, after its own tap, before it says the start is TAKING A WHILE.
- *
- * A DISPLAY threshold and nothing else. It was a control-unlock once — the button came back after
- * 30s — and that was a guess about how long an update takes dressed up as a safety valve: an
- * in-place checkout writes its run record only AFTER it has built (`recordInPlaceRun` in
- * cli/update.ts), and a build on a slow host outlives any number this file could pick. Unlocking
- * there would re-open the double-tap window this state exists to close, on exactly the machines
- * least able to afford it.
- *
- * What actually guards a second tap is the bridge: `POST /api/update` holds a lock and answers
- * `update.in_progress`. The disabled button is a courtesy, so it may stay disabled for as long as
- * the run takes; what it may NOT do is stay disabled and say nothing, which is what the second
- * sentence below is for.
- */
-const STARTED_SLOW_MS = 60_000;
-
-
 /** The colour a verdict is drawn in. Existing status tokens only — no new colour enters the app. */
 const VERDICT_COLOUR = {
   green: "bg-status-done",
@@ -135,39 +122,24 @@ const VERDICT_COLOUR = {
   red: "bg-status-blocked",
 } satisfies Record<PreflightCheck["verdict"], string>;
 
-/**
- * What the open confirm is asking for. `kind` decides the words and nothing else — every one of
- * them sends the same `POST /api/update`, and `peersOnly` is the only field that changes what the
- * bridge does with it.
- */
-interface Confirm {
-  kind: "single" | "crew" | "retry" | "major";
-  version: string;
-  major: boolean;
-  peersOnly: boolean;
-}
-
 export function UpdateCard() {
   useLocale();
   const data = useOptionalRootData();
-  const revalidator = useRevalidator();
 
   // The SHARED read: the update status PLUS the preflight, which the snapshot deliberately does not
   // carry (it shells out to git and to `doctor`; paying that on every snapshot poll for a card nobody
   // has opened is the wrong trade). The store also reconciles the standby door's copy of the run,
   // which is the one reader that still answers while the front door restarts.
-  const { check, checked, run } = useUpdateRun();
-  const [confirming, setConfirming] = useState<Confirm | null>(null);
-  const [busy, setBusy] = useState(false);
-  /**
-   * THE GAP THE SECOND TAP FITTED IN. `POST /api/update` answers before the detached updater has
-   * written anything, so for a beat there is no record at all: `running` was false, the button was
-   * live, and the band overhead already said "Starting update…". This is the card's own half of the
-   * band's (s), held HERE rather than read off `lib/update-ribbon`'s store — the card must go inert
-   * on its own tap, not because some other component happens to be mounted and to clear a flag.
-   */
-  const [started, setStarted] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { check, checked, readFailed, run } = useUpdateRun();
+  // THIS DEVICE'S CLAIM ON AN UPDATE, which update mode stamps when "Start update" is accepted. The
+  // card goes inert on it for the beat before the first run record, when `running` is still false and
+  // a second tap would ask the bridge twice (the bridge refuses with `update.in_progress` anyway).
+  const claim = useSyncExternalStore(subscribeUpdateStarted, getUpdateClaim, getUpdateClaim);
+  const startedHere = claim !== null;
+  // THE LAST RUN'S RESULT IS NOT THIS ONE'S (2026-09-26). Right after this device's confirm every
+  // source still holds the last run's record, and "Updated to 1.13.2." under a card that has just
+  // started 1.13.3 reads as the answer to the tap. Set aside on the same test update mode takes.
+  const shownRun = run !== undefined && claim !== null && earlierRunOnHand(run, claim, BUILD.id) ? undefined : run;
   const [dismissed, setDismissed] = useState(false);
 
   const snapshot = data?.update;
@@ -182,13 +154,16 @@ export function UpdateCard() {
   // THE URGENT MARKER (ADR 0046), or null. Read exactly as every other field on this card is read:
   // off the snapshot first, off the card's own check second, and never re-derived here.
   const urgent = snapshot?.urgent ?? check?.urgent ?? null;
+  // WHAT THE RELEASES CHANGED (1.21.1). Off the card's own check only: the snapshot never carries
+  // notes. The offer's notes while one is waiting, the running version's otherwise.
+  const notes = notesView(check?.releaseNotes, releaseAvailable);
   const preflight = check?.preflight ?? null;
   const runState = run?.state;
   const running = runInFlight(run);
   // Nothing on this card may be tapped while an update is being asked for, started, or driven.
   // ONE reading, used by every control below, so a control cannot be forgotten in one of the three.
-  // `started` is the middle of those three and the one that was missing — see it below.
-  const moving = busy || started || running;
+  // `startedHere` is the middle of those three: the beat between the confirm and the first record.
+  const moving = startedHere || running;
 
   // Whether this machine leads anybody. The roster answers it on every snapshot; the check's own
   // `crew` array answers it better, when the bridge is new enough to send one. Either is enough to
@@ -230,6 +205,9 @@ export function UpdateCard() {
   // short-circuit answered `update-crew`, the card disabled it, and a packaged lead with a peer a
   // version behind was left with a disabled button and an explanation about its own install.
   const action = crewAction({ releaseAvailable, hasPeers, behind, rolledBack, leadCanTake: !packageManaged });
+  // WHO A RETRY IS FOR, by name, so the button can say "Try minibuch again" (ADR 0064).
+  const retryNames = retryTargets(census, legs, current);
+  const retryAsk: UpdateAsk = { kind: "retry", version: current, major: false, peersOnly: true, current, names: retryNames };
 
   // Read again whenever a run reaches a terminal state — the preflight's answer is a different answer
   // after an update than it was before one. The FIRST read is the store's own, taken when this card
@@ -256,6 +234,31 @@ export function UpdateCard() {
     return () => ac.abort();
   }, [settled]);
 
+  // EXCEPT WHEN THE HELD ANSWER IS UNUSABLE AT OPEN. The store reads once per document, so a read
+  // that failed or carried no preflight (a bridge mid-restart right after an update) would otherwise
+  // keep this button disabled until the app is reloaded; opening the card is the moment to ask again.
+  const unusableAtOpen = useRef(checked && preflight === null);
+  useEffect(() => {
+    if (!unusableAtOpen.current) return;
+    const ac = new AbortController();
+    void readUpdateState(ac.signal);
+    return () => ac.abort();
+  }, []);
+
+  // A READ THAT FAILED IS ASKED AGAIN WHILE THIS CARD IS OPEN (issue 400). The store owns the
+  // schedule and the no-overlap rule; the card only says it is here, and the store stops when it
+  // leaves.
+  useEffect(() => holdReadRetry(), []);
+  const [retrying, setRetrying] = useState(false);
+  async function retryRead() {
+    setRetrying(true);
+    try {
+      await retryUpdateRead(true);
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   // THE SNAPSHOT'S OWN COPY, HANDED TO THE STORE. `routes/root.tsx` publishes it too, and that is the
   // one that matters in the app — this card is a route away and may not be mounted at all. It is
   // published here as well so a card mounted WITHOUT that root (the playground, a unit test) still
@@ -274,62 +277,6 @@ export function UpdateCard() {
   useEffect(() => {
     noteUpdateRun(runState);
   }, [runState]);
-
-  // (s) ends ONE way: the record speaks, and `running` takes the card from there. A POST that was
-  // accepted and then produced no record at all leaves the card inert — and that is the honest
-  // answer, because this card cannot tell that case apart from an update that is simply still
-  // building. The operator is not trapped: leaving `/settings/updates` unmounts this card, so
-  // coming back is the reset, and the bridge refuses a genuine second start on its own lock anyway.
-  useEffect(() => {
-    if (!started) return;
-    if (runState !== undefined && runState !== "idle") setStarted(false);
-  }, [started, runState]);
-
-  // The second sentence, on a timer that changes only WORDS. See {@link STARTED_SLOW_MS}.
-  const [startSlow, setStartSlow] = useState(false);
-  useEffect(() => {
-    if (!started) {
-      setStartSlow(false);
-      return;
-    }
-    const timer = setTimeout(() => setStartSlow(true), STARTED_SLOW_MS);
-    return () => clearTimeout(timer);
-  }, [started]);
-
-
-  async function begin(ask: Confirm) {
-    setBusy(true);
-    setError(null);
-    try {
-      const answer = await startUpdate({ target: ask.version, major: ask.major, peersOnly: ask.peersOnly });
-      // The band's (s) state, and the only thing that produces it: `POST /api/update` returns
-      // immediately and hands off to a detached process, so the run record says nothing for a beat.
-      // A silent band in that beat reads as "nothing happened" about the thing just consented to.
-      //
-      // A PEERS-ONLY START IS A RUN THIS DEVICE STARTED TOO (M32). Its 202 carries this lead's OLD
-      // record, because nothing runs here, so that record's id is not this run's and is not recorded
-      // as if it were, and the record is not handed to the store as the run just begun. What the store
-      // is told instead is that a crew-only run began, which is what takes the screen in this tap.
-      noteUpdateStarted(Date.now(), ask.peersOnly ? null : (answer.run?.runId ?? null));
-      setStarted(true);
-      setConfirming(null);
-      if (ask.peersOnly) noteCrewRunBegun(current);
-      else noteStartedRun(answer.run);
-      // Pull the snapshot now rather than waiting out the poll gap: the operator has just tapped,
-      // and the run record is what they are waiting to see.
-      revalidator.revalidate();
-    } catch (thrown) {
-      // Every refusal the bridge can make is a code with a sentence (bridge/error-codes.ts) — a
-      // double tap lands here as `update.in_progress`, which is the idempotence being reported
-      // rather than a second update being started.
-      clearUpdateStarted(); // nothing was started, so the band must not say one was
-      setStarted(false);
-      setError(describeThrownError(thrown));
-      setConfirming(null);
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function dismiss() {
     setDismissed(true);
@@ -360,6 +307,11 @@ export function UpdateCard() {
   // machine that also happens to be packaged. Checking packageManaged first would bury that fault
   // under a sentence about a boundary that is working exactly as designed, on every visit, until the
   // real problem is found some other way.
+  // THE READ FAILED, WHICH IS NOT THE PREFLIGHT FAILING (issue 400). With no answer held, a timeout
+  // or a dropped connection used to print "the preflight couldn't be run on this machine", a claim
+  // about this machine from a card that never heard from it. The button stays disabled all the same,
+  // because nothing has cleared the update; the line names the real reason and carries the retry.
+  const unreachable = readFailed && preflight === null && !packageManaged;
   const blockedReason =
     redCheck !== undefined
       ? redCheck.reason
@@ -444,27 +396,7 @@ export function UpdateCard() {
           without moving to a second surface, which is the principle the old ordering comment argued
           for. What that principle needs is the same card, not a place above the button, and the
           one-line summary beside the button carries the deciding fact into the row itself. */}
-      {confirming !== null ? (
-        <div className="border-t border-border p-4">
-          <div className="text-sm font-medium">{confirmTitle(confirming)}</div>
-          <p className="mt-1 text-sm text-muted-foreground">{confirmBody(confirming, packageManaged)}</p>
-          {/* ABOVE THE CONFIRM, never beside it (M27/06). The button's wording does not change: what
-              the tap does is the same act, and the sentence is the fact the operator needs in order
-              to decide the ORDER they do it in. A label that carried it would be a label nobody
-              reads twice. */}
-          {linkChange !== null && <p className="mt-2 text-sm text-muted-foreground">{linkChange}</p>}
-          <div className="mt-3 flex items-center gap-2">
-            <Button size="sm" disabled={moving} onClick={() => void begin(confirming)}>
-              {busy && <Loader2 className="size-4 animate-spin" />}
-              {confirmAction(confirming)}
-            </Button>
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => setConfirming(null)}>
-              {t("settings.updateCard.cancel")}
-            </Button>
-          </div>
-        </div>
-      ) : (
-        (action !== "none" || majorAvailable !== null) && (
+      {(action !== "none" || majorAvailable !== null) && (
           <div className="flex flex-col gap-2 border-t border-border p-3">
             {/* The same sentence, in the state before the confirm is open — so it is on screen when
                 the operator decides to tap at all, not only once they are being asked. */}
@@ -485,20 +417,21 @@ export function UpdateCard() {
                   size="sm"
                   disabled={moving || pending || (blocked && action !== "retry-crew")}
                   onClick={() =>
-                    setConfirming(
+                    openUpdateMode(
                       action === "retry-crew"
-                        ? { kind: "retry", version: current, major: false, peersOnly: true }
+                        ? retryAsk
                         : {
                             kind: action === "update-crew" ? "crew" : "single",
                             version: latest ?? current,
                             major: false,
                             peersOnly: false,
+                            current,
                           },
                     )
                   }
                 >
                   {pending && <Loader2 aria-hidden="true" className="size-4 shrink-0 animate-spin" />}
-                  {pending ? t("settings.updateCard.checking") : crewActionLabel(action, latest ?? current)}
+                  {pending ? t("settings.updateCard.checking") : crewActionLabel(action, latest ?? current, retryNames)}
                 </Button>
               )}
               {/* NOT a second update action: crossing a major is its own consent (ADR 0020),
@@ -510,11 +443,12 @@ export function UpdateCard() {
                   size="sm"
                   disabled={moving || pending || blocked}
                   onClick={() =>
-                    setConfirming({
+                    openUpdateMode({
                       kind: "major",
                       version: majorAvailable,
                       major: true,
                       peersOnly: false,
+                      current,
                     })
                   }
                 >
@@ -548,17 +482,16 @@ export function UpdateCard() {
                 during the restart gap the preflight read fails BECAUSE the bridge is down, so
                 printing "the preflight couldn't be run" there draws the outage this card exists
                 not to draw. */}
-            {blocked && !moving && <p className="text-xs text-status-blocked">{blockedReason}</p>}
-            {/* A DISABLED BUTTON MUST NOT BE SILENT. `running` has the run section above to
-                narrate it; the gap before the first record had nothing, so the button simply
-                went grey and stayed grey with no account of itself. */}
-            {started && (
-              <p className="flex items-center gap-1.5 text-xs text-status-working">
-                <Loader2 aria-hidden="true" className="size-3 shrink-0 animate-spin" />
-                {startSlow
-                  ? t("settings.updateCard.startingSlow")
-                  : t("settings.updateCard.starting")}
-              </p>
+            {blocked && !moving && unreachable && (
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-xs text-status-blocked">{t("settings.updateCard.bridgeUnreachable")}</p>
+                <Button variant="ghost" size="sm" disabled={retrying} onClick={() => void retryRead()}>
+                  {t("settings.updateCard.retry")}
+                </Button>
+              </div>
+            )}
+            {blocked && !moving && !unreachable && (
+              <p className="text-xs text-status-blocked">{blockedReason}</p>
             )}
             {dismissed && <p className="text-xs text-muted-foreground">{t("settings.updateCard.dismissed")}</p>}
             {majorAvailable !== null && (
@@ -567,7 +500,6 @@ export function UpdateCard() {
               </p>
             )}
           </div>
-        )
       )}
 
       {/* EVERY ARRIVAL ON THIS CARD IS A `Collapse` (DESIGN.md §7, hard rule 1). The three sections
@@ -579,18 +511,19 @@ export function UpdateCard() {
           than the only control on it. Each still wears the `Collapse`: the row above is fixed
           either way, and a section that snapped open would still jump the page under a reader who
           is looking at the section. */}
-      <Collapse open={run !== undefined && run.state !== "idle"}>
-        {run !== undefined && run.state !== "idle" ? (
+      <Collapse open={shownRun !== undefined && shownRun.state !== "idle"}>
+        {shownRun !== undefined && shownRun.state !== "idle" ? (
           <RunSection
-            run={run}
+            run={shownRun}
             // Retry re-opens the SAME confirm the first attempt went through. A dead end with no next
             // action is what sends the operator to a terminal they may not have.
             onRetry={() =>
-              setConfirming({
-                kind: "single",
-                version: run.to ?? latest ?? current,
+              openUpdateMode({
+                kind: hasPeers ? "crew" : "single",
+                version: shownRun.to ?? latest ?? current,
                 major: false,
                 peersOnly: false,
+                current,
               })
             }
           />
@@ -615,10 +548,14 @@ export function UpdateCard() {
             // dials every member with an open leg on every sweep, whatever backoff it was on, so the
             // member is due without this browser clearing anything. Spec 02's reset is reserved for
             // the crew link's own two-factor admission, and a browser is not that.
-            onRetry={() => setConfirming({ kind: "retry", version: current, major: false, peersOnly: true })}
+            onRetry={() => openUpdateMode(retryAsk)}
           />
         ) : null}
       </Collapse>
+
+      {/* WHAT THE RELEASES CHANGED (1.21.1). Async like the sections above it, so it arrives in a
+          `Collapse` below the action row and never moves the button. */}
+      <Collapse open={notes !== null}>{notes !== null ? <NotesSection notes={notes} /> : null}</Collapse>
 
       {/* The preflight in full, under the row its one-line summary already reports into. */}
       <Collapse open={preflight !== null && preflight.checks.length > 0}>
@@ -628,7 +565,6 @@ export function UpdateCard() {
       </Collapse>
 
 
-      {error !== null && <p className="border-t border-border px-4 py-2.5 text-xs text-status-blocked">{error}</p>}
     </Card>
   );
 }
@@ -640,38 +576,79 @@ export function UpdateCard() {
  */
 const PACKAGE_CHECK_ID = "package";
 
-/** The confirm's heading. Four asks, four sentences — a crew-wide run must not be consented to
- *  through the words written for one machine. */
-function confirmTitle(ask: Confirm): string {
-  if (ask.kind === "major") return t("settings.updateCard.majorConfirmTitle", { version: ask.version });
-  if (ask.kind === "crew") return t("settings.updateCard.crewConfirmTitle", { version: ask.version });
-  if (ask.kind === "retry") return t("settings.updateCard.retryConfirmTitle");
-  return t("settings.updateCard.confirmTitle", { version: ask.version });
-}
-
 /**
- * The sentence under the title. `packageManaged` changes exactly one of them.
- *
- * The peers-only confirm normally reads "This machine is already current, so only the peers run" —
- * true wherever that button used to appear, and FALSE on a packaged lead with a release waiting,
- * which is the one place it can now appear as well. The reason that lead is sitting the run out is
- * its install kind, not its version, so it says so instead. Neither sentence is new: a third one
- * would be a seventh dictionary to keep in step with the other six for one branch.
+ * The release notes: each bullet's bold lead, under its group, per release. The leads are the
+ * release's own English and are quoted, not translated, like the urgent sentence above. The group
+ * names and the heading are this app's words and are translated. Open by default: the operator came
+ * to this page to read what an update brings, or what the one just taken changed.
  */
-function confirmBody(ask: Confirm, packageManaged = false): string {
-  if (ask.kind === "major") return t("settings.updateCard.majorConfirmBody", { version: ask.version });
-  if (ask.kind === "crew") return t("settings.updateCard.crewConfirmBody");
-  if (ask.kind === "retry") {
-    return packageManaged ? t("settings.updateCard.packageManaged") : t("settings.updateCard.retryConfirmBody");
-  }
-  return t("settings.updateCard.confirmBody");
+function NotesSection({ notes }: { notes: NotesView }) {
+  const [open, setOpen] = useState(true);
+  const several = notes.entries.length > 1;
+  const label =
+    notes.kind === "offered"
+      ? t("settings.updateCard.notes.offered", { version: notes.version })
+      : t("settings.updateCard.notes.current", { version: notes.version });
+  return (
+    <div className="border-t border-border px-4 py-3">
+      <SectionHeader label={label} level={3} open={open} onToggle={setOpen} controls="update-notes-body" />
+      <Collapse open={open}>
+        <div id="update-notes-body" className="mt-1.5 space-y-3">
+          {notes.entries.map((entry) => (
+            <section key={entry.version} aria-label={several ? entry.version : undefined} className="space-y-2">
+              {several && <p className="text-xs font-medium">{entry.version}</p>}
+              {entry.groups.map((group) => (
+                <div key={group.name}>
+                  <p className="text-xs text-muted-foreground">{groupName(group.name)}</p>
+                  <ul className="mt-0.5 list-disc space-y-0.5 pl-4 text-xs">
+                    {group.leads.map((lead, i) => (
+                      <li key={`${group.name}-${i}`}>
+                        {leadPieces(lead).map((piece, j) =>
+                          piece.code ? (
+                            <code key={j} className="font-mono">
+                              {piece.text}
+                            </code>
+                          ) : (
+                            <span key={j}>{piece.text}</span>
+                          ),
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+              <a
+                href={entry.url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-block text-xs text-muted-foreground underline underline-offset-2"
+              >
+                {t("settings.updateCard.notes.page")}
+              </a>
+            </section>
+          ))}
+        </div>
+      </Collapse>
+    </div>
+  );
 }
 
-function confirmAction(ask: Confirm): string {
-  if (ask.kind === "major") return t("settings.updateCard.majorConfirmAction", { version: ask.version });
-  if (ask.kind === "crew") return t("settings.updateCard.crewConfirmAction");
-  if (ask.kind === "retry") return t("settings.updateCard.retryConfirmAction");
-  return t("settings.updateCard.confirmAction");
+/** A CHANGELOG group's name in this locale. A name this build does not know is shown as sent. */
+function groupName(name: string): string {
+  switch (name) {
+    case "Added":
+      return t("settings.updateCard.notes.group.Added");
+    case "Changed":
+      return t("settings.updateCard.notes.group.Changed");
+    case "Fixed":
+      return t("settings.updateCard.notes.group.Fixed");
+    case "Packaging":
+      return t("settings.updateCard.notes.group.Packaging");
+    case "Docs":
+      return t("settings.updateCard.notes.group.Docs");
+    default:
+      return name;
+  }
 }
 
 /**
@@ -940,13 +917,13 @@ function RunSection({ run, onRetry }: { run: UpdateRun; onRetry: () => void }) {
       )}
 
       {run.state === "stuck" && run.recovery !== undefined && (
-        <pre className="mt-2 overflow-x-auto rounded-md bg-muted p-2 font-mono text-xs">{run.recovery}</pre>
+        <pre className="mt-2 overflow-x-auto rounded-md bg-muted p-2 font-mono text-xs [font-variant-ligatures:none]">{run.recovery}</pre>
       )}
 
       {run.logTail !== undefined && run.logTail !== "" && (
         <details className="mt-2">
           <summary className="text-xs text-muted-foreground">{t("settings.updateCard.logTail")}</summary>
-          <pre className="mt-1 max-h-48 overflow-auto rounded-md bg-muted p-2 font-mono text-xs">{run.logTail}</pre>
+          <pre className="mt-1 max-h-48 overflow-auto rounded-md bg-muted p-2 font-mono text-xs [font-variant-ligatures:none]">{run.logTail}</pre>
         </details>
       )}
 
@@ -993,4 +970,14 @@ function stateLine(run: UpdateRun, version: string, still: string, restartOver =
     case "idle":
       return "";
   }
+}
+
+/** The members a peers-only run is for: a census row behind this machine, or a leg that still counts
+ *  as failed. By name, in census order, once each. */
+function retryTargets(census: readonly UpdateCrewMember[], legs: readonly UpdatePeerLeg[], current: string): string[] {
+  const names = census.filter((member) => memberBehind(member, current)).map((member) => member.name);
+  for (const leg of legs) {
+    if (legStillFailed(leg, census, current) && !names.includes(leg.name)) names.push(leg.name);
+  }
+  return names;
 }

@@ -23,6 +23,11 @@ import { COMMANDS } from "./program.ts";
 const CLI = import.meta.dir;
 const REPO = resolve(CLI, "..");
 
+/** A repo file as the closure names it: relative to the repo, always `/`-separated (Windows `relative` uses `\`). */
+function repoPath(file: string): string {
+  return relative(REPO, file).replaceAll("\\", "/");
+}
+
 /** Resolve a relative specifier to a file on disk, tolerating an extensionless one. */
 function resolveFile(from: string, spec: string): string | null {
   const base = resolve(dirname(from), spec);
@@ -55,17 +60,17 @@ function staticClosure(entry: string): Closure {
       const spec = imported.path;
       if (spec.startsWith("node:") || spec.startsWith("bun:")) continue;
       if (!spec.startsWith(".")) {
-        packages.add(`${relative(REPO, file)} -> ${spec}`);
+        packages.add(`${repoPath(file)} -> ${spec}`);
         continue;
       }
       const target = resolveFile(file, spec);
-      if (target === null) unresolved.add(`${relative(REPO, file)} -> ${spec}`);
+      if (target === null) unresolved.add(`${repoPath(file)} -> ${spec}`);
       else walk(target);
     }
   };
   walk(entry);
   return {
-    files: [...files].map((f) => relative(REPO, f)),
+    files: [...files].map(repoPath),
     packages: [...packages],
     unresolved: [...unresolved],
   };
@@ -107,6 +112,15 @@ describe("the pre-dispatch", () => {
     expect(bootstrapVerb(["--plain", "build"])).toBe("build");
     expect(bootstrapVerb(["build", "--plain"])).toBe("build");
     expect(bootstrapVerb(["_apply-update"])).toBe("_apply-update");
+    expect(bootstrapVerb(["_whistle-transcribe", "/tmp/x/recording.wav"])).toBe("_whistle-transcribe");
+  });
+
+  // #392: a help request is not a build and not an update half, so it goes to the table's guard.
+  test("a help request on a bootstrap verb is the table's, not the bootstrap's", () => {
+    for (const argv of [["build", "--help"], ["build", "-h"], ["--plain", "_apply-update", "--help"], ["_apply-update", "--to", "v1", "-h"]]) {
+      expect(bootstrapVerb(argv)).toBeNull();
+    }
+    expect(bootstrapVerb(["build", "--", "--help"])).toBe("build");
   });
 
   test("routes nothing else — every other verb is the table's", () => {

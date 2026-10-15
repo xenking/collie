@@ -57,16 +57,45 @@ export const API_ERROR_CODES = [
   // Launchers — /api/launch
   "launch.not_allowlisted",
   "launch.pane_unknown",
+  "launch.unknown_harness",
+  "launch.bad_folder",
+  "launch.folder_missing",
+  "launch.no_device",
+  "launch.run_off",
+  "launch.bad_line",
+  "launch.run_no_branch",
+  "launch.recent_unknown",
+  "launch.recent_unreadable",
+  "launcher.adds_off",
+  "launcher.free_text_off",
+  "launcher.bad_text",
+  "launcher.bad_recipe",
+  "launcher.duplicate",
+  "launcher.added_full",
+  "launcher.unknown_row",
+  "launcher.store_unreadable",
+  "launcher.no_device",
 
-  // Worktrees — /api/workspace/:id/worktree[s|/open|/remove] (ADR 0032)
-  "worktree.list_failed",
+  // The new-space folder list — POST /api/folders/star (#289)
+  "folders.unknown",
+  "folders.favourites_full",
+
+  // Worktrees — /api/worktree and its plan (ADR 0032, ADR 0093)
   "worktree.create_failed",
   "worktree.created_not_opened",
-  "worktree.open_failed",
   "worktree.busy",
   "worktree.ambiguous_branch",
   "worktree.branch_required",
   "worktree.not_a_repo",
+  "worktree.invalid_branch",
+  "worktree.invalid_base",
+  "worktree.folder_invalid",
+  "worktree.folder_missing",
+  "worktree.folder_link",
+  "worktree.folder_outside_home",
+  "worktree.folder_hidden",
+  "worktree.folder_in_repo",
+  "worktree.target_exists",
 
   // Attachment upload — POST /api/pane/:id/upload
   "upload.too_large",
@@ -82,6 +111,24 @@ export const API_ERROR_CODES = [
   "stt.unreadable",
   "stt.empty",
   "stt.provider_failed",
+  "stt.wav_required",
+
+  // The Whistle model and the host engine — /api/stt/whistle, /api/stt/model/:sha256 (ADR 0096)
+  "stt.model_busy",
+  "stt.model_unknown",
+  "stt.whistle_not_ready",
+  "stt.whistle_download_failed",
+
+  // The host's speech provider: PUT /api/stt/host (ADR 0097)
+  "stt.consent_required",
+  "stt.host_busy",
+  "stt.host_provider_locked",
+  "stt.host_changed",
+  "stt.codex_missing",
+  "stt.codex_signed_out",
+  "stt.codex_other_login",
+  "stt.codex_unknown",
+  "stt.codex_probe_failed",
 
   // The prompt-cache watch list — /api/notifications/cache-watch (ADR 0042)
   "cache.pane_unknown",

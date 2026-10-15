@@ -1,9 +1,8 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { ArrowUpCircle, Loader2, RefreshCw, TriangleAlert } from "lucide-react";
-import { useNavigate } from "react-router";
 
-import { Button } from "@/components/ui/button";
-import { Notice, NOTICE_ACTION } from "@/components/ui/notice";
+import { Notice } from "@/components/ui/notice";
+import { useNav } from "@/hooks/use-nav";
 import { StripSlot } from "@/components/ui/strip-host";
 import { UPDATE } from "@/lib/strip-priority";
 import { useLocale } from "@/hooks/use-locale";
@@ -39,18 +38,20 @@ import type { DismissScope } from "@/lib/types";
 // the same thing again in forty characters.
 //
 // ── IT REGISTERS A SLOT; IT DOES NOT DRAW A ROW ──────────────────────────────
-// The pixels live in the ONE band above the header, `ui/strip-host.tsx`, and this component only
+// The pixels live in the ONE band under the header, `ui/strip-host.tsx`, and this component only
 // says how loud its fact is: `UPDATE`, the quietest of the four (`lib/strip-priority.ts`). That is
 // what ended the band's original fault — this row, the connection bar and the auth refusal each
 // reserved the safe-area inset for themselves, on the assumption that each might be the first thing
 // on the screen, so any two of them at once paid for the notch twice and left a dead strip above
-// the notice. The inset now has one owner and the band has one winner. The losing fact is not lost:
-// the update offer keeps its footer line and its `/settings/updates` control.
+// the notice. The inset now has one owner (the header, which the band sits under) and the band has
+// one winner. The losing fact is not lost: the update offer keeps its footer line and its
+// `/settings/updates` control.
 //
 // ── FIXED HEIGHT, IN EVERY STATE ─────────────────────────────────────────────
 // The row is one height whatever it is saying, and only the text changes. A band that grew and
-// shrank as a run progressed would reflow the whole route under the operator's thumb mid-update,
-// which is the one moment they are least able to tolerate it. That height is now `ui/notice.tsx`'s
+// shrank as a run progressed would cover more and then less of the route under the operator's thumb
+// mid-update (it reflowed the whole route until the band became an overlay on 2026-10-07), which is
+// the one moment they are least able to tolerate it. That height is now `ui/notice.tsx`'s
 // `min-h-[33px]` strip floor, shared with every other strip, rather than a number written here —
 // which is also what makes the band's arbitration height-invariant. One truncating line rather than
 // a wrapping paragraph, and the strings are held to a 40-character budget in all six locales for
@@ -80,7 +81,7 @@ import type { DismissScope } from "@/lib/types";
 
 export function UpdateRibbon() {
   useLocale();
-  const navigate = useNavigate();
+  const nav = useNav();
   const scope = useScope();
   const data = useOptionalRootData();
   // The self-updater's own flag. Reading it here is also what MOUNTS the controller — see the header.
@@ -119,6 +120,9 @@ export function UpdateRibbon() {
     bundleInstalling: stage === "installing",
     dismissedVersion: dismissedIn("offer", justDismissed, update?.dismissedVersion),
     dismissedCrewVersion: dismissedIn("crew", justDismissed, update?.dismissedCrewVersion),
+    // A tap in THIS tab covers the run on screen, whatever it settled at, so it carries no stamp. The
+    // bridge's stamp takes over on the next poll.
+    dismissedCrewAt: justDismissed?.scope === "crew" ? null : (update?.dismissedCrewAt ?? null),
     crew,
     now: Date.now(),
   });
@@ -139,7 +143,7 @@ export function UpdateRibbon() {
       void checkForUpdate();
       return;
     }
-    void navigate(updatesPath(scope));
+    nav.down(updatesPath(scope));
   }
 
   // `announce="status"` and nothing beside it: `role="status"` carries its own politeness, and an
@@ -169,38 +173,35 @@ export function UpdateRibbon() {
     );
   }
 
+  // THE WHOLE ROW IS ALWAYS THE TARGET NOW (2026-09-23). `ui/notice.tsx` used to forbid pairing a
+  // whole-surface tap with a separate dismiss — a <button> may not hold a second one — so a state
+  // that could be put down gave up the row-wide target for a named "View" button instead, which on
+  // a phone was easy to miss and left the rest of the row dead to the touch. `Notice` now offers a
+  // shape for exactly this: an EMPTY overlay button beside the body rather than around it, so the ✕
+  // (when there is one) is a sibling and not a nested button, and both stay independently tappable.
+  // Which states get a ✕ at all is still `dismissTarget`'s decision, not a second opinion here — a
+  // state describing something still happening carries no close, and keeps the row-wide target alone.
+  if (target === null) {
+    return (
+      <StripSlot priority={UPDATE}>
+        <Notice {...shared} onActivate={onTap} />
+      </StripSlot>
+    );
+  }
+
   return (
     <StripSlot priority={UPDATE}>
-      {/*
-        TWO SHAPES, BECAUSE A BUTTON MAY NOT HOLD A BUTTON. `ui/notice.tsx` states the exclusion at
-        the type level: a whole-surface tap and a separate dismiss cannot both be true, since the
-        browsers that tolerate the nesting disagree about which control a tap fires. This band used
-        to write exactly that pair — a row-wide tap target with an ✕ beside it — so the states that
-        can be put down give up the row-wide target and get a named control instead. Which states
-        those are is `dismissTarget`'s decision and not a second opinion here: a state describing
-        something still happening carries no close, and therefore keeps the whole row as its target.
-      */}
-      {target === null ? (
-        <Notice {...shared} onActivate={onTap} />
-      ) : (
-        <Notice
-          {...shared}
-          action={
-            <Button size="sm" className={NOTICE_ACTION} onClick={onTap}>
-              {t("updateRibbon.view")}
-            </Button>
-          }
-          dismissLabel={t(
-            target.scope === "crew" ? "updateRibbon.hideNotice" : "updateRibbon.dismiss",
-          )}
-          onDismiss={() => {
-            setJustDismissed(target);
-            // Told to the bridge, which is where the decision belongs. A failed call is a courtesy
-            // lost, not an error worth a line: this band is already gone, and the next tap re-sends.
-            void dismissUpdate(target.version, target.scope).catch(() => {});
-          }}
-        />
-      )}
+      <Notice
+        {...shared}
+        onActivate={onTap}
+        dismissLabel={t(target.scope === "crew" ? "updateRibbon.hideNotice" : "updateRibbon.dismiss")}
+        onDismiss={() => {
+          setJustDismissed(target);
+          // Told to the bridge, which is where the decision belongs. A failed call is a courtesy
+          // lost, not an error worth a line: this band is already gone, and the next tap re-sends.
+          void dismissUpdate(target.version, target.scope).catch(() => {});
+        }}
+      />
     </StripSlot>
   );
 }

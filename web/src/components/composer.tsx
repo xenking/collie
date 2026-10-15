@@ -2,26 +2,28 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import { createPortal } from "react-dom";
 import type { ChangeEvent, ClipboardEvent, CSSProperties, ReactNode } from "react";
 import { useRevalidator } from "react-router";
-import { Check, FileText, Image, Keyboard, Loader2, Mic, Paperclip, Send, Settings2, Slash, Square, Terminal, X, Zap } from "lucide-react";
+import { Check, FileText, Image, Keyboard, Loader2, Mic, Paperclip, Pencil, Send, Settings2, Slash, Square, Terminal, X, Zap } from "lucide-react";
 
 import { applyDraftFontSize, fontStack, inputFocusZoomsPage } from "@/hooks/use-display-prefs";
-import type { DisplayPrefs } from "@/hooks/use-display-prefs";
+import type { DisplayPrefs, Hand } from "@/hooks/use-display-prefs";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
 import { useDirectTyping } from "@/hooks/use-direct-typing";
 import { useLocale } from "@/hooks/use-locale";
 import { t as translate, tn as translatePlural } from "@/lib/i18n";
+import { holdsMask } from "@/lib/masked-text";
 import { setStatus } from "@/lib/status";
 import { buzz } from "@/lib/haptics";
 import { stampSend } from "@/lib/poll-intent";
 import { useBusyWhile } from "@/lib/busy";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { TOOLBAR_TAP_TARGET } from "@/components/ui/tap-target";
 import { ChatInput } from "@/components/ui/chat/chat-input";
 import { NavTray } from "@/components/nav-tray";
+import { KeyBoardEditor } from "@/components/key-board-editor";
 import { CommandPalette } from "@/components/command-palette";
 import { QuickActionsContent } from "@/components/quick-actions";
 import { ActionsRow } from "@/components/actions-row";
-import { DisplayPrefsContent } from "@/components/display-prefs";
 import { SectionLabel } from "@/components/ui/section-label";
 import { Collapse } from "@/components/ui/collapse";
 import { ActionRow } from "@/components/action-sheet-rows";
@@ -38,6 +40,8 @@ import {
   insertMarker,
   limitMb,
   markerFor,
+  markerMissing,
+  nextMarkerNumber,
   offersFiles,
   PHOTO_ACCEPT,
   rejectAttachment,
@@ -45,20 +49,23 @@ import {
   uploadLimits,
 } from "@/lib/attachments";
 import { ctrlPresetsFor } from "@/lib/operator-keys";
+import { useKeyBoard } from "@/lib/key-board-store";
 import { isDestructiveInput } from "@/lib/destructive";
-import { HostChip } from "@/components/host-chip";
-import { useAmbientHost, useHostLabel } from "@/components/crew-provider";
-import { clearDraft, fitsDraftStore, loadDraftEntry, saveDraft } from "@/lib/drafts";
+import { useHostLabel } from "@/components/crew-provider";
+import { fitsDraftStore, loadDraftEntry, saveDraft } from "@/lib/drafts";
+import { wipeDevice } from "@/lib/wipe";
 import { AttachmentChip, type ComposerAttachment } from "@/components/attachment-chip";
 import { useHoldReload } from "@/lib/reload-guard";
 import { isSelfEcho, normalizeDraft } from "@/hooks/use-terminal-draft";
 import { adapterFor } from "@/lib/harness";
 import { keyLabel } from "@/lib/key-queue";
 import { sendGuardedReply } from "@/lib/reply-action";
-import { TerminalDraftPreview } from "@/components/terminal-draft-preview";
+import { useLive } from "@/lib/liveness";
+import { OfflineDraftNote, TerminalDraftPreview } from "@/components/terminal-draft-preview";
 import { scopeKey, type Scope } from "@/lib/scope";
 import { DirectTypingStrip } from "@/components/direct-typing-strip";
-import { RecordingStrip } from "@/components/recording-strip";
+import { VoiceTakeover } from "@/components/voice-takeover";
+import { usePhoneEngineUse } from "@/hooks/use-phone-engine";
 import { useSttRecorder } from "@/hooks/use-stt-recorder";
 import { useHandsFree, useSttCapability, useVoiceCapability } from "@/lib/stt";
 import { NoEchoNotice } from "@/components/no-echo-notice";
@@ -128,17 +135,19 @@ interface ComposerProps {
    * text tracks this live so host typing streams into it; it also drives the send()-time pre-clear (the
    * actual current "❯" line) and unmounts the preview when it goes null. Never written into the input. */
   rawTerminalDraft: string | null;
-  /** Mirror display prefs — the View row lives here, but the mirror (in AgentChat) reads the same
-   * single instance, so they're threaded through rather than each calling useDisplayPrefs. */
+  /** Mirror display prefs — the mirror (in AgentChat) reads the same single instance, so they're
+   * threaded through rather than each calling useDisplayPrefs. Only the DRAFT field's own size and
+   * the terminal face are read here; the rows that write any of this moved to AgentChat's ⚙ sheet. */
   prefs: DisplayPrefs;
-  setWrap: (wrap: boolean) => void;
-  stepFontSize: (delta: number) => void;
-  setRawTerminal: (raw: boolean) => void;
-  setTapToFocus: (tapToFocus: boolean) => void;
-  /** This pane's mirror-inversion override, resolved and owned by AgentChat. */
-  mirrorNative: boolean;
-  setMirrorNative: (native: boolean) => void;
-  setExpandClippedReply: (expandClippedReply: boolean) => void;
+  /**
+   * The ⚙ on the belt, whose sheet AgentChat owns and mounts.
+   *
+   * The button stays here because it is one of four on one row and the row is this file's. The
+   * PANEL moved out: a sheet is a `fixed inset-0` element with no portal, so it must not be mounted
+   * inside the composer's animated, sticky ancestry (see the note beside the pane-menu sheet in
+   * agent-chat.tsx).
+   */
+  display: { open: boolean; onToggle: () => void };
   /** Snap the mirror to the live tail (follow + revalidate + scroll) after a successful send. */
   onSent: () => void;
 
@@ -166,6 +175,27 @@ interface ComposerProps {
    * (a composer mounted alone, as in its tests), the notice floats above the composer itself.
    */
   draftNoticeSlot?: HTMLElement | null;
+
+  /** EXPERIMENT (operator, 2026-09-23): the Changes pill on the belt's pinned block, beside the
+   *  switcher mark (actions-row.tsx's `changes`). Absent when the pane reports no folder. */
+  changesPill?: { onClick: () => void; label: string };
+
+  /**
+   * The parent drew this pane from the on-device cache (M46 spec 10), so nothing it shows is proven
+   * current. Together with a lapsed liveness stamp (lib/liveness.ts) it turns the SEND paths off while
+   * typing, and the draft's own save, stay on. M46 spec 11: no queue, no retry and no auto-send when
+   * the bridge comes back, because the words may answer a screen that has moved on.
+   */
+  stale?: boolean;
+
+  /**
+   * Which thumb the pane is laid out for (the Settings "Hand" choice). `"right"` (default) is the
+   * shipped layout, unchanged. `"left"` mirrors the two ends a thumb has to reach: the belt turns
+   * round, with its pinned block at the left end above Send and the pills running right to left
+   * from Keys ({@link Hand} in actions-row.tsx), and in the reply box Send and Attach move to the
+   * left of the field, Send on the outer edge, Attach beside the field.
+   */
+  hand?: Hand;
 }
 
 // The composer cluster at the bottom of the pane view — everything a phone keyboard can't do on its
@@ -181,7 +211,7 @@ interface ComposerProps {
 // decode. They now live behind the ⚙ on the actions row, as labelled rows in the same
 // in-flow dock (they change how the mirror LOOKS, so the mirror has to stay visible while you flip
 // them). Find moved the other way — to the header, where its find bar already takes over the row.
-type ComposerDrawer = "quick" | "cmd" | "keys" | "display" | null;
+type ComposerDrawer = "quick" | "cmd" | "keys" | null;
 
 
 // Pause after clearing a stranded terminal draft so the TUI settles before pane.send_text. Exported
@@ -206,13 +236,13 @@ const KEY_REVALIDATE_MS = 300;
 // viewport with a tall tray. One wrapper so Keys and Quick can't drift apart.
 function ComposerDock({
   title,
-  host,
+  onEdit,
   onClose,
   children,
 }: {
   title: string;
-  /** The machine a key sent from this dock lands on. Renders nothing on a single-host install. */
-  host?: string;
+  /** Draws a pencil beside the label, centred on it. Only the Keys dock has one (ADR 0092). */
+  onEdit?: () => void;
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -221,8 +251,19 @@ function ComposerDock({
       <div className="flex items-center justify-between px-3 pt-2">
         <div className="flex min-w-0 items-center gap-2">
           <SectionLabel>{title}</SectionLabel>
-          {/* A key press from the Keys dock IS a write into a terminal — the dock names which one. */}
-          <HostChip host={host} variant="target" />
+          {onEdit !== undefined && (
+            // 28px drawn, 44px reached: the `::before` reaches 8px past each edge into the header's own
+            // padding and the dock's gap, the same trade the Close X beside it makes (DESIGN.md §6).
+            <Button
+              variant="ghost"
+              size="icon"
+              className="relative -ml-1 size-7 text-muted-foreground before:absolute before:-inset-2 before:content-['']"
+              onClick={onEdit}
+              aria-label={translate("composer.dock.editKeys")}
+            >
+              <Pencil className="size-3.5" />
+            </Button>
+          )}
         </div>
         <Button
           variant="ghost"
@@ -242,24 +283,9 @@ function ComposerDock({
 /** How long the attach button holds its pressed tone, in ms. Just under the sheet's own 240ms
  *  entrance, so the flash hands over to the sheet rather than lingering behind it. */
 const ATTACH_PRESS_MS = 220;
+/** Frames the composer keeps asking for focus back after the voice takeover goes (about 250 ms at 60 Hz). */
+const TAKEOVER_FOCUS_FRAMES = 15;
 
-/**
- * The 44px tap floor, bought back as HIT AREA by the two buttons inside the composer's box.
- *
- * DESIGN.md §6 states the floor and also states this trade: where drawn height is expensive, a
- * control may measure less and reach out with a transparent `::before`, exactly as
- * `STRIP_TAP_TARGET` does for the strips. It is expensive here. The two buttons stand INSIDE the
- * composer's box, on the field's own row, so their face sets the height of an empty composer, and
- * every pixel of it is a pixel of mirror the operator stops seeing.
- *
- * The arithmetic, and it is the whole reason this is a constant and not a class at two call sites:
- * the face is `size-9`, 36px, and `-inset-1` reaches 4px out on all four sides, so 36 + 8 = 44 in
- * BOTH axes. The box's own `p-1` is 4px, so the reach stays inside the border and the box's inner
- * height is exactly that 44px: one row. Beside the field the reach runs into the row's `gap-1`, so
- * no hit box crosses the textarea's own edge. Change the face, the inset, the box's padding or the
- * gap and all of these facts must be re-checked together (ADR 0057, amended 2026-09-22).
- */
-const TOOLBAR_TAP_TARGET = "relative before:absolute before:-inset-1 before:content-['']";
 
 /**
  * A photo chip's thumbnail source: a blob URL for the picked file, valid for this page session only
@@ -276,14 +302,26 @@ function makePreview(file: File): string | undefined {
   }
 }
 
-/** Release a chip's thumbnail. Called when the chip is removed, sent, or its pane is left. */
+/** Release a chip's thumbnail. Called when the chip is removed, sent, or its pane is left, and for a
+ *  chip the belt's X took out, when its Undo window ends without an Undo. */
 function revokePreview(attachment: ComposerAttachment) {
   if (attachment.previewUrl === undefined || !("revokeObjectURL" in URL)) return;
   URL.revokeObjectURL(attachment.previewUrl);
 }
 
+/** What the belt's X took out of the box, held in memory for its Undo (M40 spec 04). */
+interface ClearedDraft {
+  text: string;
+  /** The chips, preview URLs included: those stay alive until the window ends. */
+  attachments: ComposerAttachment[];
+  /** The number the next chip would have got. A clear restarts it at 1; Undo puts it back. */
+  next: number;
+  /** Where the caret stood, or null when the field never reported one. */
+  caret: number | null;
+}
+
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { paneId, scope, agent, isShell, replySpeechSupported = false, gone, readOnly, hostBlock, composing, dialogPresent, dialogUnread, text, terminalDraft, rawTerminalDraft, prefs, setWrap, stepFontSize, setRawTerminal, setTapToFocus, mirrorNative, setMirrorNative, setExpandClippedReply, onSent, pullHandle, draftNoticeSlot },
+  { paneId, scope, agent, isShell, replySpeechSupported = false, gone, readOnly, hostBlock, composing, dialogPresent, dialogUnread, text, terminalDraft, rawTerminalDraft, prefs, display, onSent, pullHandle, draftNoticeSlot, changesPill, stale, hand = "right" },
   ref,
 ) {
   const revalidator = useRevalidator();
@@ -319,12 +357,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const canSendKeys = useMuxCapability("sendKeys", scope);
   const missingSend = !canType.capable ? canType : !canSendKeys.capable ? canSendKeys : null;
   const locked = gone || readOnly || hostBlock !== undefined || missingSend !== null;
-  // The machine every write on this row lands on. The pane view addresses one host (the pane's own,
-  // carried in `?h=` since the row was opened), so the ambient scope IS the target here. Undefined on
-  // a solo install, which renders no chip and leaves every confirm string unchanged.
-  // It names the Keys dock's own header; the belt below it carried the tag for a day and the pane
-  // header carries it now (agent-chat.tsx).
-  const writeHost = useAmbientHost(scope?.host);
+  // The machine every write on this row lands on, as words for a confirm. The Keys dock header used
+  // to carry a chip for it; that header now holds the KEYS label and the pencil and nothing else
+  // (M48 spec 03), because the pane header already names the machine.
   // Its display name, or undefined when there is no crew — the copy-level half of the hide rule.
   const writeHostLabel = useHostLabel(scope?.host);
   // …and a ref alongside it, for the ONE caller that reads it after an await. `send()` checks
@@ -334,6 +369,28 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // or funnelled through `pressKeys`, which is synchronous with its own check.
   const lockedRef = useRef(locked);
   lockedRef.current = locked;
+  // M46 spec 11: nothing is sent from cached state. Deliberately NOT folded into `locked`: that one
+  // also disables the field, and a person may keep typing while the bridge is away (the draft saves
+  // as before, drafts.ts). It gates every path that reaches the pane (send, raw keys, the belt) and
+  // nothing else. There is no outbox: a send refused here is gone, the draft stays in the box.
+  const live = useLive(paneId, scope);
+  const offline = stale === true || !live;
+  const offlineRef = useRef(offline);
+  offlineRef.current = offline;
+  // The one-line note while Send is off for want of a live read: what happens to the words already
+  // typed. It floats in the terminal-draft notice's slot (see `floatingNotice`), so it moves nothing.
+  // It appears only on the first keystroke made while offline that leaves text in the field (see
+  // `noteOfflineKeystroke`): not on going offline, not for a draft restored from the store, not for
+  // an emptied field. Once per pane view (this component is keyed by pane): spent when its x is
+  // tapped or when the pane is live again, so a flaky link does not repeat it.
+  const [draftNote, setDraftNote] = useState<"idle" | "shown" | "spent">("idle");
+  useEffect(() => {
+    if (draftNote === "shown" && !offline) setDraftNote("spent");
+  }, [draftNote, offline]);
+  const noteOfflineKeystroke = (value: string) => {
+    if (value === "" || !offlineRef.current) return;
+    setDraftNote((note) => (note === "idle" ? "shown" : note));
+  };
 
   // The phone-owned draft, restored from (and written through to) the per-pane draft store — the
   // pane view is keyed by paneId, so without this, stepping over to another tab mid-reply ate the
@@ -366,6 +423,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // object, and an identity compare here would re-run the save/restore below on every poll.
   const scopeId = scopeKey(scope);
   const draftPaneRef = useRef({ scope, scopeId, paneId });
+  // THE BELT'S X AND ITS UNDO (M40 spec 04, issue #291). The X empties this box in one tap
+  // (`clearByHand`); until the operator's next act the same slot is Undo, and this is what Undo puts
+  // back. NO TIMER (Altan, 2026-09-27): a slot that left on a clock would narrow the pinned block
+  // under a tap on its way, and the pill beside it can be a harness command (DESIGN.md §2). Undo
+  // ends on the next act instead: a keystroke, a chip, a send, arming Type, leaving the pane, or a
+  // tap on any other belt control. A sideways scroll of the belt is looking, not acting, and keeps it. MEMORY ONLY and for this pane view only: never stored, dropped on a pane switch and on
+  // unmount, the posture ADR 0005 gives a key queue. State for the render, a ref for the handlers
+  // that read it in the tick it changes, as with the chips above.
+  const [clearedDraft, setClearedDraft] = useState<ClearedDraft | null>(null);
+  const clearedDraftRef = useRef<ClearedDraft | null>(null);
 
   /**
    * Set the draft AND persist it. Every write to `input` goes through here — an empty value removes
@@ -385,6 +452,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
    * killing the PWA, which is a cheap price for never storing a real one.
    */
   function updateInput(value: string) {
+    // Anything written INTO the box ends the belt X's Undo window (M40 spec 04): a keystroke, a
+    // chip's marker, a transcript, a Take over, a slash command. An Undo after that would overwrite
+    // what the operator just put there. The clear itself writes "" and so never ends its own window.
+    if (value !== "" || attachmentsRef.current.length > 0) endUndoWindow();
     inputValueRef.current = value;
     setInput(value);
     persistDraft();
@@ -417,6 +488,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     // The outgoing pane's previews die here: its chips come back from the store as icon tiles.
     for (const attachment of attachmentsRef.current) revokePreview(attachment);
+    // So does an open Undo window from the belt's X: it held the outgoing pane's draft, and it
+    // never outlives that pane's view.
+    endUndoWindowRef.current();
     draftPaneRef.current = { scope, scopeId, paneId };
     const restored = loadDraftEntry(scope, paneId);
     inputValueRef.current = restored?.text ?? "";
@@ -508,11 +582,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   /** Raise or clear the password-prompt notice. Raising it also DROPS the stored draft: at that moment
    *  we know the field holds a secret the pane never accepted, and leaving it in a 48h store to be
    *  restored on the next visit is the leak #103 asked about. The in-memory value stays — the operator
-   *  can still read it, hand it to Type, or dismiss the notice and carry on. */
+   *  can still read it, hand it to Type, or dismiss the notice and carry on. The drop goes through the
+   *  one wipe routine with this pane named (lib/wipe.ts, M46 spec 02); its draft half is synchronous,
+   *  so the store is empty in this tick. */
   function noticeNoEcho(next: { prompt: string; typed: boolean } | null) {
     noEchoRef.current = next;
     setNoEcho(next);
-    if (next !== null) clearDraft(scope, paneId);
+    if (next !== null) void wipeDevice("password", { scope, paneId });
   }
 
   // The pane-change effect below is a LIFECYCLE handler, not a reactive computation: it must fire
@@ -542,8 +618,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       sendConfirm.reset();
       forceConfirm.reset();
       noticeNoEcho(null); // the notice's whole job was to get you here
+      // The field is a live keyboard from here, not a draft, so an Undo would have nowhere to go.
+      endUndoWindow();
     },
     focusInput: focusInputEnd,
+    // Identity for the agent-change disarm: the mode belongs to the session
+    // that armed it. "shell" when the pane has no agent (agent exits, pane
+    // falls back to shell) — a change there disarms with a notice.
+    agentKey: agent ?? "shell",
   });
 
   // ── VOICE (ADR 0029) ──────────────────────────────────────────────────────────────────────────
@@ -552,6 +634,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // predicate in lib/stt.ts, so the button here and the row in Settings can never disagree. Absent
   // is the feature being off: no button at all, not a disabled one.
   const stt = useSttCapability();
+  // THE TWO ENGINES (ADR 0096). The microphone exists when the host has a provider, or when this
+  // device chose "On this phone" and the phone can run it. It is ENABLED when the host's provider can
+  // serve, or the phone engine is the one that will run: a phone-only device has no host provider
+  // to be unavailable. The engine is the phone's whenever the device chose it and the browser can run
+  // it; the recorder reads that once, as the clip starts. A phone whose copy is gone stays on the
+  // phone engine (`paused`): the clip fails there with the reason and offers Send to host as a tap,
+  // and never reaches the host by itself (ADR 0096 Decision 12).
+  const phoneUse = usePhoneEngineUse();
+  const phoneUsable = phoneUse === "phone";
+  const micShown = stt !== null || phoneUsable;
+  const micAvailable = phoneUsable || stt?.available === true;
   const voiceEnabled = useVoiceCapability();
   const [voiceRecordingMode, setVoiceRecordingMode] = useState<api.VoiceRecordingMode | null>(null);
   const handsFree = useHandsFree();
@@ -560,7 +653,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // DISCARDED on each of those, not finished — see the hook's header for why an orphaned transcript
   // is worse than no transcript.
   const recorder = useSttRecorder({
-    enabled: !voiceEnabled && stt?.available === true && !locked && !direct.active,
+    enabled: !voiceEnabled && micAvailable && !locked && !direct.active,
+    engine: phoneUse === "host" ? "host" : "phone",
+    host: stt,
     paneKey: `${scopeId}\0${paneId}`,
     suspended: locked || direct.active,
     onTranscript: acceptTranscript,
@@ -589,7 +684,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the mark just reads what the composer already knows.
   //
   // NOT the poll, and not `recorder.busy`: the poll is ambient (lib/busy.ts says why at the counter),
-  // and a RECORDING is the operator working, not the app — the microphone strip below already says
+  // and a RECORDING is the operator working, not the app — the voice takeover already says
   // so, in words, and a spinning mark would claim the phone was busy while it waits on a human.
   useBusyWhile(sending);
   useBusyWhile(uploading);
@@ -602,7 +697,49 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // A chip is something to send (ADR 0060), so a box holding only chips shows Send, not the mic.
   const hasDraft = input.trim() !== "" || attachments.length > 0;
   const customVoiceVisible = voiceEnabled && !direct.active && !hasDraft;
-  const micIsPrimary = !voiceEnabled && stt !== null && !direct.active && !hasDraft;
+  const micIsPrimary = !voiceEnabled && micShown && !direct.active && !hasDraft;
+
+  // ── THE VOICE TAKEOVER (design 3.3) ───────────────────────────────────────────────────────────
+  //
+  // Open for exactly as long as a clip exists: the permission prompt, the recording and the
+  // transcription. It is drawn absolutely over this block (below), so opening it moves nothing.
+  const takeoverOpen = recorder.busy;
+  // The block's bottom padding. Named once because the takeover repeats it on its own column, which
+  // is what puts OK on the mic's exact spot. See `composing` on the props above for the why.
+  const blockPad = composing ? "pb-2" : "pb-[calc(env(safe-area-inset-bottom)_+_0.5rem)]";
+  const blockRef = useRef<HTMLDivElement>(null);
+  const openedByKeyboard = useRef(false);
+  // When the takeover goes away, focus goes back to the round button at the end of the row (the mic,
+  // or Send once a transcript landed), but only if focus was on the takeover or nowhere: a pane
+  // switch that moved focus elsewhere is not ours to take back.
+  const wasTakeoverOpen = useRef(false);
+  useEffect(() => {
+    const returning = wasTakeoverOpen.current && !takeoverOpen;
+    wasTakeoverOpen.current = takeoverOpen;
+    if (!returning) return;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && !blockRef.current?.contains(active)) return;
+    // The controls were `inert` and `invisible` a moment ago, and WebKit does not count them
+    // focusable until it has painted them back: the buttons carry `transition-all`, which includes
+    // `visibility`, so for the first frame or few after the takeover goes the round button still
+    // computes `hidden` there and `focus()` is a silent no-op (measured: about 1 run in 20 in
+    // `voice-takeover.spec.ts`, a keyboard user left with focus on the body). So ask each frame
+    // until the focus took, for at most a quarter of a second, and stop the moment it took or the
+    // operator put focus somewhere of their own.
+    let frame = 0;
+    let frames = 0;
+    const settle = () => {
+      const target = blockRef.current?.querySelector<HTMLElement>('[data-slot="composer-primary"]');
+      if (!target) return;
+      const now = document.activeElement;
+      if (now !== null && now !== document.body && !blockRef.current?.contains(now)) return;
+      target.focus({ preventScroll: true });
+      if (document.activeElement === target || (frames += 1) >= TAKEOVER_FOCUS_FRAMES) return;
+      frame = requestAnimationFrame(settle);
+    };
+    frame = requestAnimationFrame(settle);
+    return () => cancelAnimationFrame(frame);
+  }, [takeoverOpen]);
 
   /**
    * What happens to a finished transcript.
@@ -625,7 +762,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   function acceptTranscript(transcript: string) {
     const draftEmpty = inputValueRef.current.trim() === "" && attachmentsRef.current.length === 0;
     const mayHandsFree =
-      handsFree && draftEmpty && noEchoRef.current === null && !locked && !dialogPresent;
+      handsFree && draftEmpty && noEchoRef.current === null && !locked && !offline && !dialogPresent;
     if (mayHandsFree) {
       void send(transcript, false);
       return;
@@ -635,7 +772,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   async function acceptVoiceTranscript(transcript: string): Promise<boolean> {
     const draftEmpty = inputValueRef.current.trim() === "" && attachmentsRef.current.length === 0;
-    if (handsFree && draftEmpty && noEchoRef.current === null && !locked && !dialogPresent) {
+    if (handsFree && draftEmpty && noEchoRef.current === null && !locked && !offline && !dialogPresent) {
       return send(transcript, false);
     }
     insertTranscript(transcript);
@@ -711,6 +848,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       if (lastSentTimerRef.current) clearTimeout(lastSentTimerRef.current);
       if (keyRevalidateTimer.current) clearTimeout(keyRevalidateTimer.current);
       for (const attachment of attachmentsRef.current) revokePreview(attachment);
+      // An open Undo window dies with the view, and so do the previews it was holding.
+      for (const attachment of clearedDraftRef.current?.attachments ?? []) revokePreview(attachment);
     },
     [],
   );
@@ -730,22 +869,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // is SAFE on its own — it lives on the "❯" line and its preview re-derives after a reload — so it
   // never holds. When held, the self-updater shows the "tap to update" banner instead and updates once
   // the hold clears (see lib/self-update.ts). Keyed by pane so panes don't clobber each other's hold.
+  // An open Undo window from the belt's X holds too: the box looks empty, but the draft it held is
+  // still one tap from coming back, and a reload would take that tap away.
   useHoldReload(
     `composer:${paneId}`,
-    hasDraft || direct.active || direct.value !== "" || direct.busy || uploading,
+    hasDraft || clearedDraft !== null || direct.active || direct.value !== "" || direct.busy || uploading,
   );
 
   // Preview appearance latch. A STABLE, non-echo, not-already-handled draft flips the preview on —
   // this is the ONLY gate that waits for the 1.5s stability, so a blip or an in-flight send never
   // flashes it. Deliberately one-directional: once latched, rapid host typing (which keeps blanking
   // the stabilised value) can't turn it back off — the raw-tracking + unlatch effects own the hide
-  // side. Skipped when the pane is gone.
+  // side. Skipped when the pane is gone, and while a send is in flight: the staged line then
+  // carries our own text (attachments go out as host paths), and even a foreign draft waits until
+  // the send completes rather than fighting it for the mirror.
   useEffect(() => {
-    if (gone) return;
+    if (gone || sending) return;
     if (effectiveStable !== null && normalizeDraft(effectiveStable) !== handledKey) {
       setPreviewLatched(true);
     }
-  }, [effectiveStable, handledKey, gone]);
+  }, [effectiveStable, handledKey, gone, sending]);
 
   // Unlatch when the host clears the "❯" line — the draft was submitted or wiped on the host, or our
   // own send echoed back and got suppressed to null. The preview unmounts on the next render. Also
@@ -769,7 +912,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // or sent, not a fresh one to re-show. Not gated on `locked`: read-only devices get the preview +
   // Take over (a local text copy); only the actual Send stays gated.
   const showPreview =
-    !gone && previewLatched && effectiveRaw !== null && normalizeDraft(effectiveRaw) !== handledKey;
+    !gone &&
+    !sending &&
+    previewLatched &&
+    effectiveRaw !== null &&
+    normalizeDraft(effectiveRaw) !== handledKey;
 
   // The floating notice (ADR 0061). The wrapper passes touches through (`pointer-events-none`) and
   // the notice takes them back, so the mirror under the empty part of the slot still scrolls.
@@ -794,6 +941,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         />
       </div>
     ) : null;
+
+  // The offline draft note shares that slot, and the slot holds one notice: when both are due, the
+  // terminal draft wins and the note waits (still `shown`) until that notice is gone or dismissed.
+  const offlineNote =
+    draftNotice === null && draftNote === "shown" && offline ? (
+      <div
+        data-slot="offline-draft-note"
+        className={cn(
+          "pointer-events-none",
+          draftNoticeSlot ? undefined : "absolute inset-x-3 bottom-full z-20 mb-2",
+        )}
+      >
+        <OfflineDraftNote onDismiss={() => setDraftNote("spent")} />
+      </div>
+    ) : null;
+  const floatingNotice = draftNotice ?? offlineNote;
 
   // Take over: the explicit "I'll handle this on mobile now" action. One-shot COPY of the current raw
   // draft into the composer (set on an empty input, else appended on a new line so mobile-typed work
@@ -857,6 +1020,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }
   // The Keys tray's preset row, resolved the same way from the same one-shot read of /api/config.
   const keyPresets = ctrlPresetsFor(agent, useOperatorKeys());
+  // The key board (ADR 0092): the pad the Keys dock draws. A hook, so an edit made in the
+  // editor sheet shows in the dock at once.
+  const keyBoard = useKeyBoard();
+  const [keysEditorOpen, setKeysEditorOpen] = useState(false);
   // Empty on every adapter that refuses nothing, and empty for Herdr's six as far as this tray is
   // concerned — it offers none of the paging/edit keys Herdr rejects, so nothing greys out there.
   const unsupportedKeys = useMuxUnsupportedKeys();
@@ -878,6 +1045,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   async function send(value: string, isDraft: boolean, force = false): Promise<boolean> {
     const t = value.trim();
     if (!t || locked || sending) return false;
+    if (offlineRef.current) {
+      setStatus(translate("composer.send.reconnect"), "error");
+      return false;
+    }
     // A dialog on screen owns the TUI's keyboard: our text is swallowed and the submit key ANSWERS
     // the dialog, approving whatever option was highlighted (#34). Refuse BEFORE the destructive
     // pre-clear sweep below — those ctrl+k/Backspaces would land in the dialog too. The input is
@@ -907,10 +1078,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
     }
     setSending(true);
+    // A send ends the belt X's Undo window: the operator has moved on, and an Undo landing after
+    // the send would put back a draft the pane has since answered.
+    endUndoWindow();
     // The operator has just acted on this pane, so the poller should watch it land. Stamped HERE —
     // after the refusals above, before the round trip — because the burst is about the operator's
     // attention, not about the send's verdict: a send that stalls or is blocked is exactly a moment
-    // they are staring at the mirror.
+    // they are staring at the mirror. Kept despite `api.sendKeys` / `api.sendReply` stamping every
+    // write: the guarded send reads the pane and may type nothing at all, and the operator is
+    // watching from the tap on, not from the first key.
     stampSend(paneId);
     try {
       // Guarded: types the text, verifies it reached the input box, and only THEN sends the submit
@@ -1122,10 +1298,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the status channel; the echo just falls back to idle.
   async function pressKeys(k: string[]): Promise<boolean> {
     if (locked) return false;
+    if (offlineRef.current) {
+      setStatus(translate("composer.send.reconnect"), "error");
+      return false;
+    }
     // Every raw key reaches the pane through here — the Keys dock (NavTray's `onSend`), the direct
-    // typing mode (useDirectTyping's `sendKeys`) and the prompt buttons that hand keys to the tray —
-    // so one stamp covers the lot.
-    stampSend(paneId);
+    // typing mode (useDirectTyping's `sendKeys`) and the prompt buttons that hand keys to the tray.
+    // No stamp here: `api.sendKeys` starts the poll burst for every key written.
     try {
       const res = await api.sendKeys(paneId, k, scope);
       if (!res.ok) {
@@ -1192,7 +1371,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
    * order, each after the one before.
    */
   function addAttachment(file: File, path: string) {
-    const n = nextAttachmentRef.current;
+    const n = nextMarkerNumber(inputValueRef.current, nextAttachmentRef.current);
     nextAttachmentRef.current = n + 1;
     const kind = attachmentKind(file, limits);
     const attachment: ComposerAttachment = { n, path, name: file.name, kind };
@@ -1212,7 +1391,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }
 
   /** The chip's x: the chip goes, and so does its marker (with one space beside it). Deleting the
-   *  marker by hand instead keeps the chip, and Send puts its path in front (`composeLine`). */
+   *  marker by hand instead keeps the chip, which then shows it will go in front (`inFront`), and
+   *  Send puts its path there (`composeLine`). */
   function removeAttachment(attachment: ComposerAttachment) {
     revokePreview(attachment);
     attachmentsRef.current = attachmentsRef.current.filter((a) => a.n !== attachment.n);
@@ -1228,6 +1408,98 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setAttachments([]);
     caretRef.current = null;
     updateInput("");
+  }
+
+  /**
+   * THE BELT'S X (M40 spec 04, issue #291): the text, the chips and the stored draft go, and nothing
+   * is sent to the pane. It is the phone's own draft and only that; the agent's input box keeps its
+   * own ways (the Keys tray, and the reply guard's sweep before a send).
+   *
+   * What went is held for Undo, previews and all, which is the one difference from
+   * `clearComposedDraft`: those previews are released when the window ends without an Undo, not
+   * here. Armed send confirms go too, because the draft they were about is gone.
+   */
+  function clearByHand() {
+    if (sending) return;
+    const field = inputRef.current;
+    const held: ClearedDraft = {
+      text: inputValueRef.current,
+      attachments: attachmentsRef.current,
+      next: nextAttachmentRef.current,
+      caret: field !== null && document.activeElement === field ? field.selectionStart : caretRef.current,
+    };
+    endUndoWindow();
+    sendConfirm.reset();
+    forceConfirm.reset();
+    attachmentsRef.current = [];
+    setAttachments([]);
+    caretRef.current = null;
+    // Through the write-through, so the stored entry goes in the same tick (lib/drafts.ts drops the
+    // key for an empty draft), and it restarts the chip numbering as a send does.
+    updateInput("");
+    clearedDraftRef.current = held;
+    setClearedDraft(held);
+  }
+
+  /** Undo: the text, the chips with their previews, the chip numbering and the stored draft come
+   *  back as they were, through the same write-through as a keystroke. Under a recognised password
+   *  prompt that write-through stores nothing (ADR 0017), so Undo stores nothing either. */
+  function undoClear() {
+    const held = clearedDraftRef.current;
+    if (held === null) return;
+    clearedDraftRef.current = null;
+    setClearedDraft(null);
+    attachmentsRef.current = held.attachments;
+    setAttachments(held.attachments);
+    nextAttachmentRef.current = held.next;
+    caretRef.current = held.caret;
+    updateInput(held.text);
+    // The caret goes back where it stood, but only into a field that still has focus: focusing it
+    // here would raise a keyboard the operator had put away. Deferred, as every caret move in this
+    // component is, so React has swapped the value first.
+    const caret = held.caret ?? held.text.length;
+    setTimeout(() => {
+      const el = inputRef.current;
+      if (el !== null && document.activeElement === el) el.setSelectionRange(caret, caret);
+    }, 0);
+  }
+
+  /** End the Undo window, if one is open: the slot shows the X again when the box holds a draft and
+   *  empties when it does not, and the held chips' previews are released. */
+  function endUndoWindow() {
+    const held = clearedDraftRef.current;
+    if (held === null) return;
+    clearedDraftRef.current = null;
+    setClearedDraft(null);
+    for (const attachment of held.attachments) revokePreview(attachment);
+  }
+
+  // The pane-change effect ends the window on its way out and must not name a per-render function
+  // as a dependency, so it calls the current one through this ref (the noticeNoEchoRef pattern).
+  const endUndoWindowRef = useRef(endUndoWindow);
+  endUndoWindowRef.current = endUndoWindow;
+
+  /** What the belt's clear slot shows: Undo while a window is open, the X while the box holds a
+   *  draft, nothing otherwise. The X is inert, never withdrawn, while a send is in flight (its Undo
+   *  could put back a message that is on its way) and while Type is armed (the field is a live
+   *  keyboard then, not a draft). Not gated on `locked`: the draft is this phone's own, so a
+   *  read-only device or a gone pane may still empty its box, as Display is not gated either. */
+  function clearSlot() {
+    if (clearedDraft !== null) {
+      return {
+        mode: "undo" as const,
+        label: translate("composer.controls.undoClear"),
+        onClick: undoClear,
+        onOtherPress: endUndoWindow,
+      };
+    }
+    if (!hasDraft) return undefined;
+    return {
+      mode: "clear" as const,
+      label: translate("composer.controls.clear"),
+      onClick: clearByHand,
+      inert: sending || direct.active,
+    };
   }
 
   function focusInputAt(caret: number) {
@@ -1276,14 +1548,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   return (
     <>
       <div
+        ref={blockRef}
         className={cn(
           // `relative` anchors the floating draft notice when no slot was handed in (ADR 0061).
           "relative bg-chrome px-3",
-          // See `composing` on the props above: the inset reserves room for the home indicator, and
-          // while the keyboard is up the keyboard is already covering it. Paying it twice costs
-          // ~24px on the one screen that has none.
-          composing ? "pb-2" : "pb-[calc(env(safe-area-inset-bottom)_+_0.5rem)]",
+          blockPad,
+          // THE COMPOSER, KEPT LAID OUT UNDER THE VOICE TAKEOVER. `invisible` hides the real controls
+          // and `inert` takes them out of focus, taps and the screen-reader tree, and both leave the
+          // box in flow, so the block keeps exactly the height it had. The takeover is drawn over it
+          // as a sibling, `absolute inset-0` in the chrome block that holds both
+          // (components/voice-takeover.tsx). That is the whole of the zero-shift argument.
+          takeoverOpen && "invisible",
         )}
+        inert={takeoverOpen}
       >
         {/* Pending-send preview: visible from send until the mirror echoes back (or 6s). Shows the
             user what landed so they don't double-tap while waiting for the terminal to update.
@@ -1326,7 +1603,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         {drawer === "keys" && (
           <ComposerDock
             title={translate("composer.controls.keys")}
-            host={writeHost}
+            onEdit={() => setKeysEditorOpen(true)}
             onClose={closeDrawer}
           >
             <NavTray
@@ -1336,11 +1613,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               unsupportedKeys={unsupportedKeys}
               onSend={pressKeys}
               presets={keyPresets}
+              board={keyBoard}
               onQueueChange={setQueuedKeys}
-              disabled={locked}
+              disabled={locked || offline}
             />
           </ComposerDock>
         )}
+        <KeyBoardEditor open={keysEditorOpen} onClose={() => setKeysEditorOpen(false)} unsupportedKeys={unsupportedKeys} />
         {drawer === "quick" && (
           <ComposerDock title={translate("composer.controls.quick")} onClose={closeDrawer}>
             <QuickActionsContent
@@ -1348,21 +1627,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               onClose={closeDrawer}
               agent={agent}
               isShell={isShell}
-              disabled={locked || sending}
-            />
-          </ComposerDock>
-        )}
-        {drawer === "display" && (
-          <ComposerDock title={translate("composer.controls.display")} onClose={closeDrawer}>
-            <DisplayPrefsContent
-              prefs={prefs}
-              mirrorNative={mirrorNative}
-              setMirrorNative={setMirrorNative}
-              setWrap={setWrap}
-              stepFontSize={stepFontSize}
-              setRawTerminal={setRawTerminal}
-              setTapToFocus={setTapToFocus}
-              setExpandClippedReply={setExpandClippedReply}
+              disabled={locked || offline || sending}
             />
           </ComposerDock>
         )}
@@ -1491,9 +1756,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 icon: Settings2,
                 label: translate("composer.controls.displayAria"),
                 word: translate("composer.controls.display"),
-                on: drawer === "display",
-                expanded: drawer === "display",
-                onSelect: () => requestDrawer(drawer === "display" ? null : "display"),
+                on: display.open,
+                expanded: display.open,
+                // Close whatever dock is open first. The sheet covers the composer, so leaving a
+                // Keys tray open under it would only be discovered on dismissal.
+                onSelect: () => {
+                  requestDrawer(null);
+                  display.onToggle();
+                },
               },
           ]}
           agent={agent}
@@ -1504,6 +1774,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           // belt itself as the drag surface behind it. The pane decides whether there is one
           // (agent-chat.tsx); this row draws the pill, wires the drag, and costs no height.
           handle={pullHandle}
+          changes={changesPill}
+          hand={hand}
+          // The X on the pinned block while the box holds a draft, then Undo in its place until
+          // the next act (M40 spec 04). See `clearSlot` for when it shows.
+          clear={clearSlot()}
         />
         {/* ── THE FOOTER'S NOTICE STRIPS, SORTED BY KIND (DESIGN.md §1, §2) ─────────────────────
             Every strip below arrives and leaves through `Collapse`, which is the only sanctioned way
@@ -1520,8 +1795,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             stays here under that name is the verification half, and the strip itself says why. */}
         {/* The terminal-draft notice is NOT one of these strips any more (ADR 0061). It floats over
             the mirror's bottom edge, out of this flow, so a draft stranding or clearing on the host
-            never moves the belt or the field. See `draftNotice` above; it renders here. */}
-        {draftNoticeSlot ? createPortal(draftNotice, draftNoticeSlot) : draftNotice}
+            never moves the belt or the field. The offline draft note left this flow for the same
+            reason and shares that slot, one notice at a time. See `floatingNotice` above; it renders
+            here. */}
+        {draftNoticeSlot ? createPortal(floatingNotice, draftNoticeSlot) : floatingNotice}
         {/* The password-prompt notice (#103). Sits here, in the same in-flow slot as the other
             strips, because that is where the eye already is when a send is refused — and it is a
             NOTICE beside the unchanged "Type anyway?" override, never a replacement for it. */}
@@ -1551,27 +1828,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             />
           )}
         </Collapse>
-        {/* THE ARMED-MODE SLOT — one Collapse, two strips, because they are one idea: a mode this
-            composer is holding open, said in words where the eye already looks. Grouping them keeps
-            the arrival to a single 240ms slide when one hands over to the other (stop typing, start
-            dictating), instead of two boxes fighting over the same row. Both are CONDITIONS with
-            their own controls — Stop, and the recorder's separate ✕ — so neither belongs in the top
-            pills, which carry no controls at all. */}
-        <Collapse open={direct.active || (recorder.busy && recorder.phase !== "requesting")}>
+        {/* THE ARMED-MODE SLOT — "Type into terminal" is a mode this composer holds open, said in
+            words where the eye already looks. It is a CONDITION with its own control (Stop), so it
+            belongs here and not in the top pills, which carry no controls at all. It shared this
+            slot with the microphone's strip until the voice takeover replaced that strip; the
+            microphone's armed state is the takeover now, drawn over the block and not in this flow. */}
+        <Collapse open={direct.active}>
           {/* Armed indicator for direct typing, deliberately NOT only on the button and textarea —
               see the component. */}
           {direct.active && <DirectTypingStrip onStop={() => direct.deactivate()} />}
-          {/* The microphone's armed strip. Stop and ✕ are different actions: one transcribes the
-              clip, the other throws it away. */}
-          {recorder.busy && recorder.phase !== "requesting" && (
-            <RecordingStrip
-              elapsed={recorder.elapsedLabel}
-              transcribing={recorder.phase === "transcribing"}
-              handsFree={handsFree && !hasDraft && noEcho === null}
-              onStop={recorder.stopAndSend}
-              onDiscard={recorder.discard}
-            />
-          )}
         </Collapse>
         {/* A draft too large for the disk tier (lib/drafts.ts). It survives a pane switch — the
             memory tier holds it whole — but not the app closing, and that difference is invisible
@@ -1582,6 +1847,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         <Collapse open={!direct.active && !fitsDraftStore(input)}>
           <p className="px-1 pb-1 text-xs leading-snug text-muted-foreground">
             {translate("composer.draft.tooLong")}
+          </p>
+        </Collapse>
+        {/* A draft that holds the bridge's mask. The operator copied a masked line off the mirror and
+            pasted it here, and the pane would receive the dots, not the secret. A CONDITION for as
+            long as the text stays, like the line above, so it is derived at render and clears when
+            the dots are deleted or the draft is sent. A caution and never a block: a `••••` can be
+            meant (a password placeholder in a README), and reply-action.ts accepts it as a mask slot
+            on purpose when it reads the pane back. */}
+        <Collapse open={!direct.active && holdsMask(input)}>
+          <p className="px-1 pb-1 text-xs leading-snug text-muted-foreground">
+            {translate("composer.draft.holdsMask")}
           </p>
         </Collapse>
         {/* ── ONE BOX, ONE ROW: THE FIELD, ATTACH, THE PRIMARY ACTION ──────────────────────
@@ -1630,8 +1906,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             out of the widest part of the composer. It answers the same question from the belt
             above, which is equally at the write surface and costs the draft nothing. */}
         <div
+          data-slot="composer-box"
           className={cn(
             "relative flex items-end gap-1 rounded-xl border border-input bg-background p-1 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
+            // `hand="left"`: the whole row runs mirrored, so Send stands on the box's left edge, then
+            // Attach, then the field. The DOM order is untouched, so the tab and reading order are
+            // too. With chips, `flex-wrap` still stacks the chip strip ABOVE the row.
+            hand === "left" && "flex-row-reverse",
             // Chips take a line of their own ABOVE the row (ADR 0060). `flex-wrap` plus a
             // full-basis strip does that without re-parenting the field, so the textarea is never
             // remounted (and never loses its caret) when the first chip arrives. With no chips the
@@ -1658,6 +1939,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   attachment={attachment}
                   onRemove={() => removeAttachment(attachment)}
                   disabled={sending}
+                  inFront={markerMissing(input, attachment)}
                 />
               ))}
             </ul>
@@ -1671,6 +1953,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 : (e) => {
                     rememberCaret(e);
                     updateInput(e.target.value);
+                    noteOfflineKeystroke(e.target.value);
                   }
             }
             onSelect={direct.active ? undefined : rememberCaret}
@@ -1735,6 +2018,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // the field's right side takes no padding of its own, and the box's `gap-1` to attach
               // is what keeps the text off it.
               "min-w-0 flex-1 min-h-9 pl-2 py-1.5",
+              // Mirrored, the field's right side stands against the box's border, so it takes the
+              // inset the left used to take from Attach.
+              hand === "left" && "pr-2",
               // The draft is terminal-bound text, so the field wears the TERMINAL face — the same
               // family the mirror above it renders in, not the app's chrome face. `font-mono` is
               // the mirror's own default; the style below follows the operator's mirror-family
@@ -1812,6 +2098,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             open={picking}
             onClose={() => setPicking(false)}
             label={translate("composer.attach.title")}
+            // Attach stands near the box's LEFT edge under `hand="left"`; the panel follows it.
+            className={hand === "left" ? "right-auto left-0" : undefined}
           >
             <ActionRow
               icon={<Image aria-hidden="true" className="size-4 shrink-0" />}
@@ -1864,8 +2152,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               variant="destructive"
               className={cn(TOOLBAR_TAP_TARGET, "h-9 shrink-0 rounded-md px-3 text-sm font-semibold")}
               onClick={onSendClick}
-              disabled={locked || !hasDraft || sending}
-              aria-label={translate("composer.send.typeAnyway")}
+              disabled={locked || offline || !hasDraft || sending}
+              title={offline ? translate("composer.send.reconnect") : undefined}
+              aria-label={offline ? translate("composer.send.reconnect") : translate("composer.send.typeAnyway")}
             >
               {translate("composer.send.typeAnyway")}
             </Button>
@@ -1874,8 +2163,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               variant="destructive"
               className={cn(TOOLBAR_TAP_TARGET, "h-9 shrink-0 rounded-md px-3 text-sm font-semibold")}
               onClick={onSendClick}
-              disabled={locked || !hasDraft || sending}
-              aria-label={translate("composer.send.reallySend")}
+              disabled={locked || offline || !hasDraft || sending}
+              title={offline ? translate("composer.send.reconnect") : undefined}
+              aria-label={offline ? translate("composer.send.reconnect") : translate("composer.send.reallySend")}
             >
               {translate("composer.send.reallySend")}
             </Button>
@@ -1889,23 +2179,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // box. An empty box has no Send either (`send` refuses a blank value), so this branch
             // takes over a button that could do nothing anyway — it replaces no capability.
             <Button
+              data-slot="composer-primary"
               size="icon"
               variant={recorder.busy ? "destructive" : "default"}
               className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 rounded-full")}
-              disabled={!stt.available || locked || sending || recorder.phase === "transcribing"}
+              disabled={!micAvailable || locked || offline || sending || recorder.phase === "transcribing"}
               aria-pressed={recorder.busy}
               // The bridge's own words when it cannot serve — the operator's next move is on the
               // host, so the button says what is wrong rather than just refusing.
               aria-label={
-                !stt.available
-                  ? (stt.reason ?? translate("composer.mic.unavailable"))
+                !micAvailable
+                  ? (stt?.reason ?? translate("composer.mic.unavailable"))
                   : recorder.phase === "recording"
                     ? translate("composer.mic.stopAria")
                     : translate("composer.mic.recordAria")
               }
-              title={stt.available ? undefined : stt.reason}
+              title={micAvailable ? undefined : stt?.reason}
               onPointerDown={(e) => e.preventDefault()}
-              onClick={() => (recorder.phase === "recording" ? recorder.stopAndSend() : recorder.start())}
+              onClick={(e) => {
+                // `detail` is 0 for a click the keyboard made: the takeover then shows its focus mark.
+                openedByKeyboard.current = e.detail === 0;
+                if (recorder.phase === "recording") recorder.stopAndSend();
+                else recorder.start();
+              }}
             >
               {recorder.phase === "transcribing" ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -1917,14 +2213,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             </Button>
           ) : (
             <Button
+              data-slot="composer-primary"
               size="icon"
               className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 rounded-full")}
               onClick={direct.active ? () => direct.deactivate() : onSendClick}
-              disabled={locked || sending}
+              disabled={locked || sending || (offline && !direct.active)}
+              title={offline && !direct.active ? translate("composer.send.reconnect") : undefined}
               aria-label={
                 direct.active
                   ? translate("composer.send.stopTypingAria")
-                  : translate("composer.send.sendAria")
+                  : offline
+                    ? translate("composer.send.reconnect")
+                    : translate("composer.send.sendAria")
               }
               aria-pressed={direct.active}
             >
@@ -1941,6 +2241,27 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           )}
         </div>
       </div>
+
+      {/* THE VOICE TAKEOVER (design 3.3): over the whole chrome block, in its own box, from the mic's
+          tap until the transcript lands or the clip is thrown away. A sibling of the composer above,
+          positioned against the `relative` chrome block that holds both (agent-chat.tsx).
+          See components/voice-takeover.tsx. */}
+      {recorder.phase !== "idle" && (
+        <VoiceTakeover
+          phase={recorder.phase}
+          elapsed={recorder.elapsedLabel}
+          source={recorder.meter}
+          hand={hand}
+          padClassName={blockPad}
+          keyboardOpened={openedByKeyboard.current}
+          sends={handsFree && !hasDraft && noEcho === null}
+          engine={recorder.engine}
+          failure={recorder.failure}
+          onSendToHost={recorder.canSendToHost ? recorder.sendToHost : null}
+          onStop={recorder.stopAndSend}
+          onDiscard={recorder.discard}
+        />
+      )}
 
       {/* Slash-command palette */}
       <CommandPalette

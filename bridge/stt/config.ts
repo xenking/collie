@@ -1,6 +1,8 @@
 import { join } from "node:path";
 
+import { HOST, type Host } from "../host.ts";
 import type { JsonValue } from "../json.ts";
+import { hasHiddenLabelChar } from "../pairing.ts";
 import { diskIo, type OperatorFileIo } from "../operator-file.ts";
 import { jsonRecord, jsonStringField } from "./json.ts";
 
@@ -41,7 +43,7 @@ export const STT_FILENAME = "stt.json";
 export const DEFAULT_STT_MODEL = "gpt-transcribe";
 
 /** The provider names this bridge can build. */
-export const STT_PROVIDERS = ["openai-compatible", "codex"] as const;
+export const STT_PROVIDERS = ["openai-compatible", "codex", "local-cli", "whistle"] as const;
 export type SttProviderName = (typeof STT_PROVIDERS)[number];
 
 /** The binary the codex provider borrows its auth from, when the operator names no other. */
@@ -105,8 +107,42 @@ export interface CodexSttSettings {
   wireIdentity: SttWireIdentity;
 }
 
+/**
+ * The most arguments `local-cli` will put in front of the recording's path. A transcription command
+ * needs a verb and a few flags; a list longer than this is a hand-edit gone wrong, not a use case.
+ */
+export const MAX_LOCAL_CLI_ARGS = 32;
+
+/**
+ * The `local-cli` provider, configured (#227).
+ *
+ * Collie runs `command`, then each of `args`, then the path of a temporary file it named itself,
+ * as an argv array and never through a shell. Both fields come from `stt.json` (0600, written by
+ * `collie stt setup`) or the deployment's own environment; nothing a request carries reaches them.
+ */
+export interface LocalCliSttSettings {
+  provider: "local-cli";
+  /**
+   * The program to run: an absolute path, or a bare name resolved from the service's own `PATH`.
+   * `collie stt setup` writes the absolute path it found, because a systemd user unit's `PATH` is
+   * minimal. A relative path with a slash is refused: it would mean whatever the bridge's cwd says.
+   */
+  command: string;
+  /** The arguments before the recording's path. Empty when the command takes the path alone. */
+  args: string[];
+}
+
+/**
+ * The `whistle` provider, configured (ADR 0096 Decision 4). Naming it is the whole configuration:
+ * the engine is Collie's own vendored code, the model sits at a fixed path in the state dir, and the
+ * child is Collie's own binary with arguments Collie wrote. There is nothing for an operator to set.
+ */
+export interface WhistleSttSettings {
+  provider: "whistle";
+}
+
 /** Everything a resolved provider can be. */
-export type SttSettings = OpenAiSttSettings | CodexSttSettings;
+export type SttSettings = OpenAiSttSettings | CodexSttSettings | LocalCliSttSettings | WhistleSttSettings;
 
 /** The environment keys this module reads. Named once so the CLI and the docs can cite them. */
 export const STT_ENV_KEYS = {
@@ -117,12 +153,19 @@ export const STT_ENV_KEYS = {
   language: "COLLIE_STT_LANG",
   codexBin: "COLLIE_CODEX_BIN",
   wireIdentity: "COLLIE_STT_WIRE_IDENTITY",
+  command: "COLLIE_STT_COMMAND",
 } as const;
 
 /** The path `stt.json` sits at, given the bridge's state dir. */
 export function sttSettingsPath(stateDir: string): string {
   return join(stateDir, STT_FILENAME);
 }
+
+/**
+ * The settings as `stt.json` holds them: the same fields, before anything is believed about them.
+ * An unset field is absent from the written file, because `JSON.stringify` drops `undefined`.
+ */
+export type SttSettingsDocument = RawSettings;
 
 /** A field of the settings as it arrived, before anything is believed about it. */
 interface RawSettings {
@@ -133,6 +176,27 @@ interface RawSettings {
   language?: string;
   codexBin?: string;
   wireIdentity?: string;
+  command?: string;
+  /**
+   * The `local-cli` arguments. `null` means PRESENT BUT UNREADABLE — not an array, or an array
+   * holding something other than strings — which the resolve refuses rather than reads as "no
+   * arguments": running the command without the flags the operator wrote is a different command.
+   * File only; there is no environment spelling of a list.
+   */
+  args?: string[] | null;
+}
+
+/** The `local-cli` argument list as it arrived, narrowed. See {@link RawSettings.args}. */
+function argList(value: JsonValue | undefined): string[] | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) return null;
+  const out: string[] = [];
+  for (const item of value) {
+    const text = jsonStringField(item);
+    if (text === null) return null;
+    out.push(text);
+  }
+  return out;
 }
 
 /** A trimmed string, or undefined when the value is absent, not a string, or blank. */
@@ -159,6 +223,8 @@ export function coerceSttFile(raw: JsonValue | undefined): RawSettings {
     language: optionalString(o.language),
     codexBin: optionalString(o.codexBin),
     wireIdentity: optionalString(o.wireIdentity),
+    command: optionalString(o.command),
+    args: argList(o.args),
   };
 }
 
@@ -172,6 +238,7 @@ export function sttEnvSettings(env: Record<string, string | undefined>): RawSett
     language: optionalString(env[STT_ENV_KEYS.language]),
     codexBin: optionalString(env[STT_ENV_KEYS.codexBin]),
     wireIdentity: optionalString(env[STT_ENV_KEYS.wireIdentity]),
+    command: optionalString(env[STT_ENV_KEYS.command]),
   };
 }
 
@@ -228,6 +295,9 @@ export function resolveSttSettings(
   const language = env.language ?? file.language;
   const codexBin = env.codexBin ?? file.codexBin;
   const wireIdentity = env.wireIdentity ?? file.wireIdentity;
+  const command = env.command ?? file.command;
+  // File only: the environment has no spelling of a list (see RawSettings.args).
+  const args = file.args;
 
   // Nothing was configured at all — the ordinary case, and not something to warn about.
   if (
@@ -237,7 +307,9 @@ export function resolveSttSettings(
     apiKey === undefined &&
     language === undefined &&
     codexBin === undefined &&
-    wireIdentity === undefined
+    wireIdentity === undefined &&
+    command === undefined &&
+    args === undefined
   ) {
     return null;
   }
@@ -246,6 +318,8 @@ export function resolveSttSettings(
     return null;
   }
   if (provider === "codex") return resolveCodex(codexBin, wireIdentity, warn);
+  if (provider === "local-cli") return resolveLocalCli(command, args, warn);
+  if (provider === "whistle") return { provider: "whistle" };
   if (baseUrl === undefined) {
     warn(`speech-to-text is off: no endpoint configured (set ${STT_ENV_KEYS.url} or "baseUrl" in ${STT_FILENAME})`);
     return null;
@@ -319,6 +393,152 @@ function resolveCodex(
     // documented default before the assertion is reached.
     wireIdentity: (wireIdentity ?? "honest") as SttWireIdentity,
   };
+}
+
+/**
+ * How a `local-cli` command is spelled: an absolute path on this host, a bare name to look up on
+ * `PATH` (no separator at all), or a relative path, which is refused everywhere it is met.
+ * Read through the {@link Host}, because `C:\x\whisper.exe` is absolute and starts with no slash.
+ */
+export function commandLookup(command: string, host: Host = HOST): "absolute" | "bare" | "relative" {
+  if (host.path.isAbsolute(command)) return "absolute";
+  return /[\\/]/.test(command) ? "relative" : "bare";
+}
+
+/** True when a string carries a NUL, which no argv entry can hold. */
+const hasNul = (value: string): boolean => value.includes("\0");
+
+/**
+ * The `local-cli` provider's half of the resolve: a command Collie can run without a shell, and the
+ * arguments to put before the recording's path.
+ *
+ * Every refusal here names the FIELD, never its value. The arguments may well carry a token or a
+ * model path the operator would rather not see in a journal line.
+ */
+function resolveLocalCli(
+  command: string | undefined,
+  args: string[] | null | undefined,
+  warn: (message: string) => void,
+): LocalCliSttSettings | null {
+  if (command === undefined) {
+    warn(
+      `speech-to-text is off: the local-cli provider needs a command ` +
+        `(${STT_ENV_KEYS.command} or "command" in ${STT_FILENAME})`,
+    );
+    return null;
+  }
+  // A bare name resolves from PATH; an absolute path is itself. A RELATIVE path with a slash would
+  // resolve against whatever directory the bridge happened to start in, so it is refused.
+  if (hasNul(command) || commandLookup(command) === "relative") {
+    warn('speech-to-text is off: the local-cli "command" must be an absolute path or a bare name on PATH');
+    return null;
+  }
+  if (args === null) {
+    warn(`speech-to-text is off: the local-cli "args" in ${STT_FILENAME} must be a list of strings`);
+    return null;
+  }
+  const list = args ?? [];
+  if (list.length > MAX_LOCAL_CLI_ARGS || list.some(hasNul)) {
+    warn(
+      `speech-to-text is off: the local-cli "args" must be at most ${MAX_LOCAL_CLI_ARGS} strings ` +
+        "with no NUL characters",
+    );
+    return null;
+  }
+  return { provider: "local-cli", command, args: [...list] };
+}
+
+/**
+ * The provider the settings NAME, file and environment together, or undefined when nothing is
+ * configured at all — read before any resolve, so a file that names a provider but does not resolve
+ * (a local-cli with no command) still counts as the operator's.
+ *
+ * It is what Settings asks before it may write `stt.json` (ADR 0096 Decision 4): only an absent
+ * configuration or one that already names `whistle` may be replaced from a phone. A configuration
+ * with fields but no provider is the implicit `openai-compatible`, and is the operator's too.
+ */
+export function namedSttProvider(file: RawSettings, env: RawSettings): string | undefined {
+  const named = env.provider ?? file.provider;
+  if (named !== undefined) return named;
+  return anySetting(file) || anySetting(env) ? "openai-compatible" : undefined;
+}
+
+/** Whether any field of the settings is set at all. */
+function anySetting(raw: RawSettings): boolean {
+  return Object.values(raw).some((value) => value !== undefined);
+}
+
+/**
+ * Who last changed the host's speech option from a paired device, and when (Settings → Voice shows it
+ * as "Last changed by …"). Written beside the settings in `stt.json` by the two routes that change the
+ * option from the app, and dropped by every other writer, so a `collie stt setup` in a terminal clears
+ * it. `changedBy` is the device's pairing label, never a token, an address or a header value.
+ * {@link coerceSttFile} never reads these two fields, so they cannot change what the bridge runs.
+ */
+export interface SttChangeStamp {
+  /** The paired device's label, as its owner named it at pairing (48 characters at most). */
+  changedBy: string;
+  /** When, as an ISO 8601 time. */
+  changedAt: string;
+}
+
+/** The longest label pairing accepts (bridge/pairing.ts). A longer one in the file is not believed. */
+const MAX_CHANGED_BY = 48;
+
+/** The stamp in a parsed `stt.json`, or null when it is absent or either field is not believable. */
+export function sttChangeStamp(raw: JsonValue | undefined): SttChangeStamp | null {
+  const o = jsonRecord(raw);
+  if (o === null) return null;
+  const changedBy = optionalString(o.changedBy);
+  const changedAt = optionalString(o.changedAt);
+  if (changedBy === undefined || changedAt === undefined || changedBy.length > MAX_CHANGED_BY) return null;
+  // The rule pairing applies to a new label: control, format (bidi, zero-width) and separator characters.
+  if (hasHiddenLabelChar(changedBy)) return null;
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(changedAt) || Number.isNaN(Date.parse(changedAt))) return null;
+  return { changedBy, changedAt };
+}
+
+/** The file operations {@link writeSttSettingsFile} needs. The CLI's `Files` and the bridge's disk both fit. */
+export interface SttSettingsFileOps {
+  mkdirp(path: string, mode?: number): void;
+  write(path: string, text: string, mode?: number): void;
+  rename(from: string, to: string): void;
+  remove(path: string): void;
+}
+
+/** Writes of `stt.json` by this process so far, for the temporary's name. */
+let sttWriteSeq = 0;
+
+/**
+ * Write `<stateDir>/stt.json`, the one way it is ever written: 0600 into a 0700 state dir, through a
+ * temporary name in the same directory and renamed into place. A write that died half way must leave
+ * the previous configuration intact, never a half-file the bridge would then read as "the operator
+ * turned this off". `collie stt setup` and the Settings switch for the Whistle host engine both come
+ * through here. Returns the path written; throws when the write failed, after removing the temporary.
+ */
+export function writeSttSettingsFile(
+  stateDir: string,
+  document: SttSettingsDocument | (SttSettingsDocument & SttChangeStamp),
+  ops: SttSettingsFileOps,
+): string {
+  const path = sttSettingsPath(stateDir);
+  // A name unique to this write, as `pairing.ts` does it: a shared `stt.json.tmp` let the bridge's
+  // Settings switch and a `collie stt setup` in a terminal delete or rename each other's temporary.
+  // The pid keeps another process off the name; the counter keeps another write in this one off it.
+  const temporary = `${path}.${process.pid}.${++sttWriteSeq}.tmp`;
+  try {
+    ops.mkdirp(stateDir, 0o700);
+    ops.write(temporary, `${JSON.stringify(document, null, 2)}\n`, 0o600);
+    ops.rename(temporary, path);
+  } catch (err) {
+    try {
+      ops.remove(temporary);
+    } catch {
+      /* nothing was there to remove */
+    }
+    throw err;
+  }
+  return path;
 }
 
 /**

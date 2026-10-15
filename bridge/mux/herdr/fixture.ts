@@ -32,11 +32,14 @@ import type {
   HerdrRpc,
   PaneRead,
   SubscribeOptions,
+  WireForegroundProcess,
   WirePane,
+  WireProcessInfo,
   WireSnapshot,
   WireTab,
   WireWorkspace,
   WireWorktree,
+  WireWorktreeListing,
 } from "./client.ts";
 
 const IDLE: AgentStatus = "idle";
@@ -76,6 +79,8 @@ export class FakeHerdr implements HerdrRpc {
   private tabs: WireTab[] = [];
   private panes: WirePane[] = [];
   private readonly screens = new Map<string, FakeScreen>();
+  /** Foreground processes per pane — what `pane.process_info` answers. Empty unless seeded. */
+  private readonly processes = new Map<string, WireForegroundProcess[]>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly recorded: MuxWrite[] = [];
   /** Worktrees per repo root — the bookkeeping herdr keeps and a plain `git worktree add` does not. */
@@ -157,7 +162,13 @@ export class FakeHerdr implements HerdrRpc {
   async endPane(paneId: string): Promise<void> {
     this.panes = this.panes.filter((pane) => pane.pane_id !== paneId);
     this.screens.delete(paneId);
+    this.processes.delete(paneId);
     await Promise.resolve();
+  }
+
+  /** The pane's foreground group becomes these processes. */
+  setProcesses(paneId: string, processes: WireForegroundProcess[]): void {
+    this.processes.set(paneId, processes);
   }
 
   /** The operator renames a tab in Herdr's own TUI, with the event stream saying nothing. */
@@ -230,6 +241,11 @@ export class FakeHerdr implements HerdrRpc {
       truncated: false,
       revision: pane.revision,
     };
+  }
+
+  async processInfo(paneId: string): Promise<WireProcessInfo> {
+    this.pane("pane.process_info", paneId);
+    return { pane_id: paneId, foreground_processes: this.processes.get(paneId) ?? [] };
   }
 
   async sendPaneText(paneId: string, text: string): Promise<void> {
@@ -323,6 +339,26 @@ export class FakeHerdr implements HerdrRpc {
       },
       ...repo,
     ];
+  }
+
+  /**
+   * `worktree.list` by workspace, as herdr 0.9.3 answers it: the repo whose bookkeeping names the
+   * workspace, `not_git_worktree` for one outside every modelled repo (the seeded spaces are plain
+   * folders), and `workspace_not_found` for an id the session does not have.
+   */
+  async workspaceWorktrees(workspaceId: string): Promise<WireWorktreeListing> {
+    this.assertConnected("worktree.list");
+    if (!this.workspaces.some((workspace) => workspace.workspace_id === workspaceId)) {
+      throw notFound("worktree.list", "workspace_not_found", workspaceId);
+    }
+    for (const [repoRoot, repo] of this.worktreesByRepo) {
+      if (!repo.some((worktree) => worktree.open_workspace_id === workspaceId)) continue;
+      return {
+        source: { repo_root: repoRoot, source_checkout_path: repoRoot },
+        worktrees: await this.listWorktrees(repoRoot),
+      };
+    }
+    throw new Error("herdr worktree.list: not_git_worktree: Herdr worktree actions require a path inside a Git work tree");
   }
 
   async createWorktree(opts: { cwd: string; branch: string }): Promise<CreatedShell> {

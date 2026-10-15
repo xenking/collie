@@ -75,7 +75,9 @@ Each has burned this codebase before on some other axis:
    position fails here — and nothing above the adapter can repair a moving id.
 3. **Are the semantics the contract's?** `styling:"strip"` really strips; a read echoes the pane it
    was asked for; `revision` moves when the pane's content does; a two-key batch arrives as two keys
-   in order; a call aimed at a pane that has gone away answers **`gone`**, not `unreachable`.
+   in order; a call aimed at a pane that has gone away answers **`gone`**, not `unreachable`. A
+   pane's agent name is `shell` or a Collie harness name ([`agents.ts`](./bridge/mux/agents.ts)),
+   never your multiplexer's own id for the harness: `claude-code` reaches no screen reader.
 4. **Does it degrade rather than lie?** A constant `revision` silently disables the race guard. A key
    listed in `unsupportedKeys` that gets sent anyway is worse than no list. `agentDetection`
    declared over a world of bare shells proves nothing.
@@ -104,7 +106,7 @@ A fixture is a `MuxConformanceFixture`: `create()` hands back a **world** — yo
 | `renameOutOfBand()` | someone renames a pane in the multiplexer's own UI, not through Collie |
 | `changePane()` | the pane paints something new |
 | `endPane()` | the pane's process ends and the multiplexer forgets it |
-| `pokeTopologyOutOfBand()` | the herd's shape changes and **nothing announces it** — rename a tab in your fake world, emit no event. This is what proves `refresh()` |
+| `pokeTopologyOutOfBand()` | the herd's shape changes and **nothing announces it**. Rename a tab in your fake world and emit no event. If your multiplexer's tabs have no names, open a pane instead: the change must be one your multiplexer can make. This is what proves `refresh()` |
 | `pokeTopology()` / `pokePane()` | announce a change on the event channel — **required if** you declare `pushTopologyEvents` / `pushPaneEvents` |
 | `close()` | tear it down; idempotent |
 
@@ -149,8 +151,14 @@ cannot drift from it). Anything needing `Bun.serve`/`Bun.connect` is unit-untest
   live pane is somebody's work session. What it adds is what a fake cannot — real escape sequences,
   real id shapes, real timing.
 
-Run both. Then `bun run test` (the whole backend suite) and `SKIP_TESTS=1 bun run build` (lint +
-both typechecks).
+- **Throwaway — opt-in, and it writes.** `bun scripts/mux-e2e.ts` starts its own tmux, zellij and
+  tuios, each under a temporary HOME, XDG dirs and socket dir, runs the live probe against it, then
+  types a command through the adapter and reads its output back. It owns those instances, so it may
+  type; it tears them down and deletes the temporary root, pass or fail. A multiplexer not on `PATH`
+  is skipped, never passed. `--mux <name>` runs one.
+
+Run the pure and live layers, and the throwaway one when you change how an adapter writes. Then
+`bun run test` (the whole backend suite) and `SKIP_TESTS=1 bun run build` (lint + both typechecks).
 
 ## Things that will bite you
 

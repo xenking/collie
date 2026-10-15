@@ -1,4 +1,5 @@
 import { legStillFailed } from "./crew-level";
+import { asJsonBoolean, asJsonNumber, asJsonString, parseJsonObject } from "./json";
 import { t, tn } from "./i18n";
 import type {
   DismissScope,
@@ -139,6 +140,9 @@ export interface RibbonInput {
   /** The version whose quiet CREW notice was closed (`update.dismissedCrewVersion`). A separate
    *  decision, so a separate input — see {@link DismissScope}. */
   dismissedCrewVersion: string | null;
+  /** When that crew close was made (`update.dismissedCrewAt`), or null for a close that covers every
+   *  run of its version: an optimistic tap in this tab, or a close written before the stamp. */
+  dismissedCrewAt?: number | null;
   /**
    * The crew census (`GET /api/update/check`'s `crew`, held by `lib/update-run-store.ts`). Read for
    * ONE thing: a failed leg whose member the census now shows level stops being named here (see
@@ -406,6 +410,30 @@ function targetOf(input: RibbonInput, to: string | null): string | null {
   return to ?? input.update?.latest ?? null;
 }
 
+/**
+ * HAS THE OPERATOR ALREADY PUT THIS FAILED RUN DOWN? (1.21.1)
+ *
+ * The close was recorded on the bridge from M17/08 on, keyed by the run's target version, and then
+ * nothing read it: M28/01 moved the moving-peer states to the update screen and took the one line
+ * that compared `dismissedCrewVersion` with them, while the failed-leg branch above it never had
+ * one. So the ✕ posted, the bridge wrote `dismissedCrewVersion`, and the red row stayed. Seen on the
+ * release lane on 2026-10-13, a 1.21.0 crew run that settled with minibuch unreachable.
+ *
+ * A close covers ONE run. The version must match, and the run must have settled no later than the
+ * close: a retry of the same version that settles afterwards is a new run, and its failure is a new
+ * sentence. A close with no stamp covers every run of its version (see {@link RibbonInput}).
+ */
+export function crewFailureDismissed(
+  target: string | null,
+  settledAt: number | null,
+  input: Pick<RibbonInput, "dismissedCrewVersion" | "dismissedCrewAt">,
+): boolean {
+  if (target === null || target !== input.dismissedCrewVersion) return false;
+  const closedAt = input.dismissedCrewAt ?? null;
+  if (closedAt === null || settledAt === null) return true;
+  return settledAt <= closedAt;
+}
+
 /** The whole band, decided once. See the precedence in this file's header. */
 export function ribbonView(input: RibbonInput): RibbonView {
   const run = input.update?.run;
@@ -421,15 +449,24 @@ export function ribbonView(input: RibbonInput): RibbonView {
   // ONLY WHILE THE MEMBER IS STILL BEHIND. A leg's member that the census now shows level, typically
   // because it levelled itself after the run gave up on it, is not a machine the operator can do
   // anything about, so the sentence goes when the census says so (`readRun`'s `failed`).
+  //
+  // AND ONLY UNTIL THE OPERATOR PUTS IT DOWN (1.21.1). `dismissTarget` gives this state a close, so
+  // this branch must honour it, or the ✕ is a button that does nothing. A closed failure falls
+  // through to the states below it, so a stale bundle or a newer offer still shows.
+  //
+  // An UNREACHABLE member is a failure here, not a wait. The run settled and gave up on it: nothing
+  // is still trying, and the Updates page carries "Try <name> again". "Could not update <name>" is
+  // true of it, and the reason that follows says it was not reached.
   {
     const reading = readRun({ update: input.update, crew: input.crew, now: input.now });
-    if (reading.failed !== null) {
+    const target = targetOf(input, run?.to ?? null);
+    if (reading.failed !== null && !crewFailureDismissed(target, reading.settledAt, input)) {
       const reason = reading.failed.reason ?? t("settings.updateCard.peer.unknownReason");
       return {
         kind: "peer-failed",
         name: reading.failed.name,
         reason: truncateWords(reason, REASON_BUDGET),
-        target: targetOf(input, run?.to ?? null),
+        target,
       };
     }
   }
@@ -537,55 +574,164 @@ function ribbonLine(view: RibbonView): string {
 
 // ── "THIS DEVICE STARTED IT" ────────────────────────────────────────────────────────────────────
 //
-// One fact, and it is now the one that decides whether the app is blocked. The card stamps this store
-// on the way out of its own `POST /api/update`; the update screen reads it, takes the screen, and
-// makes the app behind inert for exactly as long as the run is in flight.
+// One fact, and it is the one that decides whether the app is locked. The update screen stamps this
+// store on the way out of its own `POST /api/update`; it reads it back, takes the screen, and locks
+// the app behind it for as long as the run is in flight.
 //
-// IT LIVES FOR THE LENGTH OF THE RUN, NOT FOR THE GAP BEFORE IT SPEAKS (M28/01). It used to be
-// cleared the moment the run record said anything, because all it fed was the band's "Starting
-// update…" row. That row is gone, and clearing it early would hand the device that tapped its app
-// back one second into a run it asked to watch. `hooks/use-update-screen.ts` clears it when the run
-// goes terminal; a failed POST clears it at once, because nothing was started.
+// IT LIVES FOR THE LENGTH OF THE RUN, NOT FOR THE GAP BEFORE IT SPEAKS (M28/01), and since update
+// mode (ADR 0064) it outlives the PAGE as well. The phone's own reload is the last step of an update:
+// the page that tapped reloads onto the new app, and the document that boots must reopen the screen
+// before its first paint, at the step it had reached. A module variable died with the document that
+// set it, so the new one met a finished run it had never asked for, and the Done screen never came.
+// So the claim is written to `sessionStorage` (this tab only: a second tab is a second device as far
+// as this feature is concerned) and read back when this module loads, which is before React renders.
 //
-// Module-scoped for the same reason every other cross-surface flag in this app is: the screen is
-// mounted in `App.tsx` and the card is a route away, inside a router the screen cannot see.
+// It is spent in one place: the operator's "Back to the app" on the screen's last step
+// (`hooks/use-update-screen.ts`), or at once by a failed POST, because nothing was started. A claim
+// older than {@link CLAIM_MAX_AGE_MS} is thrown away on load rather than reopening a screen about a
+// run nobody is watching.
 
-let startedAt: number | null = null;
-let startedRunId: string | null = null;
+/** Where the claim lives. Versioned, so a later shape can ignore this one rather than misread it. */
+export const CLAIM_KEY = "collie:update-mode:v1";
+
+/**
+ * How old a claim may be when a document loads it. Longer than any run, crew and rate limit included
+ * (ADR 0062 puts the worst at about 80 minutes), and short enough that a tab left open overnight
+ * does not greet the operator with yesterday's update.
+ */
+export const CLAIM_MAX_AGE_MS = 3 * 60 * 60_000;
+
+/** What this device asked for, as the screen needs it after a reload. */
+export interface UpdateClaim {
+  /** When the confirm was accepted, on this phone's clock. The screen's clock counts from here. */
+  readonly startedAt: number;
+  /** The 202's own run id, when the bridge sent one (M16/04). */
+  readonly runId: string | null;
+  /** The version the run goes to, or null when the ask did not name one. */
+  readonly target: string | null;
+  /** A run that moves only the members (M32). */
+  readonly peersOnly: boolean;
+  /** The build id of the bundle that tapped. A document with a different one has reloaded onto the
+   *  new app, which is how the phone's own step knows it is done. */
+  readonly bundleAtStart: string | null;
+  /** Members the operator chose to stop waiting for ("Skip <name>"). */
+  readonly skipped: readonly string[];
+  /** This machine's name, and its members', as they were at the start. A document that boots with
+   *  the claim draws the same rows before its first read answers, so the panel does not grow. */
+  readonly lead: string | null;
+  readonly members: readonly string[];
+  /** The last step the screen showed, so a document that boots mid-run opens on it. */
+  readonly lastPhase: string | null;
+}
+
+let claim: UpdateClaim | null = loadClaim();
 const listeners = new Set<() => void>();
 
-function emit(): void {
+function loadClaim(): UpdateClaim | null {
+  try {
+    const raw = sessionStorage.getItem(CLAIM_KEY);
+    if (raw === null) return null;
+    // Parsed at the boundary: this key is written only by `saveClaim` below, but a hand-edited or
+    // truncated value must read as no claim rather than as half of one.
+    const parsed = parseJsonObject(raw);
+    const startedAt = asJsonNumber(parsed?.startedAt);
+    if (parsed === undefined || startedAt === undefined) return null;
+    if (Date.now() - startedAt > CLAIM_MAX_AGE_MS) {
+      sessionStorage.removeItem(CLAIM_KEY);
+      return null;
+    }
+    const skipped = parsed.skipped;
+    return {
+      startedAt,
+      runId: asJsonString(parsed.runId) ?? null,
+      target: asJsonString(parsed.target) ?? null,
+      peersOnly: asJsonBoolean(parsed.peersOnly) === true,
+      bundleAtStart: asJsonString(parsed.bundleAtStart) ?? null,
+      skipped: Array.isArray(skipped) ? skipped.flatMap((name) => asJsonString(name) ?? []) : [],
+      lead: asJsonString(parsed.lead) ?? null,
+      members: Array.isArray(parsed.members) ? parsed.members.flatMap((name) => asJsonString(name) ?? []) : [],
+      lastPhase: asJsonString(parsed.lastPhase) ?? null,
+    };
+  } catch {
+    // No storage (private mode, a locked-down embed): the claim lives for this document only, which
+    // is what it did before update mode.
+    return null;
+  }
+}
+
+function saveClaim(next: UpdateClaim | null): void {
+  claim = next;
+  try {
+    if (next === null) sessionStorage.removeItem(CLAIM_KEY);
+    else sessionStorage.setItem(CLAIM_KEY, JSON.stringify(next));
+  } catch {
+    /* see loadClaim: the in-memory claim still holds for this document */
+  }
   for (const listener of listeners) listener();
 }
 
 /**
  * The confirm was tapped and the POST was accepted. Safe to call on every attempt.
  *
- * `runId` is the 202's own run id when the bridge sent one (M16/04). It is recorded rather than used
- * for a branch: a device holding a stamp for a run that is over has no claim on the next one, and the
- * id is how a future reader can say so without guessing from timestamps.
+ * `runId` is the 202's own run id when the bridge sent one (M16/04). It lets a later reading tell this
+ * device's run from somebody else's newer one.
  */
-export function noteUpdateStarted(at: number = Date.now(), runId: string | null = null): void {
-  startedAt = at;
-  startedRunId = runId;
-  emit();
+export function noteUpdateStarted(
+  at: number = Date.now(),
+  runId: string | null = null,
+  extra: {
+    target?: string | null;
+    peersOnly?: boolean;
+    bundleAtStart?: string | null;
+    lead?: string | null;
+    members?: readonly string[];
+  } = {},
+): void {
+  saveClaim({
+    startedAt: at,
+    runId,
+    target: extra.target ?? null,
+    peersOnly: extra.peersOnly ?? false,
+    bundleAtStart: extra.bundleAtStart ?? null,
+    skipped: [],
+    lead: extra.lead ?? null,
+    members: extra.members ?? [],
+    lastPhase: null,
+  });
 }
 
-/** The POST failed, or the run this device started is over. Either way the claim is spent. */
+/** The step the screen is on, kept with the claim for the next document. Written only on a change. */
+export function noteClaimPhase(phase: string): void {
+  if (claim === null || claim.lastPhase === phase) return;
+  saveClaim({ ...claim, lastPhase: phase });
+}
+
+/** The operator chose "Skip <name>": stop waiting for that member. Kept with the claim, so a reload
+ *  does not ask again. */
+export function noteMemberSkipped(name: string): void {
+  if (claim === null || claim.skipped.includes(name)) return;
+  saveClaim({ ...claim, skipped: [...claim.skipped, name] });
+}
+
+/** The POST failed, or the operator left the screen's last step. Either way the claim is spent. */
 export function clearUpdateStarted(): void {
-  if (startedAt === null) return;
-  startedAt = null;
-  startedRunId = null;
-  emit();
+  if (claim === null) return;
+  saveClaim(null);
 }
 
+/** When this device started the run it is watching, or null. */
 export function getUpdateStarted(): number | null {
-  return startedAt;
+  return claim?.startedAt ?? null;
+}
+
+/** The whole claim, or null. The same object until it changes, so it is safe as a store snapshot. */
+export function getUpdateClaim(): UpdateClaim | null {
+  return claim;
 }
 
 /** The run id this device consented to, when the 202 named one. */
 export function getUpdateStartedRun(): string | null {
-  return startedRunId;
+  return claim?.runId ?? null;
 }
 
 export function subscribeUpdateStarted(listener: () => void): () => void {

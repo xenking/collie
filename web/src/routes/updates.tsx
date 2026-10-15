@@ -1,14 +1,15 @@
 import { ArrowLeft } from "lucide-react";
-import { useNavigate } from "react-router";
 
 import { RouteHeader } from "@/components/app-header";
 import { Button } from "@/components/ui/button";
 import { UpdateCard } from "@/components/update-card";
 import { UpdateCheckControl } from "@/components/update-check-control";
 import { useLocale } from "@/hooks/use-locale";
+import { useNav } from "@/hooks/use-nav";
 import { t } from "@/lib/i18n";
 import { settingsPath } from "@/lib/nav";
 import { useScope } from "@/lib/session";
+import { BandMain } from "@/components/ui/strip-host";
 
 // ── THE UPDATES PAGE ────────────────────────────────────────────────────────────────────────────
 //
@@ -35,7 +36,7 @@ import { useScope } from "@/lib/session";
 // prerelease strip and the shell's padding rather than a copy of them. Back returns to Settings
 // with the scope intact — this is a child of that page, not a sibling of home.
 export function UpdatesRoute() {
-  const navigate = useNavigate();
+  const nav = useNav();
   const scope = useScope();
   useLocale();
 
@@ -50,7 +51,7 @@ export function UpdatesRoute() {
               size="icon"
               // 44px — the tap floor every control in this row shares. size="icon" alone is 36px.
               className="size-11"
-              onClick={() => navigate(settingsPath(scope))}
+              onClick={() => nav.up(settingsPath(scope))}
               aria-label={t("updates.nav.back")}
             >
               <ArrowLeft className="size-5" />
@@ -63,10 +64,10 @@ export function UpdatesRoute() {
       {/* `relative` for the reason every scroller in this app carries it: an `sr-only` (position:
           absolute) deep in the page would otherwise escape the scroller and grow the document's own
           scrollbar. */}
-      <main className="relative flex min-h-0 flex-1 flex-col space-y-4 overflow-y-auto p-4">
+      <BandMain base={16} className="relative flex min-h-0 flex-1 flex-col space-y-4 overflow-y-auto p-4">
         <UpdateCheckControl />
         <UpdateCard />
-      </main>
+      </BandMain>
     </div>
   );
 }

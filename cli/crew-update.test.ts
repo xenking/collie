@@ -6,7 +6,7 @@ import { leadStore, material, member, peerStore, T0 } from "../bridge/crew/fixtu
 import { type OpsRecord, parseCrewOps } from "../bridge/crew/ops-store.ts";
 import { serializeTrustStore, TrustStore, type TrustStoreData, type TrustStoreIo } from "../bridge/crew/trust-store.ts";
 import { UPDATE_RUN_SCHEMA, type UpdateRun } from "../bridge/update-run.ts";
-import { capture, context, fakeExec, fakeFiles, fakeOps, ROOT, type SeededFiles, type SeededOps } from "./fakes.ts";
+import { capture, context, fakeExec, fakeFiles, fakeOps, ROOT, type SeededFiles, type SeededOps, probeDefaults, probeOutput, type ProbeField } from "./fakes.ts";
 import type { InstallKind } from "./install-kind.ts";
 import { EXIT } from "./io.ts";
 import type { CrewUpdateRow } from "../bridge/update-action.ts";
@@ -24,6 +24,7 @@ import {
   type PreflightOptions,
   type PreflightReport,
 } from "./update-check.ts";
+import { hostFor } from "../bridge/host.ts";
 
 // `collie crew update` against fakes for every seam. NOTHING here spawns `ssh`, dials a network or
 // touches a disk: the transport records `(host, script)` pairs and answers from a table, the one
@@ -50,7 +51,12 @@ const VERSION = "1.2.3";
 const OLD_VERSION = "1.2.2";
 const CHECKOUT = "/home/pat/.collie";
 
+// `probeDefaults()` FIRST, then this suite's own values. The shared table is the one place the
+// field list lives (`cli/fakes.ts`, held against the golden script by `cli/probe-contract.test.ts`),
+// so this cannot be short a field the way it was until 2026-10-01. What stays here is the VALUES,
+// which are this suite's subject: a member on an older version, mid-update.
 const PROBE_DEFAULTS = {
+  ...probeDefaults(),
   home: "/home/pat",
   git: "/usr/bin/git",
   bun: "/home/pat/.bun/bin/bun",
@@ -75,9 +81,8 @@ const PROBE_DEFAULTS = {
   sha256: "/usr/bin/sha256sum",
 } satisfies Record<string, string>;
 
-function probeOut(over: Record<string, string> = {}): string {
-  const all = { ...PROBE_DEFAULTS, ...over };
-  return [...Object.entries(all).map(([k, v]) => `collie-probe:${k}=${v}`), "collie-probe:probe=ok", ""].join("\n");
+function probeOut(over: Partial<Record<ProbeField, string>> = {}): string {
+  return probeOutput({ ...PROBE_DEFAULTS, ...over });
 }
 
 interface Recorded {
@@ -159,6 +164,7 @@ function harness(opts: HarnessOptions = {}) {
   });
 
   const deps: CrewUpdateDeps = {
+    host: hostFor("linux"),
     // The same reason the other crew suites set it: `PeerClient`'s REAL `setTimeout` must never fire
     // and report a fake member as unreachable.
     ctx: context({ COLLIE_CREW_TIMEOUT_MS: "60000" }),
@@ -618,6 +624,30 @@ describe("the preflight runs first, and one red aborts the whole run", () => {
     // Consent, ordering and abort behaviour are untouched: the run went ahead on the walk's verdict.
     expect(h.confirms).toHaveLength(1);
     expect(legs(h)).toContain("nas.example:install");
+  });
+
+  // Reads need a pairing token since ADR 0086, and this process holds none: the banked verdicts come
+  // off this collie's own `GET /api/update/check`, sent with the bridge's local read credential.
+  test("the banked verdicts are read off the own bridge with the local read credential, when there is one", async () => {
+    const secret = "A".repeat(43);
+    for (const written of [true, false]) {
+      const h = harness({ ops: { nas: opsRecord("nas.example") }, hello: { nas: VERSION } });
+      if (written) h.deps.files.write(`${h.deps.ctx.stateDir}/local-secret`, `${secret}\n`, 0o600);
+      const asked: (string | null)[] = [];
+      const crewFetch = h.deps.fetch;
+      // No `peerReported` seam, so the run takes the real read of its own bridge.
+      const { peerReported: _banked, ...rest } = h.deps;
+      const deps: CrewUpdateDeps = {
+        ...rest,
+        fetch: async (url, init) => {
+          if (!url.endsWith("/api/update/check")) return crewFetch(url, init);
+          asked.push(new Headers(init?.headers).get("authorization"));
+          return new Response(JSON.stringify({ crew: [] }), { status: 200 });
+        },
+      };
+      expect(await cmdCrewUpdate(deps, ["nas"])).toBe(EXIT.OK);
+      expect(asked).toEqual([written ? `Bearer ${secret}` : null]);
+    }
   });
 
   test("peer-reported preflight: a member the link knows nothing about prints nothing", () => {

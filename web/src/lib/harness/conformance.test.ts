@@ -6,6 +6,8 @@ import { parseAnsi } from "../ansi";
 import { splitLines } from "../blocks";
 import { claudeAdapter } from "./claude";
 import { describeAdapterConformance, isValidHerdrKey } from "./conformance";
+import { registeredAgents } from "./registry";
+import { WALK_GAPS, WALK_PAIRS } from "./walk-pairs";
 
 // The Claude adapter is the reference implementation the conformance suite gates. The fixture
 // cohorts are derived from the byte-faithful corpus (web/src/fixtures/panes/claude--*.txt) by
@@ -26,6 +28,9 @@ const PANES_DIR = join(import.meta.dirname, "..", "..", "fixtures", "panes");
 // (multi-line) input box, stripped as chrome, never lifted.
 const NEUTRAL = new Set([
   "claude--working.txt",
+  // The default footer's own hints ("esc to interrupt", "↓ to manage") sit under a live box.
+  "claude--working-esc-to-interrupt.txt",
+  "claude--idle-background-shell.txt",
   "claude--fresh-idle.txt",
   "claude--done.txt",
   "claude--send-inflight.txt",
@@ -43,10 +48,19 @@ const NEUTRAL = new Set([
   "claude--draft-footer-empty.txt",
   "claude--draft-footer-single.txt",
   "claude--draft-footer-wrapped.txt",
+  // The same footer with Claude Code 2.1.293's active-agent pointer (`❯ ◯ …`) on its last row — still
+  // composer chrome below a live box, never a dialog.
+  "claude--footer-pointed-agent.txt",
   // The /model picker DISMISSED: the input box is back, so this is an ordinary idle screen. It is the
   // negative control for the generic menu grammar — its statusline is `·`-separated like a key-hint
   // footer, and the input-box gate is the only thing that keeps it raw.
   "claude--menu-model-picker-dismissed.txt",
+  // The dynamic-workflow view (ADR 0072). A read-only SCREEN, not a dialog: its footer is a row of
+  // key hints (`↑↓ select · p resume · f filter · esc back · s save`), which is the shape the generic
+  // menu grammar keys on, and it must still decline. There is nothing here to answer. `p` pauses a
+  // run, and offering that from the phone is a feature with its own decision to take, not something
+  // to fall out of a footer that happens to look like a menu.
+  "claude--workflow-view.txt",
   // GHOST TEXT: an input box holding the generated "suggested next prompt" Claude paints when the box
   // is empty, and the same box after typing over it. Both are ordinary idle screens — composer chrome,
   // never a dialog. They exist to pin how the suggestion is PAINTED (faint, SGR 2), which is the only
@@ -64,6 +78,37 @@ const NEUTRAL = new Set([
   // unread-dialog post-pass (outside the adapter, harness/index.ts) is what offers Cancel over it,
   // and that card is pinned separately in unread-dialog.test.ts, not by this suite.
   "claude--menu-effort-slider--w40-low.txt",
+  // Claude Code 2.1.283 input boxes whose multi-line draft holds a pasted `────` rule or a pasted
+  // `❯ ls -la` shell prompt. Idle screens with a draft, never a dialog: the indented rows are draft
+  // text (ADR 0048 addendum 2026-09-26).
+  "claude--v2283-draft-prompt.txt",
+  "claude--v2283-draft-rule.txt",
+  // The shell prompt under a Claude that is starting or exiting (herdr already, or still, reports the
+  // agent): no dialog at all, and since the 2026-09-26 addendum to ADR 0053 no unread card either.
+  "claude--v2283-shell-before-first-frame.txt",
+  "claude--v2283-shell-after-exit.txt",
+  // A multiSelect with the pointer on its "Type something" field: a real dialog the adapter declines
+  // on purpose, because every toggle digit would be typed into the field. The unread card covers it.
+  "claude--v2283-multiselect-type-something-focused.txt",
+  // Claude Code 2.1.283 after the `/plugin` Marketplaces tab applied an update: the menu is closed
+  // and "✔ Updated 1 marketplace" sits in the chat above an ordinary box. Idle, never a dialog.
+  "claude--v2283-plugin-marketplaces-updated--w40.txt",
+  "claude--v2283-plugin-marketplaces-updated--w82.txt",
+  "claude--v2283-plugin-marketplaces-updated--w120.txt",
+  "claude--v2283-fullscreen-plugin-marketplaces-updated--w40.txt",
+  "claude--v2283-fullscreen-plugin-marketplaces-updated--w82.txt",
+  "claude--v2283-fullscreen-plugin-marketplaces-updated--w120.txt",
+  // A marketplace's detail screen in the full-screen renderer, taller than the 40-row pane: Claude
+  // clips it at the bottom, so its footer is not on screen and it names no key. A real dialog that
+  // no grammar may read (ADR 0009), and with no key-hint row in its tail, no unread card either.
+  "claude--v2283-fullscreen-plugin-marketplace-detail--w40.txt",
+  "claude--v2283-fullscreen-plugin-marketplace-detail--w82.txt",
+  // The `/plugin` "Add Marketplace" source field: a text field no grammar reads. The unread card
+  // covers it (unread-dialog.test.ts).
+  "claude--v2283-plugin-marketplaces-add-form--w82.txt",
+  // Claude Code 2.1.296's box table with a `⚠️` cell, cut to the reply's rows: a table that pans
+  // (table-run.test.ts), never a dialog.
+  "claude--box-table-vs16-emoji.txt",
 ]);
 
 const allClaudeFixtures = readdirSync(PANES_DIR)
@@ -78,13 +123,17 @@ const allCodexFixtures = readdirSync(PANES_DIR)
 const allGrokFixtures = readdirSync(PANES_DIR)
   .filter((f) => f.startsWith("grok--") && f.endsWith(".txt"))
   .toSorted();
+// Every opencode capture must stay raw under the claude adapter too — the cross-adapter leg.
+const allOpencodeFixtures = readdirSync(PANES_DIR)
+  .filter((f) => f.startsWith("oc--") && f.endsWith(".txt"))
+  .toSorted();
 
 const ownFixtures = allClaudeFixtures.filter((f) => !NEUTRAL.has(f));
 const neutralFixtures = allClaudeFixtures.filter((f) => NEUTRAL.has(f));
 
 describeAdapterConformance(claudeAdapter, {
   ownFixtures,
-  foreignFixtures: [...allOmpFixtures, ...allCodexFixtures, ...allGrokFixtures], // the other adapters' captures — cross-adapter fail-closed
+  foreignFixtures: [...allOmpFixtures, ...allCodexFixtures, ...allGrokFixtures, ...allOpencodeFixtures], // the other adapters' captures — cross-adapter fail-closed
   neutralFixtures,
 });
 
@@ -183,5 +232,62 @@ describe("isValidHerdrKey", () => {
     for (const key of ["10", "42", "PageUp", "PageDown", "Home", "End", "Insert", "Delete", "", "C-c"]) {
       expect(isValidHerdrKey(key), key).toBe(false);
     }
+  });
+});
+
+// The walk-pair table (harness/walk-pairs.ts) is read per adapter by `describeAdapterConformance`, so a
+// row naming an agent no adapter claims would never be checked. Pin the table's own hygiene here.
+describe("the walk-pair table", () => {
+  const agents = registeredAgents();
+
+  it("names only registered agents, in pairs and in gaps", () => {
+    for (const [agent] of WALK_PAIRS) expect(agents, `pair agent ${agent}`).toContain(agent);
+    for (const key of Object.keys(WALK_GAPS)) expect(agents, `gap ${key}`).toContain(key.split(" | ")[0]);
+  });
+
+  it("holds each pair once, and no fixture against itself", () => {
+    const seen = new Set<string>();
+    for (const [agent, a, b] of WALK_PAIRS) {
+      expect(a, `${agent}: ${a} paired with itself`).not.toBe(b);
+      const id = [agent, ...[a, b].toSorted()].join("|");
+      expect(seen.has(id), `${a} <> ${b} is declared twice`).toBe(false);
+      seen.add(id);
+    }
+  });
+
+  it("gives every gap a reason", () => {
+    for (const [key, gap] of Object.entries(WALK_GAPS)) expect(gap.reason.length, key).toBeGreaterThan(10);
+  });
+
+  it("dates every gap", () => {
+    for (const [key, gap] of Object.entries(WALK_GAPS)) {
+      expect(gap.since, `${key}: since must be an ISO date`).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+  });
+
+  // THE RATCHET: gaps only shrink. The set of gap keys is pinned as a literal list. A new grammar
+  // group that lifts a walked list must arrive with a second capture (a walk pair), not with a new
+  // gap. Adding a key below is a reviewed decision, not a convenience: it says nothing proves that
+  // grammar blanks what follows its pointer (ADR 0080 point 5). Removing a key is always fine, and
+  // the stale-gap checks in describeAdapterConformance already demand it when a pair lands.
+  it("pins the exact set of gap keys: a new gap needs a second capture first", () => {
+    expect(
+      Object.keys(WALK_GAPS).toSorted(),
+      "WALK_GAPS changed. A new grammar group needs a second capture of the same dialog with the " +
+        "pointer on another row (add it to WALK_PAIRS), not a new gap. Adding a key to the literal list " +
+        "in this test is a reviewed decision. Removing one is expected when a pair lands.",
+    ).toEqual(
+      [
+        "claude | trust | Quick safety check",
+        "codex | trust | Trust this folder?",
+        "omp | select | Pick a colour",
+        "pi | select | 1",
+        "pi | select | Auth",
+        "pi | select | Which package manager do you want to use?",
+        "opencode | permission | % WebFetch https",
+        "opencode | permission | $ echo narrow-width-probe",
+        "opencode | permission | This will allow edit until OpenCode is restarted.",
+      ].toSorted(),
+    );
   });
 });

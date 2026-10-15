@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { formatMuxKey, MUX_MODIFIERS, MUX_NAMED_KEYS, type MuxModifier } from "../keys.ts";
-import { resolveTmuxBinary, TMUX_BINARY_CANDIDATES, tmuxServerArgs } from "./exec.ts";
+import { resolveTmuxBinary, TMUX_BINARY_CANDIDATES, TMUX_CLIENT_ARGS, tmuxArgv, tmuxServerArgs } from "./exec.ts";
 import { toTmuxKey } from "./keys.ts";
 import {
   classifyControlLine,
@@ -45,6 +45,22 @@ describe("tmuxServerArgs", () => {
     expect(tmuxServerArgs("/tmp/tmux-1000/default")).toEqual(["-S", "/tmp/tmux-1000/default"]);
     expect(tmuxServerArgs("")).toEqual([]);
     expect(tmuxServerArgs("   ")).toEqual([]);
+  });
+});
+
+describe("tmuxArgv", () => {
+  test("every invocation forces a UTF-8 client, ahead of the server flags", () => {
+    // Probed on tmux 3.7c with no locale set: without `-u` the U+001F separator in a `-F` listing
+    // comes back as `_`, so the listing parses to zero rows and the bridge reads as disconnected.
+    expect(TMUX_CLIENT_ARGS).toEqual(["-u"]);
+    expect(tmuxArgv("/usr/bin/tmux", ["-L", "collieprobe"], ["list-sessions"])).toEqual([
+      "/usr/bin/tmux",
+      "-u",
+      "-L",
+      "collieprobe",
+      "list-sessions",
+    ]);
+    expect(tmuxArgv("/usr/bin/tmux", [], ["-V"])).toEqual(["/usr/bin/tmux", "-u", "-V"]);
   });
 });
 
@@ -108,14 +124,16 @@ describe("toTmuxKey", () => {
 
 describe("parseListing", () => {
   const listing = [
-    ["S", "$0", "2", "1787171890", "collie"].join(SEP),
+    ["S", "$0", "2", "1787171890", "/home/dev/collie", "collie"].join(SEP),
     ["W", "@0", "$0", "0", "1", "2", "0", "agents"].join(SEP),
     ["P", "%0", "@0", "$0", "0", "1", "1", "24", "30", "bluefin", "/home/dev", "claude", "a title"].join(SEP),
   ].join("\n");
 
   test("the three tagged sections parse into three lists", () => {
     const parsed = parseListing(listing);
-    expect(parsed.sessions).toEqual([{ id: "$0", name: "collie", windows: 2, activity: 1787171890 }]);
+    expect(parsed.sessions).toEqual([
+      { id: "$0", name: "collie", windows: 2, activity: 1787171890, path: "/home/dev/collie" },
+    ]);
     expect(parsed.windows).toEqual([
       { id: "@0", sessionId: "$0", index: 0, active: true, panes: 2, autoNamed: false, name: "agents" },
     ]);

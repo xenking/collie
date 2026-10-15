@@ -1,6 +1,8 @@
+import { type Host } from "../bridge/host.ts";
 import { answersThisBuild } from "../bridge/version.ts";
 import {
   inFlight,
+  LOCK_MAX_HOLD_MS,
   parseUpdateLock,
   parseUpdateRun,
   resolveUpdateRun,
@@ -11,8 +13,11 @@ import {
   type UpdateRun,
   type UpdateRunState,
 } from "../bridge/update-run.ts";
+import { bindIsWildcard } from "../bridge/crew/config.ts";
 import { STANDBY_HEALTH_PATH, STANDBY_VERSION_HEADER, standbyPortOf } from "../bridge/crew/standby.ts";
 import { parseTrustStore, trustStorePath } from "../bridge/crew/trust-store.ts";
+import { fingerprintOfCert, normalizeFingerprint } from "../bridge/crew/identity.ts";
+import { crewRuntimePath, parseMarker, type CrewRuntimeMarker } from "../bridge/crew/staleness.ts";
 import type { Environment } from "./context.ts";
 import type { Exec, Files, Net } from "./sys.ts";
 
@@ -209,7 +214,9 @@ export type LockVerdict =
 /**
  * May a new run start?
  *
- * A lock whose pid is alive holds, whatever its age — a long build is not a stuck one. A lock older
+ * A lock whose pid is alive holds while it is younger than {@link LOCK_MAX_HOLD_MS} — a long build is
+ * not a stuck one. Past that bound it does not hold even with a live pid: a build runs minutes, so an
+ * hour-old live pid is a pid the machine reused after a crash or reboot, not an update. A lock older
  * than ten minutes whose pid is gone does not hold: it is the crash, the kill or the reboot, and the
  * same single rule `bridge/update-run.ts` reads a stale marker with. A YOUNG lock with a dead pid
  * still holds, so a retry cannot race the tail of a run that is only just finishing.
@@ -217,6 +224,7 @@ export type LockVerdict =
 export function lockVerdict(held: UpdateLock | null, now: number, alive: boolean, staleAfterMs: number): LockVerdict {
   if (held === null) return { ok: true };
   if (!alive && now - held.at >= staleAfterMs) return { ok: true };
+  if (now - held.at >= LOCK_MAX_HOLD_MS) return { ok: true };
   const who = alive ? `pid ${held.pid} is still running it` : `pid ${held.pid} took it`;
   return {
     ok: false,
@@ -263,7 +271,8 @@ export function healthTimeoutMs(env: Environment): number {
 
 /** What `/api/health` said, flattened — a request that never landed is a failure with a sentence. */
 export type HealthAnswer =
-  | { readonly ok: true; readonly version: string; readonly deposed: boolean }
+  /** `version` is null when the door cannot say which build answers (a TLS-only peer whose bridge predates `build`). */
+  | { readonly ok: true; readonly version: string | null; readonly deposed: boolean }
   | { readonly ok: false; readonly reason: string };
 
 /** The health gate's verdict on one answer. */
@@ -281,6 +290,11 @@ export function healthVerdict(answer: HealthAnswer, version: string, commit: str
   if (!answer.ok) return { ok: false, reason: answer.reason };
   const up = aliveVerdict(answer);
   if (!up.ok) return up;
+  // A TLS-only peer names its build through its runtime marker, which a bridge older than the `build`
+  // field does not write. Its answer then proves only that a bridge of this machine booted after the
+  // restart, is still alive, and holds the port with this machine's certificate — weaker than the
+  // build check, and all such a bridge can say.
+  if (answer.version === null) return { ok: true };
   if (!answersThisBuild(answer.version, version, commit)) {
     return { ok: false, reason: `the service came back as ${answer.version}, not ${version}` };
   }
@@ -380,10 +394,20 @@ function settledOutcome(run: UpdateRun): RunOutcome {
 // case for a peer that is not standing by — so the gate reads the STATUS as evidence of nothing and
 // takes the build off the answer instead.
 
-/** Where the health gate knocks, and which of the two answers it is about to read. */
-export type ProbeTarget =
+/** The two doors a plain-HTTP GET can be sent to. {@link probeTarget} only ever names one of these. */
+export type UrlTarget =
   | { readonly kind: "front-door"; readonly url: string }
   | { readonly kind: "standby"; readonly url: string };
+
+/** Where the health gate knocks, and which of the two answers it is about to read. */
+export type ProbeTarget =
+  | UrlTarget
+  /**
+   * A peer's main listener, which is mutual TLS and answers no HTTP to this process. The probe
+   * reads the certificate it presents and compares it with `fingerprint` (this machine's own, as
+   * {@link fingerprintOfCert} spells it).
+   */
+  | { readonly kind: "peer-listener"; readonly host: string; readonly port: number; readonly fingerprint: string };
 
 /** The facts the rule is decided from. All four are read off this instance's own configuration. */
 export interface ProbeConfig {
@@ -394,6 +418,8 @@ export interface ProbeConfig {
   readonly standbyPort: number | null;
   /** Does this collie pin a lead? A peer's front door is mutual TLS and answers no plain HTTP. */
   readonly pinsALead: boolean;
+  /** This collie's own crew certificate, PEM, from its trust store. Null without a store. */
+  readonly selfCertPem: string | null;
 }
 
 /**
@@ -404,18 +430,26 @@ export interface ProbeConfig {
  * for it deliberately: the gate then fails with the connection error, which is the honest report of
  * a configuration where nothing local can ask this machine how it is.
  */
-export function probeTarget(c: ProbeConfig): ProbeTarget {
+export function probeTarget(c: ProbeConfig): UrlTarget {
   if (c.pinsALead && c.standbyPort !== null) {
     // Loopback, always: the standby door binds `COLLIE_STANDBY_HOST` but this process is ON the
     // machine, and a door bound wide is reachable on loopback too.
     return { kind: "standby", url: `http://127.0.0.1:${c.standbyPort}${STANDBY_HEALTH_PATH}` };
   }
-  const host = c.host.trim() === "" ? "127.0.0.1" : c.host.trim();
-  return { kind: "front-door", url: `http://${host}:${c.port}/api/health` };
+  // An IPv6 literal goes in brackets, or `http://fd7a::1:8787` is not a URL and every probe of a
+  // healthy bridge fails.
+  const host = dialHost(c);
+  const authority = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return { kind: "front-door", url: `http://${authority}:${c.port}/api/health` };
+}
+
+/** A wildcard bind is not an address one can dial, and it answers on loopback. */
+function dialHost(c: ProbeConfig): string {
+  return bindIsWildcard(c.host) ? "127.0.0.1" : c.host.trim();
 }
 
 /** {@link ProbeConfig} read off this instance's environment and its trust store. */
-export function probeConfigOf(env: Environment, files: Files, stateDir: string, port: number): ProbeConfig {
+export function probeConfigOf(env: Environment, files: Pick<Files, "read">, stateDir: string, port: number): ProbeConfig {
   const raw = files.read(trustStorePath(stateDir));
   const trust = raw === null ? null : parseTrustStore(raw);
   return {
@@ -424,11 +458,36 @@ export function probeConfigOf(env: Environment, files: Files, stateDir: string, 
     standbyPort: standbyPortOf(env),
     // The same fact `bridge/index.ts` builds its pinned listener from: a store that names a lead.
     pinsALead: trust !== null && trust.lead !== null,
+    selfCertPem: trust === null ? null : trust.self.certPem,
   };
 }
 
-/** The health gate's one request, at whichever door {@link probeTarget} named. */
-export function healthProbe(net: Net, target: ProbeTarget): () => Promise<HealthAnswer> {
+/**
+ * Where the UPDATE health gate knocks: {@link probeTarget}, except for a crew peer that pins a lead
+ * and binds no standby door.
+ *
+ * That peer's only listener is mutual TLS, so no plain-HTTP probe can pass and the gate would roll
+ * back every update (#410). It is asked for the one thing a TLS handshake gives without a client
+ * certificate: its server certificate, and {@link updateHealthProbe} adds the boot evidence on disk.
+ * What passes proves a bridge of this machine booted after the restart, is still alive, and holds
+ * the port with this machine's own crew certificate. It still cannot name the build. A peer whose
+ * own certificate does not parse falls back to {@link probeTarget}, which reports the honest
+ * connection error as before.
+ *
+ * Not {@link probeTarget} itself: the Windows launcher's `livenessUrl` reads that one, and a
+ * liveness URL cannot be a certificate check.
+ */
+export function updateHealthTarget(c: ProbeConfig): ProbeTarget {
+  if (!c.pinsALead || c.standbyPort !== null || c.selfCertPem === null) return probeTarget(c);
+  const fingerprint = fingerprintOfCert(c.selfCertPem);
+  if (fingerprint === null) return probeTarget(c);
+  // The host as a dialer wants it: no URL brackets around an IPv6 literal.
+  const host = dialHost(c).replace(/^\[(.*)\]$/, "$1");
+  return { kind: "peer-listener", host, port: c.port, fingerprint };
+}
+
+/** The health gate's one request, at whichever plain-HTTP door {@link probeTarget} named. */
+export function healthProbe(net: Net, target: UrlTarget): () => Promise<HealthAnswer> {
   if (target.kind === "standby") return standbyAnswer(net, target.url);
   return async () => {
     const got = await net.getJson(target.url);
@@ -440,6 +499,76 @@ export function healthProbe(net: Net, target: ProbeTarget): () => Promise<Health
     const version = body.version ?? "";
     if (version === "") return { ok: false, reason: "the health answer named no version" };
     return { ok: true, version, deposed: body.deposed === true };
+  };
+}
+
+/** What the update gate needs to tell a bridge that booted after the restart from one that did not. */
+export interface BootEvidence {
+  /** The bridge's own runtime marker (`crew-runtime.json`), or null when absent or unreadable. */
+  readonly marker: () => CrewRuntimeMarker | null;
+  /** The wall-clock moment (ms) of the latest restart this run issued. The rollback's restart moves it. */
+  readonly since: () => number;
+  /** Is the process alive? Null when the process table could not be read, which proves nothing either way. */
+  readonly alive: (pid: number) => boolean | null;
+}
+
+/** {@link BootEvidence} read off this instance's state directory. */
+export function bootEvidenceOf(
+  files: Pick<Files, "read">,
+  stateDir: string,
+  since: () => number,
+  alive: BootEvidence["alive"],
+): BootEvidence {
+  return { marker: () => parseMarker(files.read(crewRuntimePath(stateDir))), since, alive };
+}
+
+/**
+ * The update gate's one request: {@link healthProbe} for the doors a plain GET reaches, and the
+ * certificate-plus-boot check for a TLS-only peer.
+ */
+export function updateHealthProbe(net: Net, target: ProbeTarget, boot: BootEvidence): () => Promise<HealthAnswer> {
+  if (target.kind === "peer-listener") return peerListenerAnswer(net, target, boot);
+  return healthProbe(net, target);
+}
+
+/**
+ * A TLS-only peer's answer. All three must hold, and each failure says which:
+ *
+ * 1. The certificate on the port is this machine's own. Anything else is another listener.
+ * 2. The bridge's runtime marker was written after the restart. The bridge writes it at boot,
+ *    before it binds its listener, so a marker older than the restart belongs to a process that
+ *    was already running, and that process may be the old one still draining after the restart
+ *    command returned (`launchctl bootout` does not wait). The certificate alone cannot tell.
+ * 3. The process the marker names is alive. A process that booted and died is not up.
+ *
+ * A handshake names no build, so the version is the one the marker records. Without it, a restart
+ * that brought the OLD build back up would pass as the update.
+ */
+function peerListenerAnswer(
+  net: Net,
+  target: Extract<ProbeTarget, { kind: "peer-listener" }>,
+  boot: BootEvidence,
+): () => Promise<HealthAnswer> {
+  return async () => {
+    const got = await net.tlsCertificate(target.host, target.port);
+    if (!got.ok) return { ok: false, reason: got.failure.message };
+    if (normalizeFingerprint(got.fingerprint256) !== target.fingerprint) {
+      return { ok: false, reason: `${target.host}:${target.port} answers with a certificate that is not this machine's` };
+    }
+    const marker = boot.marker();
+    if (marker === null) {
+      return { ok: false, reason: "the bridge has not booted since the restart: it left no runtime marker" };
+    }
+    if (marker.bootedAt < boot.since()) {
+      return {
+        ok: false,
+        reason: `the bridge has not booted since the restart: the one answering booted at ${new Date(marker.bootedAt).toISOString()}`,
+      };
+    }
+    if (boot.alive(marker.pid) === false) {
+      return { ok: false, reason: `the bridge that booted at ${new Date(marker.bootedAt).toISOString()} is gone (pid ${marker.pid})` };
+    }
+    return { ok: true, version: marker.build, deposed: false };
   };
 }
 
@@ -516,11 +645,11 @@ export function boundTail(text: string): string {
  * says what went wrong, and must never be what stops a rollback.
  */
 export function serviceLogTail(
-  deps: { readonly exec: Exec; readonly files: Files; readonly platform: string },
+  deps: { readonly exec: Exec; readonly files: Files; readonly host: Host },
   unit: string,
   logPath: string,
 ): string {
-  if (deps.platform === "linux" && deps.exec.which("journalctl") !== null) {
+  if (deps.host.platform === "linux" && deps.exec.which("journalctl") !== null) {
     const r = deps.exec.capture("journalctl", [
       "--user",
       "-u",
@@ -582,7 +711,7 @@ export interface LaunchPlan {
  * misconfiguration to refuse.
  */
 export function launchPlan(a: {
-  readonly platform: string;
+  readonly host: Host;
   readonly binary: string;
   readonly args: readonly string[];
   readonly unit: string;
@@ -590,7 +719,7 @@ export function launchPlan(a: {
   readonly hasSystemdRun: boolean;
   readonly hasSetsid: boolean;
 }): LaunchPlan {
-  if (a.platform === "linux" && a.hasSystemdRun) {
+  if (a.host.platform === "linux" && a.hasSystemdRun) {
     return {
       kind: "systemd-run",
       command: [

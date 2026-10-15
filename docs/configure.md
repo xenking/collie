@@ -1,7 +1,9 @@
 # Configure
 
-By default, Collie runs in open single-user mode: anyone on your tailnet who can reach the URL has
-full control. This triggers the `TRUSTED_USER` warning. Restrict access:
+By default, Collie answers only a device you paired with `collie pair`. A paired device has full
+control, so anyone on your tailnet who can reach the URL still needs a paired phone first. Without
+`COLLIE_TRUSTED_USER`, the bridge prints a `TRUSTED_USER` warning, because every tailnet login can
+reach the pair screen. Restrict access further:
 
 ```bash
 # in your .env
@@ -93,7 +95,7 @@ The config file groups every setting under a `[section]`. The environment name o
 | `bridge` | poll cadence, how many lines are read, where state lives |
 | `network` | the port, the bind address, allowed hosts and origins |
 | `mux` | which multiplexer this collie mirrors, and where it lives |
-| `access` | the Tailscale identity gate, the device header, the audit trail |
+| `access` | the Tailscale identity gate, the device header, the audit trail, the secret mask |
 | `push` | the three Web Push (VAPID) values |
 | `uploads` | the attachment size cap and the extra text types accepted |
 | `journal` | where each harness keeps its own session log |
@@ -128,7 +130,7 @@ Put machine-specific commands, such as a Herdr plugin `/fork-in-herdr` or a cust
 | `keys.toml` | optional, per row | `danger = true` | yes, no restart needed |
 | `quick-replies.toml` | optional, per row | none | yes, no restart needed |
 | `theme.toml` | none, the faces are a device setting | none | yes, on the next page reload |
-| `launchers.toml` | none, matched by exact command instead | none | yes, but an already-open tab re-reads the rows only on its next load |
+| `launchers.toml` | none, matched by exact command instead; `[phone]` switches the rows a phone adds | none | yes, but an already-open tab re-reads the rows only on its next load |
 | `cache-rules.toml` | none, matched by exact rule id instead | none | yes, no restart needed |
 
 These files are unchanged by the config file. They share the instance `config.toml`'s
@@ -207,8 +209,19 @@ A Switch button sits at the belt's right end and opens the pane switcher. It dra
 alone, behind a hairline, and carries no word. A drag up, anywhere on the belt, opens the same
 switcher. A sideways drag scrolls the belt instead.
 
+While the text box holds text or an attachment, an X sits at the belt's right end too, left of the
+Switch button. One tap empties the box and its saved draft, and sends nothing to the pane. The X then
+becomes Undo, which puts the text and the attachments back. Undo stays until your next act: a
+keystroke, an attachment, a send, a tap on another belt button, or leaving the pane. Scrolling the
+belt keeps it.
+
+Left-handed? Set **Settings → Appearance → Hand** to **Left**. The belt turns round: the Switch button
+and the X move to its left end, still above Send, and Keys becomes the rightmost button, with the rest
+scrolling off toward the left. Send and Attach move to the left of the reply box. The setting is per
+device and applies the next time you open a pane.
+
 To verify, open a pane running Claude Code, Codex, pi or omp; the tinted segment sits at the right
-of the row above the keyboard. Turn that segment off per device in **Settings → Harness shortcuts**;
+of the row above the keyboard. Turn that segment off per device in **Settings → Appearance → Harness shortcuts**;
 Collie's own controls stay.
 
 ## Your own key presets
@@ -227,8 +240,9 @@ keys = ["Down", "Enter"]     # several chords go out as one batch
 ```
 
 When a pane matches your defined rows, it displays only your presets instead of the default Ctrl
-C/D/U/R/L/Z buttons ([ADR 0018](../.adr/0018-operator-command-rows-replace-the-catalog.md)). The
-rest of the tray (Esc, arrow keys, Enter/Tab/Space, modifiers, digits, F1–F12) is fixed.
+C/D/U/R/L/Z buttons ([ADR 0018](../.adr/0018-operator-command-rows-replace-the-catalog.md)). These
+rows are yours as the operator and reach every phone. The pad above them (Esc, the arrows,
+Enter/Tab/Space, the modifiers) is not set here: each phone arranges its own, see the next section.
 
 Chords use herdr's syntax, not tmux's:
 
@@ -244,6 +258,54 @@ Chords use herdr's syntax, not tmux's:
 
 To verify, open a pane and tap **Keys → Presets** to view the new buttons. If Collie rejects a row,
 check `journalctl --user -u collie -n 20` for the error details.
+
+## Your own key pad
+
+You can rearrange the Keys pad. Open **Keys** and tap the pencil beside the label:
+
+1. Tap the pencil next to **Keys**. A tall sheet opens over the pane.
+2. Drag a key to another place, or tap it and use the four arrow buttons.
+3. Tap a dashed **+** to add a key in a free cell, or select a key and tap **Change** or **Remove**.
+
+The pad is a grid of 7 columns. A key sits on one cell and can be wider (1, 2 or 3 columns) and taller
+(1 or 2 rows). Select a key and tap **Width** or **Height** to resize it. It grows to the right and
+down. A size that would cover another key, or leave the pad, looks dim, and tapping it tells you which
+key is in the way. Collie never moves a second key for you. **Add row** puts a row at the bottom, up to
+eight. Changes show in the dock at once. Collie keeps your pad in this browser, so a different browser
+starts with the default pad until you share a layout into it. The default is the pad you had before,
+with the Space bar three cells wide and Enter at the left end of the second row:
+
+```
+Esc    Tab    Shift  Ctrl   Alt    Up     ^C
+Enter  Space (3 wide)        Left   Down   Right
+```
+
+Dragging a key moves its whole area. Drop it on a key of the same size and the two swap. Drop it on
+anything else that is in the way and the target outline turns grey and dashed, a line says which key is
+in the way, and the key goes back. An arrow button skips over keys in the way and stops at the next
+place where the key fits; if there is none, it stays off.
+
+A key sends a chord of up to three modifiers plus one key, for example Ctrl+Alt+Shift+T. It can also
+send a short sequence of up to four steps, for example Ctrl+B and then C. A sequence goes out in
+order as one call. In the key builder, pick **Character**, **Named** or **F keys** for those. Pick
+**Modifier** to make a sticky Ctrl, Alt or Shift key like the ones on the default pad: tap it once to
+arm the next key, again to hold it, a third time to let go. A modifier key stands alone, so it has no
+steps and no name. Every key takes the same path as the built-in ones: it waits while the pane is
+locked or offline, a key that can stop a program (Ctrl+D, Ctrl+Z, or a sequence with Ctrl+C) asks for
+a second tap, and a key your multiplexer cannot send is grey.
+
+| Control | What it does |
+| --- | --- |
+| Presets | Default, Claude Code, Prefix (Ctrl+B), Vim, Navigation. Each shows a preview and asks before it replaces your pad. |
+| Share: Copy layout | Puts a short code on the clipboard. On plain http, select the code and copy it by hand. |
+| Share: Import layout | Paste a layout code someone shared. Collie checks it, shows a preview and asks before it applies. |
+| Restore default | Brings back the original pad, after a preview. |
+
+Codes from earlier versions still import, with every key one cell. If Esc, Enter or an arrow is not
+on your pad, a quiet line says so, with **Put back**. The Prefix (Ctrl+B) preset sends the `Ctrl+B` prefix, so it
+fits a tmux running inside the pane. The Navigation preset has Home, End, PgUp and PgDn, which Herdr
+cannot send, so they are grey on a Herdr pane
+([ADR 0092](../.adr/0092-the-keys-pad-is-a-board-you-arrange.md)).
 
 ## Your own quick replies
 
@@ -262,7 +324,7 @@ items = ["yes", "no"]        # sent verbatim, one per button
 
 When a pane matches your rules, your groups replace the default ones
 ([ADR 0018](../.adr/0018-operator-command-rows-replace-the-catalog.md)). The default phrases are
-English (`yes`, `commit and push`).
+English (`yes`, `commit and push`, `drastically simplify`).
 
 Use this file to run in other languages, or to send words like `approve` to specific harnesses.
 Setting `scope = "shell"` targets standard shell panes, which otherwise only receive `y`/`n`.
@@ -285,39 +347,192 @@ label = "Top"                # optional; defaults to the first word of command
 # cwd = "~/dev/collie"       # optional; absent means "here" — see below
 ```
 
-Where the tap opens depends on where you tap it, not on the row. From the **dashboard**, a tap
-creates a new Space named after the row. From a **pane** — the switcher sheet you reach by
-swiping up — a tap opens a new **tab in that pane's own Space**, beside it.
+Where the row opens depends on where you start it, not on the row. From the **New page** (Shell,
+then the row in the Command select), Start creates a new Space named after its folder, and the
+row's label names the tab. From a **pane** — the switcher sheet you reach by
+swiping up — a tap opens a new **tab in that pane's own Space**, beside it, named after the row.
 
 Either way the bridge types the `command` into the fresh shell and sends Enter. The command owns
 its own lifetime: one that closes itself takes the Space or tab with it, and `htop` stays until you
 quit it.
 
-`cwd` is where that new Space or tab opens. Pin one (as `htop` does above) and it wins wherever you
-tap the row.
+`cwd` is where that new Space or tab opens. Give a row a fixed folder (as `htop` does above) and it
+wins wherever you tap the row.
 
 Leave it out and it means "here": the dashboard opens it in your home dir, a pane opens it in
 *that pane's own* cwd — one cwd-less row follows you around your checkouts instead of always
 landing at the top of one.
 
-This file is the allowlist. `POST /api/launch` accepts only a `command` that matches a row here
-exactly, so a phone can start nothing that is not in the file. Changes apply immediately without a
+This file and the rows added from a phone (below) are the allowlist. `POST /api/launch` accepts
+only a `command` that matches one of those rows exactly, an agent id from the machine's own list (the
+machine types that agent's command itself), or a plain shell. Changes apply immediately without a
 restart, but an already-open tab re-reads the rows only on its next load.
 
-Your rows appear in two places: a **Launch** section on the dashboard, which folds like Spaces,
-and a **Launch** section in the switcher sheet (swipe up from a pane). A pinned row shows
-its folder, shortened under home; a cwd-less row says "here" in the switcher (the dashboard already
-implies home, so it says nothing there). Declare no rows and neither section appears.
+Two optional keys tell the phone more about a row:
+
+```toml
+[[launchers]]
+command = "claude-danger"
+label = "Claude Code, no prompts"
+# The agent that reads the row: it is listed under Agent with that agent's mark.
+harness = "claude"
+# The line skips permission prompts, but an alias hides its flags.
+no_prompts = true
+```
+
+Your rows appear in three places:
+
+- **On the New page** (tap **+ New** on the dashboard). The switch at the top reads **Agent** | **Shell**.
+  A row with `harness` is in the **Agent** select. A row without `harness` is in the **Command** select,
+  which is the select under **Shell**.
+- **In a Launch section on the dashboard.** It folds like Spaces.
+- **In a Launch section in the switcher sheet** (swipe up from a pane).
+
+On the New page a cwd-less row runs in the folder you name there, and a row with a fixed folder shows
+that folder in place of the field. A row never starts in a worktree; pick an agent or Shell for that.
+A row with a fixed folder shows it, shortened under home; a cwd-less row says "here" in the switcher
+(the dashboard already implies home, so it says nothing there). Declare no rows and neither section
+appears.
 
 On a crew (several machines, one phone-facing lead), each machine reads its own copy of this file —
 a row launches on whichever machine's dashboard or pane you tapped it from, not on the lead.
 
+The **Agent** select on the New page is Collie's own list: Claude Code, Codex, opencode, pi, omp,
+Grok, Hermes, Muse and Antigravity. One that is not on the machine's login `PATH` stays in the list,
+disabled, marked "not installed". For another terminal agent, declare a row for it as above: it shows
+in the **Command** select under **Shell**, starts in a pane like any command, and Collie shows no status for it.
+
 To verify, reload the dashboard and look under the herd. If a row fails to load,
 `journalctl --user -u collie -n 20` prints the error.
 
+### Launchers added from a phone
+
+A phone can add its own rows on a machine. They are kept in that machine's state folder, in
+`launchers-added.json`, never in `launchers.toml`, and never copied to another machine.
+
+On the New page, tap **Add your own** under the **Agent** select or under the **Command** select.
+It opens the page `/new/add` for the machine chosen there. Pick **Agent** or **Command** at the top.
+An agent has two ways: a **recipe** (a harness, option chips, and the exact line Collie will type)
+and **Write a command**. A command row is always written by hand. **Add** returns to the New page
+with the new row chosen. Below the form, **Added on this machine** lists every row a phone added
+there, with **Rename** and **Remove**, and the rows from `launchers.toml` with a lock and no
+actions. **How adding works** opens a short explainer with this machine's `launchers.toml` path and
+an example row you can copy.
+
+```toml
+[phone]
+adds = true          # default true: a phone may add rows built from a recipe
+free_text = false    # default false: a phone may also add a line typed by hand
+run = true           # default true: a phone may run a one-off command, and run it again from history
+```
+
+Put the `[phone]` table anywhere in `launchers.toml`. A value that is not `true` or `false` reads
+as `false`. The bridge enforces the switches: a refused add changes nothing, and a row a switch
+turns off stops starting at once. The row stays in the file, so turning the switch back on restores
+it.
+
+A **recipe** is an agent plus option chips from the bridge's own table, for example Claude Code and
+"Skip permission prompts". The phone sends only the ids, and the bridge builds the line. Every chip
+was read off that agent's own `--help`:
+
+| Agent | Option | Adds |
+| --- | --- | --- |
+| Claude Code | Skip permission prompts | `--dangerously-skip-permissions` |
+| Claude Code | Plan mode | `--permission-mode plan` |
+| Claude Code | Model: opus, Model: sonnet | `--model opus`, `--model sonnet` |
+| Claude Code | Continue last | `--continue` |
+| Codex | Skip approvals and sandbox | `--dangerously-bypass-approvals-and-sandbox` |
+| Codex | Never ask | `--ask-for-approval never` |
+| Codex | Read-only sandbox, Web search | `--sandbox read-only`, `--search` |
+| opencode | Auto-approve, Plan agent, Continue last | `--auto`, `--agent plan`, `--continue` |
+| pi | Continue last, Thinking: high | `--continue`, `--thinking high` |
+| omp | Continue last, Thinking: high | `--continue`, `--thinking=high` |
+
+A **free line**, such as an alias like `claude-danger` or a plain `htop`, is possible only with
+`free_text = true`. Without it, **Write a command** shows one disabled row, "Turned off on" the
+machine, and **Add** stays off. With it, **Check the line** shows the line with every hidden
+character written as its code (for example `⟨U+200B⟩`) before **Add** turns on. It is at most 200 characters, and the bridge refuses a control character, a line
+or paragraph separator and a bidi control in it, both when it is added and each time it is read.
+
+A machine keeps at most 20 added rows. If a row has the same line as a row in `launchers.toml`, the
+row in `launchers.toml` wins. Each added row records the paired device that added it. Revoking that
+device removes its rows, from the phone or with `collie devices revoke`, and the audit log records
+every add, rename and removal.
+
+> **Caution.** A row that skips permission prompts carries a "No prompts" badge. Each device asks
+> once before it first starts that row, and shows the command, the folder and the machine. Set
+> `adds = false` to turn off every phone-added row on a machine.
+
+### Reaching a durable program (experimental)
+
+A peer that mirrors a durable agent program (`COLLIE_MUX=durable`) reaches it one of two ways. Set
+the socket, or the URL with its token, never both.
+
+| variable | example | what it means |
+| --- | --- | --- |
+| `COLLIE_DURABLE_SOCKET` | `/run/user/1000/durable/session.sock` | the program's private Unix socket on this machine. Absolute, at most 103 bytes, mode `0600` |
+| `COLLIE_DURABLE_URL` | `https://collie-durable-member.you.workers.dev` | the address of a program you deployed behind TLS. `https://` only, or `http://127.0.0.1:<port>` for `wrangler dev`. At most 2048 bytes, no query |
+| `COLLIE_DURABLE_TOKEN` | `your-32-byte-random-token-here` | the bearer token sent with every request to the URL. At least 32 bytes. A file holding it must be mode 600, and Collie never prints it |
+
+Both set, or a URL without a token, is a config error: the peer starts and shows the program as
+unreachable with that reason. Over https every poll is a billed request, so Collie polls every 2 s
+while a phone watches and every 10 s otherwise. [Multiplexers](multiplexers.md#two-ways-to-reach-a-program)
+says what each way keeps out, and what it does not.
+
+### Starters from a durable program (experimental)
+
+A peer that mirrors a durable agent program (`COLLIE_MUX=durable`) lists the program's starters as
+rows on the New page, in the **Agent** select, on that machine. A starter is a named way to begin a
+conversation, such as a code review. It takes no text: you tap it, and the program decides what to
+start. The new conversation opens as a pane. A tap repeated with the same request id opens
+the same conversation and starts nothing new, and if the program does not answer, **Try again** sends
+the same request id. A program that cannot be reached lists no starters. This is experimental and may
+change in any minor release.
+
+### One-off commands and their history
+
+A phone can also run a command that is not a launcher, once. Collie opens a shell in the folder you
+name and types the line there, the same way it starts a launcher row. The line follows the same rule
+as a free line: at most 200 characters, and no control, separator or bidi character. A one-off command
+never starts on a new branch.
+
+This is on by default, because a paired phone can already open a shell and type into it. Set
+`run = false` in the `[phone]` table to remove the shortcut on that machine.
+
+On the New page, switch to **Shell**. The **Command** select then ends with two additions: a
+**Recent** group, which lists the lines in that machine's history, and **Type a command…**. Pick
+**Type a command…** and a text field appears right under the select. Type the line and tap **Start**
+(or the return key, which reads **Go**). The line above **Start** says what runs and where, for
+example "Runs `htop` in ~/projects on bluefin". The worktree switch stays off for a one-off line.
+
+Before the first run, Collie asks the machine to check the line. The check runs nothing and keeps
+nothing. If the line carries a flag that skips permission prompts, such as
+`--dangerously-skip-permissions`, this phone asks once before it starts, the same as for a row with
+the "No prompts" badge. If the line breaks the rule above, a notice says why and nothing runs.
+
+Pick a line from **Recent** to run it again. The **Folder** field fills with the folder that line last
+ran in, unless you changed the folder yourself. While a line from **Recent** is chosen,
+**Remove from history** and **Clear history** show under the select. **Clear history** asks first.
+The **Again** row at the top of the page repeats a one-off run too. With `run = false`, the lines in
+**Recent** stay in the list but are disabled, and **Type a command…** is gone. A machine older than
+1.19.0 shows neither.
+
+Each command that started is kept in that machine's state folder, in `commands-recent.json`. The file
+keeps at most 12 lines, newest first, with the folder each one last ran in. Running a line again moves
+it to the top. A line that seems to carry a secret, such as `TOKEN=abc deploy`, a URL with a
+password, or a word like `token`, `secret` or `password`, still runs but is not kept. You can remove
+one line, or clear the list, from the phone. With `run = false` the list
+is still shown, but nothing in it starts. In a crew, each machine keeps its own list, and nothing is
+copied between machines.
+
+The list is not a permission. Starting a line from it is a new one-off run, which needs a paired
+device, so unpairing or revoking a device leaves the list as it is. The audit log records the first
+word of a one-off command and its length, never the whole line, because a line can hold a secret you
+typed.
+
 ## Your own typefaces
 
-The interface font is a per-device setting. Under **Settings → Typeface**, you can choose between
+The interface font is a per-device setting. Under **Settings → Appearance → Typeface**, you can choose between
 System, Space Grotesk (the default), and Aldrich. You can add custom fonts in `theme.toml`, the
 fourth configuration file:
 
@@ -496,6 +711,58 @@ that enforces them. The lead refuses an oversize body before forwarding it, to s
 it refuses it against its own number. Set the same values on every member, or a peer will refuse
 what its lead let through.
 
+## Favourite and recent folders
+
+The New page lists the folders you started something in before, so you tap one instead of typing
+a path.
+
+Under the Folder field sit two lists for the machine the start goes to. **Recent** holds the last
+8 folders something was started in, newest first. It counts only starts that worked and named a
+folder, and it never lists your home dir, because a blank field already means home. A new branch's
+own folder is not added, because it is a new checkout, not a place you return to.
+
+You may also type a path. `~/projects` and `/srv/www` mean what they say. A name with no leading `/` or
+`~`, such as `projects`, is a folder under your home, like `cd projects` in a fresh shell, and the
+line above Start shows the full path (`~/projects`) before you tap. A path with `..` in it is refused.
+The folder must already exist on the machine that runs the start, and it must be a directory. If it is
+not there, nothing starts and a notice above Start says "There is no folder … on this machine." Collie
+checks only when you tap Start, never while you type. On a crew, the machine you picked checks its own
+disk.
+
+A tap on a row fills the Folder field and starts nothing, so you can still change the choice above. The star
+beside a row moves it to **Favourites**, up to 12, in the order you starred them. A second tap on the
+star moves it back to the top of Recent.
+
+The list belongs to the machine, not to the phone. Each machine keeps its own in `folders.json` in
+its state directory, `~/.local/state/collie/folders.json` unless `COLLIE_STATE_DIR` moves it. Every
+device you use sees the same list, and the file appears only after the first start in a folder or
+the first star. The same lists fill **Other folder** under **New worktree**, where they pick the
+folder the branch's own folder goes in.
+
+In a [crew](crew.md), each machine keeps the folders that exist on it, and the page shows the list
+of the machine you picked. A machine that runs an older Collie has no list, and the page then shows
+none for it.
+
+## Secret masking
+
+Collie masks known secret shapes in pane text before it reaches your phone.
+
+```bash
+# in your .env; the default is on
+COLLIE_REDACT=off
+```
+
+| variable | default | what it does |
+| --- | --- | --- |
+| `COLLIE_REDACT` | `on` | Masks API keys, JWTs, PEM private keys, bearer tokens and `password=` values in the mirror, Chat, History, push notifications, file bodies in Files and diffs in Changes. `off` sends them as they are. |
+
+In the config file this is `[access] redact`. The mask keeps the width of what it hides, so the
+mirror's layout holds. It catches high-confidence shapes only; the limits are in
+[Security](security.md#what-leaves-the-machine-is-masked).
+
+In a crew, the lead also masks the text its members send, by its own setting. A member's text
+reaches your phone unmasked only when the lead and that member both set `COLLIE_REDACT=off`.
+
 ## Multi-session
 
 By default, one Collie instance serves every Herdr session it finds.
@@ -509,7 +776,7 @@ sessions. [Security](security.md) lists this behavior as a sharp edge.
 
 > **Note.** Collie follows your phone's appearance by default.
 
-To pin it, open **Settings → Appearance** and pick **System**, **Light** or **Dark**. The setting is
+To pin it, open **Settings → Appearance → Theme** and pick **System**, **Light** or **Dark**. The setting is
 stored **per device** in the browser rather than on the bridge. Your phone can remain on Dark while
 a laptop tracks the OS. The preference persists across reloads and PWA reinstalls on the same
 device.
@@ -540,7 +807,7 @@ This implementation has two practical consequences:
 
 > **Note.** Zen mode is off by default.
 
-Enable it in **Settings → Zen mode** (stored per device in the browser). This adds a **Zen mode**
+Enable it in **Settings → Device → Zen mode** (stored per device in the browser). This adds a **Zen mode**
 option to the pane menu, under the ⋮ beside Find and History. Tapping it hides all Collie UI
 elements: the header, tab and pane strips, agent statusline, and composer docks. Only the terminal
 mirror remains visible. A floating button in the top-right corner or the Escape key restores the
@@ -553,9 +820,126 @@ The terminal mirror continues polling in Zen mode, and interactive buffer elemen
 functional. Prompt buttons, "Load older", and "Show entire history" controls stay available because
 they are part of the content stream rather than chrome.
 
+## Chat view
+
+> **Note.** Chat is the default view of an agent pane since 1.17.0. Terminal is one tap away.
+
+An agent pane opens in **Chat**. Chat draws the agent's own conversation instead of the terminal:
+your turns, its replies, thinking behind a fold and a card per step. The composer,
+the belt and the pane menu stay where they were. To read the terminal instead, open the pane's **⋮**
+menu and tap **Terminal view**. The choice is one setting for the whole device, stored in the
+browser, and a device that already chose the terminal keeps it. **Chat view** in the same menu
+switches back.
+
+When you queue a message while Claude Code works, Chat shows it on a **Waiting to send** card, and
+the card's **Send now** button sends the whole queue to the running turn at once. Only Claude Code
+offers it, because the button presses Ctrl+Enter, the key that agent defines for this. The button is
+hidden on a read-only device and on a saved copy.
+
+One thing in Chat is known to be incomplete. Hermes can remove a turn from its log after Collie
+read it, for example when it compacts. Chat then keeps showing that turn until the session is read
+again. The terminal never has this problem.
+
+Chat reads the agent's session log, not the screen. That means a pane gets Chat only when Collie
+knows which session the pane is running, and the agent has to tell the multiplexer. The pane itself
+cannot work this out.
+
+| Multiplexer | What reports the session | Chat works for |
+| --- | --- | --- |
+| Herdr | The matching Herdr integration for that agent, installed once with `herdr integration install <agent>` (for example `claude`, `codex`, `opencode`, `pi`, `omp`, `grok`, `hermes`), then restart the agent | Every agent that has an integration and a session log Collie reads |
+| tmux, zellij, Tern (experimental) | Collie's [beacon hooks](multiplexers.md#agent-beacons-optional-linux) | Claude Code only, after `collie hooks install claude` |
+| tuios | The tuios daemon | The agents the daemon reports |
+
+OpenClaw needs no Herdr integration for Chat. Herdr does not pass an OpenClaw session on, so Collie
+reads the session name off the footer of `openclaw tui` (`agent main (main) | session work | …`) and
+opens that agent's session database under `$OPENCLAW_STATE_DIR`, or `~/.openclaw`, read-only. Set
+`openclaw_root` when the state folder is somewhere else. The pane must report itself to Herdr as
+agent `openclaw`. Collie never reads OpenClaw's config file or its gateway token.
+
+`herdr integration status` shows which integrations are installed. A hook is read when the agent
+starts, so an agent that was already running when you installed it needs a restart. Oh My Pi is the
+`omp` integration, not the `pi` one: they are two agents with two hooks, and they share one log
+format.
+
+A new agent pane shows Chat at once, before it has anything to read, with one line: "Send a
+message to start". Codex reports its session only after your first message, and pi writes its log
+only after its first reply, so both start this way. The conversation appears as soon as there is one.
+
+A pane falls back to the terminal when something happens that Chat cannot show: the agent asks you a
+question before there is anything to read, or its first turn ends and it still has no session, or no
+log file to read. The terminal then shows a line that names what is missing, and the **⋮** row says
+why. A first turn that runs for a minute with nothing to read and no other sign also falls back. A pane that was already busy when you first opened it, with no session, shows the terminal at
+once. When the session or the log arrives later, the pane goes back to Chat. Chat never hides the
+row, so you can tell a missing hook from a missing feature. `collie doctor` lists those
+panes under `agent-sessions` and names the integration line (`integration-<agent>`) that fixes each.
+The [troubleshooting page](troubleshooting.md) has the steps, under **a pane has no Chat or History**.
+
+## Reading offline
+
+When the bridge is out of reach, the phone shows the last copy it saved, and you can read it but not act on it.
+
+The phone keeps two things for each pane: the last terminal text it saw, and the newest Chat turns as
+Chat drew them. It never keeps the raw terminal screen as Chat. When you open Collie and the bridge
+does not answer within about a second and a half, the phone draws this saved copy at once, and
+replaces it with live data when the bridge answers.
+
+A saved copy looks different from a live screen:
+
+- The agent list is dimmed, each status is in the past tense ("was working", "needed you"), and the
+  header shows **as of** and the time it was saved.
+- A Chat pane shows "Saved copy from" and the time. The bridge still holds the older turns.
+- Prompt buttons, cards and the send button are off. A tap on a saved copy cannot reach the agent.
+
+The connection bar names one of three causes:
+
+| Bar | Cause | What the phone shows |
+| --- | --- | --- |
+| You are offline | The phone says it has no network | The saved copy, with its time |
+| No connection to the bridge. Check your connection or Tailscale. | Any other read that failed | The saved copy, with its time |
+| Pair screen | The bridge refused this device: not paired, revoked or expired | Nothing saved. The refusal deletes the copy |
+
+A VPN such as Tailscale keeps the phone's network flag on in airplane mode, so the bar cannot always
+tell "no network" from "the bridge is down". It then says only that the bridge does not answer.
+
+While the app is open, the bar and the saved copy appear on the first poll that gets no answer. A
+poll waits at most 6 seconds, one second longer than the bridge waits for the multiplexer. A server
+error (5xx) counts on the second one in a row. What is on screen stays there, and the first live
+answer brings back the live view.
+
+Right after you return to the app, the first poll that gets no answer does not count alone. A
+Tailscale link can need a moment to come back, so the phone asks again half a second later, and
+shows the bar only when that poll gets no answer too.
+
+**Keep chat on this phone**, in **Settings → Device**, sets how long the Chat turns stay on the phone:
+
+| Value | What it does |
+| --- | --- |
+| Off | Keeps no Chat turns, and deletes the ones already kept |
+| 1 day | The default |
+| 7 days | Keeps them for a week |
+
+The terminal text has its own lifetime of 24 hours, and this setting does not change it. In the
+terminal view, the only offline copy is that terminal text.
+
+> **Note.** The phone keeps only text the bridge already masked, and drops a pane's copy while the
+> pane asks for a password. [What the phone keeps](security.md#what-the-phone-keeps) lists every
+> item, its size bound and its lifetime.
+
+## Changes
+
+The [Files screen](changes.md) shows what an agent changed in its workspace's git repos, under its
+**Changes** segment. Two per-device settings decide how far it looks for repos, in **Settings → Device → Changes**:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Look for repos inside this folder | on | Also lists repos in folders below the workspace folder, even ones the parent repo ignores |
+| How deep to look | 2 | How many folder levels below the workspace folder the search goes, 1 to 4 |
+
+See [Which folder, and which repos](changes.md#which-folder-and-which-repos) for how the search works.
+
 ## Language
 
-Collie's interface is available in six languages. Configure this under **Settings → Language**.
+Collie's interface is available in twelve languages. Configure this under **Settings → Appearance → Language**.
 
 - English
 - Deutsch
@@ -563,10 +947,20 @@ Collie's interface is available in six languages. Configure this under **Setting
 - 한국어
 - 日本語
 - 中文
+- Русский
+- Italiano
+- Français
+- Português
+- Türkçe
 
 The selection is saved locally in the browser per device. The terminal mirror remains untranslated:
 it displays the raw output from the agent, while quick replies, menu labels, and key caps match the
 underlying screen or keyboard names.
+
+A notification's title follows the same choice: "claude needs you" arrives as "claude 입력 대기" on a
+device set to Korean. The device picks up a new choice the next time Collie is open on it, and until
+then its titles stay in the language it had. The body under the title is the pane's own name and
+place, and is never translated ([Web Push](voice-and-push.md#web-push-optional)).
 
 
 ---

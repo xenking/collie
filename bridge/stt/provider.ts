@@ -52,6 +52,14 @@ export interface SttProvider {
    * It is a label, not a capability: nothing branches on it, and it never carries an endpoint.
    */
   readonly id: string;
+  /**
+   * What the phone must upload, when the provider takes one format only. `wav-16k` is 16 kHz mono
+   * 16-bit PCM WAV (the `whistle` provider, ADR 0096); the route then refuses anything else with
+   * `415 stt.wav_required` before the provider sees it. Absent means the browser's own recording.
+   */
+  readonly input?: "wav-16k";
+  /** The longest recording the provider takes, when it is not the phone's 5-minute default. */
+  readonly maxDurationMs?: number;
   /** Can this provider serve a request — asked for the capability flag, never with audio in hand. */
   status(): Promise<SttStatus>;
   /**
@@ -106,6 +114,18 @@ function defaultMessage(kind: SttFailureKind): string {
   if (kind === "oversized") return "the transcription service answered with too much data";
   if (kind === "refused") return "the transcription service refused the recording";
   return "transcription is unavailable";
+}
+
+/**
+ * The provider is already running as many transcriptions as it allows, and refused this one before
+ * starting any work for it. The route answers it exactly like its own admission refusal: 429,
+ * `stt.busy`. Distinct from {@link SttError} because nothing failed upstream; nothing was tried.
+ */
+export class SttBusyError extends Error {
+  constructor() {
+    super("transcription is busy");
+    this.name = "SttBusyError";
+  }
 }
 
 /** A caller stopped waiting; this is distinct from an upstream provider failure. */

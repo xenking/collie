@@ -10,6 +10,7 @@ import {
   managedHandlerPath,
   PLUGIN_ID,
   pluginIdFor,
+  realFrontDoorExec,
   releaseManagedFrontDoor,
   shouldReleaseFrontDoor,
   type FrontDoorDeps,
@@ -84,13 +85,13 @@ function harness(over: { record?: string | null; status?: string; missing?: bool
 describe("the record file both processes have to name identically", () => {
   test("the unsuffixed instance keeps today's name, byte for byte", () => {
     expect(managedHandlerPath("/config", instanceSuffixOf(undefined))).toBe(
-      "/config/tailscale-managed-handler",
+      join("/config", "tailscale-managed-handler"),
     );
   });
 
   test("a second instance names its own, so it can never take the first's door down", () => {
     expect(managedHandlerPath("/config", instanceSuffixOf("v1"))).toBe(
-      "/config/tailscale-managed-handler-v1",
+      join("/config", "tailscale-managed-handler-v1"),
     );
   });
 });
@@ -238,5 +239,25 @@ describe("releaseManagedFrontDoor — a mounted door", () => {
     const h = harness({ record: MOUNTED_RECORD, status: theirs });
     expect(releaseManagedFrontDoor(h.deps)).toBe(false);
     expect(h.record()).toBe(MOUNTED_RECORD);
+  });
+});
+
+describe("realFrontDoorExec", () => {
+  test("a tool that never returns is killed at the bound and reads as a failure, so the bridge is not frozen", () => {
+    // A deposition on the wire runs this on the bridge's one thread. With no bound, a `tailscale`
+    // that hung froze every route, `/api/health` included. The bun running this test stands in for it.
+    const exec = realFrontDoorExec({}, "/nonexistent-home", 500);
+    const started = Date.now();
+    const r = exec.capture(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"]);
+    expect(Date.now() - started).toBeLessThan(20_000);
+    expect(r.found).toBe(true);
+    expect(r.code).not.toBe(0);
+  });
+
+  test("a tool that answers inside the bound is read as before", () => {
+    const r = realFrontDoorExec({}, "/nonexistent-home").capture(process.execPath, ["-e", "console.log('ok')"]);
+    expect(r.found).toBe(true);
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toBe("ok");
   });
 });

@@ -8,6 +8,7 @@
 // filter — see lib/hosts.ts `spaceKey`, which degrades to a pure prefix (`"\0w1"`) on a solo
 // snapshot where no pane is host-tagged at all.
 import { paneSpaceKey, spaceKey } from "./hosts";
+import { byPlaceInTab } from "./pane-groups";
 import { bucketOf, TRIAGE_ORDER, type TriageKey } from "./triage";
 import type { AgentView, TabView, WorkspaceView } from "./types";
 
@@ -21,6 +22,11 @@ export interface TabGroup {
  * Group a workspace's panes (agents + shells) by tab, in tab order. Panes whose tab isn't in the
  * tab list yet (a brief poll race after a create) fall into a trailing group so they're never lost.
  *
+ * Inside a tab: its agents, then its shells, each by their position in the tab ({@link byPlaceInTab}).
+ * This used to keep the order the lists arrived in, and the bridge sent agents status-first, so a
+ * pane that blocked jumped to the head of its tab and back when it resumed (ADR 0063). The order is
+ * recomputed here so no arrival order can move a row.
+ *
  * `host` is the machine the workspace belongs to (undefined on a solo snapshot, and on the lead-local
  * navigator before the crew tags anything). Panes from any OTHER machine are not in this space, even
  * when they report the same workspace id.
@@ -33,7 +39,11 @@ export function groupPanesByTab(
   host?: string,
 ): TabGroup[] {
   const key = spaceKey(host, workspaceId);
-  const panes = [...agents, ...shellPanes].filter((p) => paneSpaceKey(p) === key);
+  const here = (p: AgentView) => paneSpaceKey(p) === key;
+  const panes = [
+    ...agents.filter(here).toSorted(byPlaceInTab),
+    ...shellPanes.filter(here).toSorted(byPlaceInTab),
+  ];
   // Same "untagged is ambient" rule as ambientPanes/findPane (lib/hosts.ts): a tab addressed on this
   // host matches when it carries that host's own tag OR no tag at all, so a solo snapshot — where no
   // tab is host-tagged — keeps grouping exactly as it always did.
@@ -111,6 +121,34 @@ export function filterSpaces(
   const q = query.trim().toLowerCase();
   if (!q) return [...workspaces];
   return workspaces.filter((w) => w.label.toLowerCase().includes(q));
+}
+
+/**
+ * The spaces the Spaces section lists while the workspace strip isolates one workspace (issue #338).
+ *
+ * `isolatedKey` is the device's stored isolate key (`workspacePrefKey`: machine, session and the
+ * workspace NAME, separated by NUL). The match is on machine and name, because the id is opaque and
+ * can change. The isolated space stays, and so do the linked worktrees of its repo when it is the
+ * repo's own checkout, since those are the same project's spaces. Isolating a worktree keeps just
+ * that worktree. A null key, or a key no space here matches (a stale isolate, or one on another
+ * machine than the addressed one), returns every space, the same rule the pane list follows.
+ */
+export function isolateSpaces(
+  workspaces: readonly WorkspaceView[],
+  isolatedKey: string | null,
+): WorkspaceView[] {
+  if (isolatedKey === null) return [...workspaces];
+  const parts = isolatedKey.split("\u0000");
+  const label = parts[parts.length - 1];
+  const host = parts[0];
+  const match = workspaces.find((w) => w.label === label && (w.host ?? "") === host);
+  if (match === undefined) return [...workspaces];
+  const ownCheckout = match.repoRoot !== undefined && match.isWorktree === false;
+  return workspaces.filter(
+    (w) =>
+      w === match ||
+      (ownCheckout && w.isWorktree === true && w.repoRoot === match.repoRoot && (w.host ?? "") === host),
+  );
 }
 
 /**

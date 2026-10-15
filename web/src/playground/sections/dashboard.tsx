@@ -1,14 +1,21 @@
 // Dashboard section of the states playground. Split out of app.tsx; see that file's header comment
 // for the whole page's rules.
 
+import { ListTree, Network, Rows3 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { MemoryRouter } from "react-router";
 
-import { AgentList } from "@/components/agent-list";
+import { AgentList, type HeadingNewTab } from "@/components/agent-list";
 import { BuildStamp } from "@/components/build-stamp";
 import { CrewFooterLink } from "@/components/crew-footer-link";
 import { ListGroup } from "@/components/ui/list-group";
+import { TabBar } from "@/components/ui/tab-bar";
+import type { DashView } from "@/lib/dash-view";
+import type { AgentView, GitHead } from "@/lib/types";
+import { countBlocked, hasReady } from "@/lib/triage";
+import { t, tn } from "@/lib/i18n";
 import { PaneStrip } from "@/components/pane-strip";
+import type { PaneOrder } from "@/lib/pane-order";
 import { ReadOnlyBanner } from "@/components/read-only-banner";
 import { SessionSwitcher } from "@/components/session-switcher";
 import { SpaceStrip } from "@/components/space-strip";
@@ -40,16 +47,8 @@ import {
   updateRelease,
   updateRestart,
 } from "../fixtures";
-import {
-  Card,
-  Group,
-  PackedRootRouter,
-  RootRouter,
-  Section,
-  Segmented,
-  Stage,
-  type SectionDef,
-} from "../harness";
+import { PackedRootRouter, RootRouter } from "../harness";
+import { Card, CardControls, Group, Section, Segmented, Stage, type SectionDef } from "../layout";
 import { PhoneFrameCard } from "./shared";
 
 export const DEF: SectionDef = {
@@ -58,6 +57,112 @@ export const DEF: SectionDef = {
   intent:
     "The home screen: the herd in triage order, the strips that say a write will be refused, the two update notices, and the footer's meta zone.",
 };
+
+/** Each workspace heading's "+" (M40/03), wired to nothing: the card shows where it sits, as the
+ *  dashboard draws it, and a tap goes nowhere. */
+const HEADING_NEW_TAB: HeadingNewTab = { scope: {}, creating: new Set(), onNewTab: () => {} };
+
+/**
+ * The herd with the branch the bridge reads off each pane's folder. Derived here rather than added to
+ * the shared fixtures, so every other card (and the browser tests that import them) keeps the herd an
+ * older bridge sends. Every fourth row has none.
+ */
+const BRANCHES: readonly (GitHead | undefined)[] = [
+  { kind: "branch", name: "main" },
+  { kind: "branch", name: "perf/dashboard-poll-cadence-and-backoff" },
+  { kind: "detached", sha: "abc1234def5678abc1234def5678abc1234def56" },
+  undefined,
+];
+const herdWithBranches: AgentView[] = herd.map((pane, i) => {
+  const gitHead = BRANCHES[i % BRANCHES.length];
+  return gitHead === undefined ? pane : { ...pane, gitHead };
+});
+
+/** The dashboard with its order toggle live (ADR 0071): tap a segment and the list re-ranks, the way
+ *  the route does, with the reading held between taps. */
+function OrderedAgentList({ initial }: { initial: PaneOrder }) {
+  const [order, setOrder] = useState<PaneOrder>(initial);
+  return (
+    <AgentList
+      agents={herd}
+      bridge="connected"
+      onOpen={() => {}}
+      newTab={HEADING_NEW_TAB}
+      order={order}
+      onOrderChange={setOrder}
+    />
+  );
+}
+
+/** A tab body this card does not build for real: one quiet line saying what the tab would hold. */
+const body = (label: string) => () => (
+  <p className="rounded-md border border-border px-3 py-6 text-center text-sm text-muted-foreground">{label}</p>
+);
+
+/**
+ * The dashboard's footer tabs and its needs-you switch (ADR 0085), composed from the real parts: the
+ * real `AgentList` with the switch live, and the real `TabBar` with the items `routes/home.tsx`
+ * builds. A mock of the route, not a mount of it: the route reads its tab and its switch from
+ * localStorage, and four cards cannot share one store. The Crew tab's body is a placeholder, because
+ * its own component (`components/crew-tab.tsx`) fetches the machines and this page has no API.
+ */
+function DashboardTabsPhone({
+  crew,
+  initialOn,
+  initialView = "dashboard",
+}: {
+  crew: boolean;
+  initialOn: boolean;
+  initialView?: DashView;
+}) {
+  const [on, setOn] = useState(initialOn);
+  const [view, setView] = useState<DashView>(initialView);
+  const [order, setOrder] = useState<PaneOrder>("place");
+  const blocked = countBlocked(herd);
+  return (
+    <>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <AgentList
+          agents={herd}
+          bridge="connected"
+          onOpen={() => {}}
+          newTab={HEADING_NEW_TAB}
+          order={order}
+          onOrderChange={setOrder}
+          needsYouOnly={view === "dashboard" && on}
+          onNeedsYouOnlyChange={setOn}
+          renderBody={
+            view === "crew"
+              ? body("The Crew tab's body, the machine cards (components/crew-tab.tsx)")
+              : view === "changes"
+                ? body("The Changes tab's body, one row per workspace")
+                : undefined
+          }
+        />
+      </div>
+      <TabBar<DashView>
+        label={t("home.tabs.aria")}
+        active={view}
+        onSelect={setView}
+        items={[
+          ...(crew ? [{ value: "crew" as const, label: t("crew.title"), icon: <Network className="size-5" /> }] : []),
+          {
+            value: "dashboard",
+            label: t("home.tabs.dashboard"),
+            icon: <Rows3 className="size-5" />,
+            badge: blocked,
+            dot: blocked === 0 && hasReady(herd),
+            badgeLabel: blocked > 0 ? tn("home.tabs.blocked", blocked) : t("home.tabs.unseen"),
+          },
+          { value: "changes", label: t("files.title"), icon: <ListTree className="size-5" /> },
+        ]}
+      />
+    </>
+  );
+}
+
+const TABS_REACH =
+  "the dashboard's footer. Dashboard is the list and the default, in the middle; Crew leads it, drawn only while a crew is configured; the old Focus tab is the circle-dot switch in the summary line's row, beside the order toggle.";
 
 export function DashboardSection() {
   return (
@@ -75,7 +180,31 @@ export function DashboardSection() {
           span={2}
         >
           <PhoneFrameCard>
-            <AgentList agents={herd} bridge="connected" onOpen={() => {}} />
+            <AgentList agents={herd} bridge="connected" onOpen={() => {}} newTab={HEADING_NEW_TAB} />
+          </PhoneFrameCard>
+        </Card>
+
+        <Card
+          state="agent-list-branches"
+          label="agent list, the branch on every row"
+          reach="every pane whose folder sits in a git checkout. The bridge reads the branch off disk and the row leads line 2 with it, before the tab."
+          note="The same herd as above, with a branch on most rows: a short name, a long one that gives way in the middle and keeps its tail, a detached head, and rows with none, which draw exactly what they drew before. Every row stays 44px."
+          span={2}
+        >
+          <PhoneFrameCard>
+            <AgentList agents={herdWithBranches} bridge="connected" onOpen={() => {}} newTab={HEADING_NEW_TAB} />
+          </PhoneFrameCard>
+        </Card>
+
+        <Card
+          state="agent-list-activity-order"
+          label="agent list, ordered by activity"
+          reach="the operator taps the clock beside the status line. The workspace groups give way to one list, newest first, and each row names its workspace on line 2."
+          note="The toggle is live: tap Place, Activity or Cache. The reading is taken when the order changes or the selected segment is tapped again, never on a poll. Check the controls row at 390px: the counts wrap before the toggle shrinks."
+          span={2}
+        >
+          <PhoneFrameCard>
+            <OrderedAgentList initial="activity" />
           </PhoneFrameCard>
         </Card>
 
@@ -108,6 +237,52 @@ export function DashboardSection() {
 
       <Group title="Write gate">
         <WriteGateCard />
+      </Group>
+
+      <Group title="Tabs and the needs-you switch">
+        <Card
+          state="dashboard-tabs-solo-switch-off"
+          label="tabs, solo, switch off"
+          reach={TABS_REACH}
+          note="Two tabs, Dashboard and Changes. The switch is off: the Spaces navigator and the launch strip trail the list on the real route, and the pin hint sits under the summary line. The footer's red count is on Dashboard."
+        >
+          <PhoneFrameCard height={640}>
+            <DashboardTabsPhone crew={false} initialOn={false} />
+          </PhoneFrameCard>
+        </Card>
+
+        <Card
+          state="dashboard-tabs-solo-switch-on"
+          label="tabs, solo, switch on"
+          reach={TABS_REACH}
+          note="The switch wears the primary tint and reads pressed. Each workspace keeps only its panes that need you, a group with none is dropped, and every heading still counts its whole workspace. The mark stays on Dashboard."
+        >
+          <PhoneFrameCard height={640}>
+            <DashboardTabsPhone crew={false} initialOn />
+          </PhoneFrameCard>
+        </Card>
+
+        <Card
+          state="dashboard-tabs-crew-switch-off"
+          label="tabs, with a crew, switch off"
+          reach={TABS_REACH}
+          note="Three tabs: Crew, Dashboard, Changes, with Dashboard in the middle under the thumb. Tap Crew and Changes: the summary line holds its place on both, and the controls slot keeps its width, invisible."
+        >
+          <PhoneFrameCard height={640}>
+            <DashboardTabsPhone crew initialOn={false} />
+          </PhoneFrameCard>
+        </Card>
+
+        <Card
+          state="dashboard-tabs-crew-switch-on"
+          label="tabs, with a crew, switch on"
+          reach={TABS_REACH}
+          note="The switch is a Dashboard filter and nothing else: tap Crew and the list gives way to the machines, tap Dashboard and the switch is as you left it."
+        >
+          <PhoneFrameCard height={640}>
+            <DashboardTabsPhone crew initialOn />
+          </PhoneFrameCard>
+        </Card>
       </Group>
 
       <Group title="Navigation strips">
@@ -313,9 +488,9 @@ function WriteGateCard() {
       }
       note="The pairing latch is set through lib/pairing's own markNotPaired/clearNotPaired, and it OUTRANKS the device gate — the two can never both show, so pick one."
     >
-      <div className="mb-2">
+      <CardControls>
         <Segmented name="write gate" value={gate} options={GATE_OPTIONS} onChange={setGate} />
-      </div>
+      </CardControls>
       {/* 390px and the routes' own `mx-4 mt-3`: this box WRAPS in five of six locales, so its
           height is a function of the width it is read at, and a card-wide stage measures a box
           nobody has. The gutter rides the component the way home.tsx and space.tsx pass it. */}
@@ -498,14 +673,16 @@ function PlaygroundToggle({
   offLabel: string;
 }) {
   return (
-    <button
-      type="button"
-      aria-label={name}
-      aria-pressed={on}
-      onClick={onToggle}
-      className="mb-2 w-full rounded-md border border-border bg-muted px-3 py-1 text-left text-[11px] font-medium text-muted-foreground"
-    >
-      {on ? onLabel : offLabel}
-    </button>
+    <CardControls>
+      <button
+        type="button"
+        aria-label={name}
+        aria-pressed={on}
+        onClick={onToggle}
+        className="w-full rounded-md border border-border bg-muted px-3 py-1 text-left text-[11px] font-medium text-muted-foreground"
+      >
+        {on ? onLabel : offLabel}
+      </button>
+    </CardControls>
   );
 }
