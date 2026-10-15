@@ -1,17 +1,23 @@
 import { existsSync, readFileSync, readlinkSync, statSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
-import { homedir, hostname } from "node:os";
+import { mkdir, readFile as readFileAsync, realpath as realpathAsync, stat as statAsync, statfs as statfsAsync, writeFile } from "node:fs/promises";
+import { cpus, freemem, homedir, hostname, loadavg, totalmem } from "node:os";
 import { join } from "node:path";
 
 import { classifyInstall, probeInstall } from "../cli/install-kind.ts";
 import { realLinkFs } from "../cli/link.ts";
 import { packageCommand } from "../cli/package-command.ts";
 import { realExec, realFiles } from "../cli/sys.ts";
+import { collieBinary as collieBinaryOf, HOST } from "./host.ts";
 import { ActivityLedger } from "./activity.ts";
 import { trackActivity } from "./activity-tracking.ts";
 import { CacheTracker } from "./cache/tracker.ts";
 import { CacheWarden } from "./cache/warden.ts";
 import { CacheWatchStore } from "./cache/watch.ts";
+import { MachineAlertStore } from "./machine-alerts.ts";
+import { loadMachineHistory, saveMachineHistory } from "./machine-history.ts";
+import { DiskWatch } from "./machine-disks.ts";
+import { MachineSampler } from "./machine-stats.ts";
+import { machineRosterOf, MachineWatch, SOLO_MACHINE_ID, type MachineRosterEntry } from "./machines.ts";
 import { localWatchPane, peerWatchPane } from "./cache/watch-key.ts";
 import { buildJournalRegistry } from "./journal/registry.ts";
 import { createCacheRulesReader } from "./operator-cache-rules.ts";
@@ -21,8 +27,18 @@ import { withAgentBeacons } from "./beacon/decorate.ts";
 import { withAgentHints } from "./beacon/hint.ts";
 import { loadConfig, loadConfigLayer, nonLoopbackBindRefusal, resolveConfigDir, type Config } from "./config.ts";
 import { applyConfigLayer } from "./config-source.ts";
+import {
+  aclRepairAllowed,
+  dirOutcomeLine,
+  ensureOwnerOnlyDir,
+  flushAclBackups,
+  privateRoot,
+  type PrivateRoot,
+} from "./owner-only.ts";
 import type { AgentView, CrewMode, CrewStatusResponse } from "./types.ts";
 import { EventPoker } from "./event-poker.ts";
+import { durableLogDir } from "./durable/log.ts";
+import { GitHeads } from "./git-head.ts";
 import { exePathOf, exeReplaced } from "./exe-replaced.ts";
 import {
   herdrActionCommand,
@@ -33,6 +49,7 @@ import {
   releaseManagedFrontDoor,
   shouldReleaseFrontDoor,
 } from "./front-door.ts";
+import { DURABLE_LOG_DIR_OPTION, DURABLE_MUX } from "./mux/durable/adapter.ts";
 import { HERDR_DIAL_MODE_OPTION } from "./mux/herdr/adapter.ts";
 import { DEFAULT_TIMEOUT_MS } from "./mux/herdr/client.ts";
 import { deriveConfigRoot } from "./mux/herdr/sessions.ts";
@@ -44,12 +61,35 @@ import {
   factoryFor,
   type MuxTarget,
 } from "./mux/registry.ts";
+import { TERN_BINARY_OPTION } from "./mux/tern/adapter.ts";
 import { TMUX_BINARY_OPTION } from "./mux/tmux/adapter.ts";
 import type { MuxAdapter } from "./mux/types.ts";
 import { ZELLIJ_BINARY_OPTION } from "./mux/zellij/adapter.ts";
 import { NotificationCoordinator, makeNotifySink, type NotifyClock } from "./notifications.ts";
+import { pushTitle } from "./push-titles.ts";
 import { NotifyPrefsStore } from "./notify-prefs.ts";
-import { filePairingIo, PairingStore } from "./pairing.ts";
+import { FolderStore } from "./folders.ts";
+import { WorktreeBaseStore } from "./worktree-bases.ts";
+import { WorktreeReceiptStore } from "./worktree-receipts.ts";
+import { LaunchReceiptStore } from "./launch-receipts.ts";
+import { StarterReceiptStore } from "./starter-launch.ts";
+import { AnswerReceiptStore } from "./durable/answer.ts";
+import { ControlReceiptStore } from "./durable/control.ts";
+import { askFloodMessage, AskPush, LOCAL_ASK_HOST } from "./durable/ask-push.ts";
+import { AskGuardStore } from "./durable/guard.ts";
+import { OldLeadNotice } from "./durable/old-lead.ts";
+import { AddedLauncherStore, addedFileIo } from "./launchers-added.ts";
+import { RecentRunStore, recentRunFileIo } from "./recent-runs.ts";
+import { WorktreeChoiceStore } from "./worktree-choices.ts";
+import { filePairingIo, type PairedRegistry, PairingStore } from "./pairing.ts";
+import {
+  LOCAL_SECRET_FILENAME,
+  type LocalCredential,
+  localCredentialOf,
+  mintLocalSecret,
+  removeLocalSecret,
+  writeLocalSecret,
+} from "./local-secret.ts";
 import { createSttGate } from "./stt/index.ts";
 import { runBootGate } from "./crew/boot-gate.ts";
 import { PEER_BROWSER_ENV, resolveCrewRuntime, warnsOnWildcardBind } from "./crew/config.ts";
@@ -132,6 +172,7 @@ import {
 } from "./crew/trust-store.ts";
 import { currentWarrant, discardForeignWarrant, refreshWarrant, type WarrantPush } from "./crew/warrant.ts";
 import { Push } from "./push.ts";
+import { currentNotesReader } from "./release-notes.ts";
 import { pluginRoot } from "./root.ts";
 import { buildId, startServer } from "./server.ts";
 import {
@@ -143,9 +184,9 @@ import { Snooze } from "./snooze.ts";
 import { StateEngine } from "./state-engine.ts";
 import {
   bridgeStampSync,
-  githubCredential,
-  githubTagsFetcher,
-  releaseReadingFetcher,
+  githubReleaseUrl,
+  mirrorValue,
+  releaseFetchers,
   UpdateMonitor,
   UpdateStateStore,
   updateDigestBody,
@@ -155,6 +196,7 @@ import { crewTurnStart, readUpdateRun, updateLockHeld } from "./update-run.ts";
 import {
   FreshPreflightGate,
   launchUpdateRunner,
+  openRunnerLog,
   parsePreflightReport,
   peerPreflightWire,
   peerRunWire,
@@ -180,7 +222,18 @@ const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 // environment — the crew budgets, the standby door, the update lane, speech-to-text — sees the file
 // without learning about it. A broken file warns and the bridge still starts; that is the whole
 // posture, and it is why nothing here can throw.
-const configLayer = await loadConfigLayer(process.env, undefined, (line) => console.warn(line));
+//
+// Windows only (M43 spec 04): the config folder is made private FIRST, so the files read next are
+// already behind its list. The bridge is the one process that may change an access list, and only
+// in Collie's own folders (`bridge/acl-policy.ts`); `COLLIE_NO_ACL_REPAIR=1` leaves every list as it
+// is and still warns.
+const aclRepair = HOST.platform === "win32" && aclRepairAllowed(process.env);
+const securePrivateRoot = (dir: string, id: PrivateRoot["id"], createdNow: boolean): void => {
+  const line = dirOutcomeLine(dir, ensureOwnerOnlyDir(dir, HOST, { root: privateRoot(id), repair: aclRepair, createdNow }));
+  if (line !== null) console.warn(line);
+};
+if (HOST.platform === "win32" && existsSync(resolveConfigDir())) securePrivateRoot(resolveConfigDir(), "config", false);
+const configLayer = await loadConfigLayer(process.env, undefined, (line) => console.warn(line), aclRepair);
 applyConfigLayer(configLayer);
 
 // loadConfig throws on config it cannot parse at all. Print the reason alone — a stack trace here
@@ -218,7 +271,18 @@ const bootTrust = await trustStore.load();
 // Moved AHEAD of the mode resolution by §18.11's boot gate: that gate may rewrite the trust store
 // before anything else is wired, and a store written into a directory that does not exist yet is a
 // boot that fails for the wrong reason.
+const stateDirExisted = HOST.platform === "win32" ? existsSync(cfg.stateDir) : true;
 await mkdir(cfg.stateDir, { recursive: true, mode: 0o700 });
+
+// On Windows the mode above does nothing: NTFS keeps an access list, not mode bits (M43 spec 04). So
+// the state folder gets a private list here, once per start, and every file a store writes into it
+// later inherits it from its birth. A folder that is already private costs one `icacls` read per
+// secret file; a loose one is repaired when it is Collie's own, and the line says so only after a
+// second read confirms it. The old lists of anything changed are saved into the state folder.
+if (HOST.platform === "win32") {
+  securePrivateRoot(cfg.stateDir, "state", !stateDirExisted);
+  for (const line of flushAclBackups(cfg.stateDir)) console.warn(line);
+}
 
 // Append-only audit trail of write-level actions (see audit.ts). A write failure here is swallowed
 // inside record() so it can never break the user action it's auditing.
@@ -484,6 +548,14 @@ if (crew.mode !== "solo") console.log(`[crew] mode: ${crew.mode}`);
 // listener that tried to bind it first is what crash-looped in the drill.
 releaseFrontDoor(crew.mode, deposed !== null, "this collie is a peer");
 
+const rootDir = pluginRoot();
+// What this process answers `GET /crew/v1/hello` with (CREW_PROTOCOL.md §5, §7.1). Resolved ONCE,
+// here, by the same rule `collie version` uses (`bridge/version.ts`, shared with `cli/context.ts`)
+// so one machine never reports two different versions — and never per request, since the answer
+// cannot change without a restart. Bare: no `(manifest; web not built)` parenthetical on the wire,
+// or a machine with an unbuilt bundle would read as skewed against every peer including itself.
+const crewVersion = collieVersionBare(rootDir);
+
 // The roster THIS PROCESS wired, left on disk for `collie crew status` to compare the store against
 // (bridge/crew/staleness.ts). A membership change can arrive over the wire — the first enrollment
 // lands in a running lead, a promotion demotes a running lead — and no re-read follows, by design.
@@ -494,8 +566,9 @@ releaseFrontDoor(crew.mode, deposed !== null, "this collie is a peer");
 //
 // Built from the store AS THE GATE LEFT IT, not from the bytes read at line one: a machine that
 // self-healed at boot (§18.11) really did wire a peer's roster, and a marker claiming otherwise
-// would make `crew status` report drift against a store that is perfectly in step.
-const bootMarker = markerFor(trustStore.current(), Date.now(), process.pid);
+// would make `crew status` report drift against a store that is perfectly in step. The build rides
+// along for the update gate, which reaches a TLS-only peer by handshake and learns no build from it.
+const bootMarker = markerFor(trustStore.current(), Date.now(), process.pid, NO_RUNTIME_FACTS, crewVersion);
 if (bootTrust !== null) {
   try {
     await writeFile(crewRuntimePath(cfg.stateDir), formatMarker(bootMarker), { mode: 0o600 });
@@ -565,8 +638,38 @@ await notifyPrefs.load();
 // Device pairing (bridge/pairing.ts). Constructed unconditionally and holding no state of its own:
 // it re-reads `<stateDir>/paired-devices.json` per request (cached on mtime), so `collie pair` and
 // `collie devices revoke` land on the RUNNING service without the restart every other backend change
-// needs. An empty registry — the state every existing install starts in — enforces nothing.
+// needs. Pairing is always on (ADR 0086): an empty registry answers only `/api/health` and
+// `/api/pair`, and `collie pair` on this host is how the first device gets in.
 const pairing = new PairingStore(filePairingIo(cfg.stateDir));
+
+/**
+ * The registry for a caller that reports rather than gates, or null while the file is there and
+ * unreadable (`RegistryUnreadableError`). Never the empty registry in that case: an unreadable store
+ * is not "nobody is paired" (bridge/pairing.ts).
+ */
+const readableRegistry = (): PairedRegistry | null => {
+  try {
+    return pairing.registry();
+  } catch {
+    return null;
+  }
+};
+
+// The host's own read credential (bridge/local-secret.ts): a fresh secret per start, written
+// owner-only to `<stateDir>/local-secret` for `collie doctor` and `collie crew update` to read their
+// own bridge with, and only its hash kept here. Reads only, from loopback only. A write that fails
+// costs the CLI its reads (it falls back to a 403, as before this existed) and nothing else.
+const localSecret = mintLocalSecret();
+let localCredential: LocalCredential | undefined;
+try {
+  await writeLocalSecret(cfg.stateDir, localSecret);
+  localCredential = localCredentialOf(localSecret);
+} catch (err) {
+  console.warn(
+    `[bridge] could not write ${LOCAL_SECRET_FILENAME}: ${err instanceof Error ? err.message : String(err)} — ` +
+      "`collie doctor` cannot read this bridge until it can",
+  );
+}
 
 // Speech-to-text (bridge/stt/). Constructed unconditionally and holding no settings of its own, for
 // exactly pairing's reason: it re-reads `<stateDir>/stt.json` per request (cached on mtime) and the
@@ -587,18 +690,81 @@ await activity.load();
 // once, and handed to both the tracker and the server, so the probe and the history route share the
 // adapters' memoised path caches. Null when `COLLIE_TRANSCRIPT` is off: no journal means no probe, and
 // every pane then reads exactly as it did before this feature existed.
-const journals = cfg.transcript ? buildJournalRegistry(cfg.journalRoots) : null;
+const journals = cfg.transcript
+  ? buildJournalRegistry({ ...cfg.journalRoots, durable: [durableLogDir(cfg.stateDir)] })
+  : null;
 const cacheRulesReader = createCacheRulesReader(cfg.cacheRulesFile);
 const paneCache =
   journals === null
     ? null
     : new CacheTracker(journals, { overrides: () => cacheRulesReader() }, () => Date.now());
 
+// Which branch each pane's folder is on (bridge/git-head.ts). One for the whole bridge: every
+// session's poll feeds it its folders, and the server reads it from memory at serialise time.
+const gitHeads = new GitHeads();
+
 // Which panes the operator asked to be warned about before their prompt cache goes cold, and the
 // deadlines already warned (bridge/cache/watch.ts). Loaded here beside the other two preference stores;
 // the file does not exist until an operator toggles something or a warning actually goes out.
 const cacheWatch = new CacheWatchStore(cfg);
 await cacheWatch.load();
+
+// The folders a new space was created in on THIS machine, and the ones the operator starred — the
+// new-space sheet's list (#289, bridge/folders.ts). One per machine, whatever the session. Loading
+// writes nothing: the file appears on the first create with a folder or the first star.
+const folders = new FolderStore(cfg);
+await folders.load();
+
+// One receipt per worktree create the phone tagged with a request id, so a retried create replays
+// instead of making a second worktree (ADR 0089, bridge/worktree-receipts.ts). Loading writes
+// nothing: the file appears on the first create that carries an id.
+const worktreeReceipts = new WorktreeReceiptStore(cfg.stateDir);
+await worktreeReceipts.load();
+
+// Which ref each new worktree was cut from (ADR 0089, amended, bridge/worktree-bases.ts). Nothing
+// reads it yet. Loading writes nothing: the file appears on the first create that named a start.
+const worktreeBases = new WorktreeBaseStore(cfg.stateDir);
+await worktreeBases.load();
+
+// One receipt per launch the phone tagged with a request id, so a retried Start never opens a second
+// pane (ADR 0091, bridge/launch-receipts.ts). Loading writes nothing.
+const launchReceipts = new LaunchReceiptStore(cfg.stateDir);
+await launchReceipts.load();
+
+// One receipt per starter run (ADR 0102, bridge/starter-launch.ts). Loading writes nothing.
+const starterReceipts = new StarterReceiptStore(cfg.stateDir);
+await starterReceipts.load();
+
+// One receipt per answer to an ask, written before the answer leaves (ADR 0100,
+// bridge/durable/answer.ts). Loading writes nothing: the file appears on the first answer.
+const answerReceipts = new AnswerReceiptStore(cfg.stateDir);
+await answerReceipts.load();
+
+// One receipt per send or abort on a durable pane, written before the control leaves (ADR 0101,
+// bridge/durable/control.ts). Loading writes nothing: the file appears on the first control.
+const controlReceipts = new ControlReceiptStore(cfg.stateDir);
+await controlReceipts.load();
+
+// The push guard for asks that travel as data (ADR 0100, bridge/durable/guard.ts), keyed on
+// (host, toolCallId), one memory for this machine's panes and for every peer's. Loading writes
+// nothing: the file appears when a pane that carries asks first opens one.
+const askGuard = new AskGuardStore(cfg.stateDir);
+askGuard.load();
+const askPush = new AskPush(askGuard);
+
+// The New sheet's last branch choices per repo on this machine (M48, bridge/worktree-choices.ts).
+// Loading writes nothing: the file appears on the first branch create that works.
+const worktreeChoices = new WorktreeChoiceStore(cfg.stateDir);
+await worktreeChoices.load();
+
+// The launcher rows phones added on this machine (ADR 0094, bridge/launchers-added.ts). Read by mtime
+// on each use, because `collie devices revoke` edits it from another process. Nothing is written until
+// the first add.
+const addedLaunchers = new AddedLauncherStore(addedFileIo(cfg.stateDir));
+
+// The one-off lines a phone ran on this machine, newest first (ADR 0095, bridge/recent-runs.ts).
+// Nothing is written until the first run that works.
+const recentRuns = new RecentRunStore(recentRunFileIo(cfg.stateDir));
 
 // The warden that judges them. A DEPS LITERAL WITH NO LOGIC IN IT, for the reason
 // `bridge/update.ts`'s monitor is built the same way: there is no `bridge/index.test.ts`, so every gate
@@ -617,7 +783,6 @@ const cacheWarden = new CacheWarden({
 // The running plugin version, captured NOW at module load — never re-read from disk later, or a
 // post-pull package.json would mask the very update we detect (same class of bug as the buildId gap).
 // The bridge-source stamp is snapshotted here too, so a rebuilt-but-not-restarted process reads stale.
-const rootDir = pluginRoot();
 const bridgeDir = join(rootDir, "bridge");
 // SAFETY: this is the plugin's OWN package.json, shipped in the same checkout as this file, and
 // `scripts/check-version.sh` gates every build on its `version` being present and agreeing with the
@@ -626,19 +791,15 @@ const currentVersion = (
   JSON.parse(readFileSync(join(rootDir, "package.json"), "utf8")) as { version: string }
 ).version;
 
-// What this process answers `GET /crew/v1/hello` with (CREW_PROTOCOL.md §5, §7.1). Resolved ONCE,
-// here, by the same rule `collie version` uses (`bridge/version.ts`, shared with `cli/context.ts`)
-// so one machine never reports two different versions — and never per request, since the answer
-// cannot change without a restart. Bare: no `(manifest; web not built)` parenthetical on the wire,
-// or a machine with an unbuilt bundle would read as skewed against every peer including itself.
-const crewVersion = collieVersionBare(rootDir);
-
 const updateStore = new UpdateStateStore(cfg);
 await updateStore.load();
 
 // The repo the release check + release links point at. Defaults to Collie's own; overridable for a
 // fork (or a synthetic test target) via COLLIE_UPDATE_REPO.
 const updateRepo = process.env.COLLIE_UPDATE_REPO?.trim() || "AltanS/collie";
+// The release reads, with the rehearsal mirror (a loopback-only test seam) decided in one place.
+const releaseReads = releaseFetchers(updateRepo, process.env);
+if (releaseReads.warning !== null) console.warn(`[update] ${releaseReads.warning}`);
 // How this Collie is installed — the ONE shared classifier (`cli/install-kind.ts`), probed once at
 // startup because the answer cannot change under a running process (an update restarts the service).
 // The banner spells its commands from this: Herdr actions for a Herdr-managed checkout, the `collie`
@@ -725,10 +886,10 @@ const updateMonitor = new UpdateMonitor({
   startupStamp: bridgeStampSync(bridgeDir, rootDir),
   // With the operator's GitHub token when the env holds one (#254): the same three names, in the
   // same order, that `collie update` reads, so the banner and the verb share one budget.
-  fetchTags: githubTagsFetcher(updateRepo, githubCredential(process.env)),
+  fetchTags: releaseReads.fetchTags,
   // The newest release's own reading (M27/06) — one small GET beside the tag list, from the same
   // repo the release links point at. It answers null for every release that published none.
-  fetchReleaseReading: releaseReadingFetcher(updateRepo),
+  fetchReleaseReading: releaseReads.fetchReleaseReading,
   // Both ends of a link change: what this build speaks, and whether this machine is in a crew at
   // all. The mode was resolved above, at boot, from what the enrolment gate left on disk.
   crewProtocol: CREW_PROTOCOL_VERSION,
@@ -743,6 +904,9 @@ const updateMonitor = new UpdateMonitor({
   // also what makes a bridge restarted BY an update resume reporting that run at startup instead of
   // saying nothing happened.
   runState: () => readUpdateRun(cfg.stateDir),
+  // What this version changed (1.21.1), from the CHANGELOG.md that ships beside package.json in every
+  // checkout and payload. Read on the first Updates page open, once; no network.
+  currentNotes: currentNotesReader(rootDir, currentVersion, githubReleaseUrl(updateRepo, currentVersion)),
   // One push a DAY, naming every release folded into it — the digest decides that; this only renders it.
   notify: (versions, linkChange, urgent) =>
     void push.send({
@@ -752,7 +916,7 @@ const updateMonitor = new UpdateMonitor({
       // release page carry the location-independent Herdr actions. Keeps this off the cwd-dependent path.
       // The TITLE never moves, not even for an urgent release (ADR 0046): the notification is the same
       // kind of thing it always was, and what makes it urgent is the first sentence of the body.
-      title: "Collie update available",
+      ...pushTitle("update.available"),
       body: updateDigestBody(currentVersion, versions, linkChange, urgent),
       target: "settings",
     }),
@@ -769,7 +933,7 @@ const updateMonitor = new UpdateMonitor({
 // fallback matters for the source-mode bridge (`bun bridge/index.ts`), where `execPath` is Bun
 // itself: there, with no compiled binary present, there is nothing honest to spawn, and the route
 // answers 503 rather than shelling out to something that is not Collie.
-const collieBinary = join(rootDir, "bin", "collie");
+const collieBinary = collieBinaryOf(rootDir);
 const canRunUpdate = existsSync(collieBinary);
 // How long `collie update --check --json` may take before the bridge stops waiting. It asks git for
 // the remote's tags over the network, so it is not instant; past this, "no report" is the answer,
@@ -846,8 +1010,12 @@ const startDetachedUpdate = (a: { major: boolean; runId: string; toTag?: string 
     hasSetsid: Bun.which("setsid") !== null,
     runId: a.runId,
     toTag: a.toTag ?? null,
+    mirror: mirrorValue(process.env),
   });
-  return launchUpdateRunner(plan, { cwd: rootDir, spawn: (command, options) => Bun.spawn(command, options) });
+  // THE RUNNER'S OWN OUTPUT IS KEPT (#283): a runner that dies before it writes a run record used to
+  // leave nothing behind at all.
+  const log = openRunnerLog(cfg.stateDir, `${new Date().toISOString()} ${plan.command.join(" ")}`);
+  return launchUpdateRunner(plan, { cwd: rootDir, spawn: (command, options) => Bun.spawn(command, options), log });
 };
 
 /**
@@ -870,7 +1038,7 @@ const updateAction = canRunUpdate
       newRunId,
       start: startDetachedUpdate,
       beginCrewRun: (a: { runId: string; to: string }) => {
-        updateTurns.begin(a.runId, a.to);
+        updateTurns.begin(a.runId, a.to, Date.now());
         // §20's FIRST immediate sweep: the operator has confirmed, so the first turn goes out on a
         // sweep of its own rather than waiting out the idle cadence.
         crewLead?.resweep();
@@ -934,6 +1102,21 @@ const crewFollower =
         start: ({ tag, runId }) => startDetachedUpdate({ major: false, runId, toTag: tag }),
       })
     : undefined;
+
+/**
+ * A durable peer names a lead too old to show its panes properly (M50 spec 14, bridge/durable/old-lead.ts).
+ * `undefined` on every other machine: a lead, a solo instance, or a peer that drives another mux.
+ */
+const oldLead = crew.mode === "peer" && cfg.mux === DURABLE_MUX ? new OldLeadNotice() : undefined;
+
+/** The lead's two follow headers, handed to whichever of the follower and the old-lead notice exist. */
+const onFollow =
+  crewFollower === undefined && oldLead === undefined
+    ? undefined
+    : (a: { readonly leadRelease: string | null; readonly turn: string | null }): void => {
+        oldLead?.observe(a.leadRelease);
+        crewFollower?.observe(a);
+      };
 
 async function updatePreflightReport(fresh: boolean) {
   if (!canRunUpdate) return null;
@@ -999,6 +1182,8 @@ const makeSession: SessionFactory = (name, socketPath, isPrimary) => {
       [HERDR_DIAL_MODE_OPTION]: cfg.dialMode ?? "auto",
       [TMUX_BINARY_OPTION]: cfg.tmuxBin,
       [ZELLIJ_BINARY_OPTION]: cfg.zellijBin,
+      [TERN_BINARY_OPTION]: cfg.ternBin,
+      [DURABLE_LOG_DIR_OPTION]: durableLogDir(cfg.stateDir),
     },
   };
   const herdr = withBeaconsIfBlind(createMux(muxRegistry, cfg.mux, target), target);
@@ -1022,6 +1207,11 @@ const makeSession: SessionFactory = (name, socketPath, isPrimary) => {
   // seeds first sightings as already-seen and reaps closed ones. Reconciling covers bare shells too,
   // which the engine's agent-derived removal event never reports.
   trackActivity(engine, activity, name);
+
+  // The branch of every pane's folder rides the same poll, fired and not awaited, for the cache
+  // probe's reason below: a poll never waits on a disk read. The reader keeps its own clocks, so a
+  // poll every 1.5 s is not a read every 1.5 s, and it never throws.
+  engine.onUpdate((s) => void gitHeads.refresh([...s.agents, ...s.shellPanes].map((p) => p.cwd)));
 
   // The prompt-cache probe rides the same poll, and for the reason the tracker's header gives:
   // `localSnapshot` is synchronous, so the disk read cannot happen at serialise time. It is fired and
@@ -1065,8 +1255,31 @@ const makeSession: SessionFactory = (name, socketPath, isPrimary) => {
   const notifications = new NotificationCoordinator(clock, sink, cfg.notifyDelayMs, (status) =>
     notifyPrefs.isNotifiable(status),
   );
-  engine.onTransition((agent, from, to) => notifications.onTransition(agent, from, to));
+  // A pane whose adapter raises asks as data (ADR 0100) does not push on its way into `blocked`: the
+  // ask guard decides, once per ask, after each poll. Every other pane, and every other transition,
+  // reaches the coordinator as before. In peer mode the sink is muted anyway and the lead runs the
+  // guard over the swept body, so a peer runs none and writes no guard file.
+  const openAsks = herdr.openAsks?.bind(herdr);
+  const guarded = openAsks !== undefined && crew.mode !== "peer";
+  engine.onTransition((agent, from, to) => {
+    if (guarded && AskPush.holds({ asks: openAsks(agent.paneId) }, to)) return;
+    notifications.onTransition(agent, from, to);
+  });
   engine.onRemove((paneId) => notifications.onRemove(paneId));
+  if (guarded) {
+    engine.onUpdate((s) =>
+      askPush.observe(
+        LOCAL_ASK_HOST,
+        s.agents.map((agent) => ({ agent, paneId: agent.paneId, asks: openAsks(agent.paneId) })),
+        ({ agent }) => notifications.onTransition(agent, agent.status, "blocked", "ask"),
+        // The hourly breaker tripped: one summary, under the same snooze and the same "blocked"
+        // preference as every herd push.
+        () => {
+          if (!snooze.isMuted() && notifyPrefs.isNotifiable("blocked")) void push.send(askFloodMessage(LOCAL_ASK_HOST, hostname()));
+        },
+      ),
+    );
+  }
 
   engine.start();
   poker.start();
@@ -1135,6 +1348,7 @@ const peerNotifier =
         mute: snooze,
         delayMs: cfg.notifyDelayMs,
         isNotifiable: (status) => notifyPrefs.isNotifiable(status),
+        asks: askPush,
       })
     : undefined;
 
@@ -1216,7 +1430,12 @@ const standbySurface: CrewRouterDeps["standby"] =
         syncedDigest: () => pairingReportOf(standbyStore.current()),
         // §18.14's finding, re-derived from disk on every answer: which of THIS machine's own paired
         // devices share a label with the registry it was synced. Empty is the ordinary case.
-        syncedCollision: () => collisionReportOf(pairing.registry(), standbyStore.current()),
+        // An unreadable registry reports no finding rather than failing the hello it rides on: the
+        // finding is advisory, and the next hello after the repair carries it.
+        syncedCollision: () => {
+          const own = readableRegistry();
+          return own === null ? [] : collisionReportOf(own, standbyStore.current());
+        },
         applySync: async (sync) => {
           // Wholesale, never a merge: the lead's registry is the whole truth, so a revocation there
           // has to be able to REMOVE a device here.
@@ -1257,13 +1476,16 @@ const activatedGeneration =
 
 runtimeFacts = () => {
   const facts = leadContact.facts();
-  return {
+  const held: CrewRuntimeFacts = {
     anchoredGeneration: activatedGeneration,
     leadLastDialledAt: facts.lastDialledAt,
     leadRefusedSecretAt: facts.leadRefusedSecretAt,
     deposed: deposed === null ? null : { ...deposed, outcome: outcomeNow(deposed, facts) },
     pairingCollision,
   };
+  // For `collie doctor`'s `durable-lead` row: only a durable peer that has heard its lead state one.
+  const leadRelease = oldLead?.leadRelease() ?? null;
+  return leadRelease === null ? held : { ...held, leadRelease };
 };
 void checkpointRuntime();
 
@@ -1345,6 +1567,7 @@ const crewLead = (() => {
     // mid-life, and the roster changes under a running bridge.
     follow: {
       leadRelease: () => leadReleaseHeader({ version: crewVersion, run: readUpdateRun(cfg.stateDir) }),
+      leadRun: () => readUpdateRun(cfg.stateDir),
       turns: updateTurns,
       enrolledAt: (memberId) =>
         trustStore.current()?.peers.find((m) => m.memberId === memberId)?.enrolledAt ?? 0,
@@ -1374,8 +1597,12 @@ const crewLead = (() => {
         }),
       );
     },
+    // ADR 0084: a member's own load, off the answer this sweep already parsed, on this lead's clock.
+    onMachineStats: (memberId, sample, at) => machineWatch?.observe(memberId, sample, at),
     onPeerGone: (memberId) => {
       peerNotifier?.forget(memberId);
+      // A member that left takes its last sample and its day of history with it (ADR 0084).
+      machineWatch?.forget(memberId);
       // The client remembers one thing that reaches a verdict, how long this member has been
       // answering without a protocol header (M20/03). A member pruned with that run nearly spent,
       // then enrolled again under the same id, would inherit it and land on the ladder at once.
@@ -1445,7 +1672,11 @@ const crewLead = (() => {
       current: () => {
         const held = trustStore.current();
         if (held === null || held.crew === null) return null;
-        const devices = syncedDevicesOf(pairing.registry());
+        // `null` is "nothing to send" (lead.ts): an unreadable registry must not reach the deputy as
+        // an empty list, which would revoke every phone at its standby door.
+        const own = readableRegistry();
+        if (own === null) return null;
+        const devices = syncedDevicesOf(own);
         return {
           sync: { crewId: held.crew.crewId, leadMemberId: held.self.memberId, devices },
           digest: syncDigest(devices),
@@ -1537,9 +1768,101 @@ function settleUpdateGate(): void {
   // whose name nobody knows and whose journal outlives it by nothing, so a trace left only there is
   // a trace left nowhere. Once per run id per process, so a poll tick cannot make it a stream.
   console.log(`[crew] update ${start.runId}: levelling peers to ${start.to}`);
-  updateTurns.begin(start.runId, start.to);
+  updateTurns.begin(start.runId, start.to, Date.now());
   crewLead?.resweep();
 }
+
+// ── Machines: every machine's load (ADR 0084) ────────────────────────────────
+// Every collie samples itself — a peer for the `machineStats` sibling it answers its lead with, a lead
+// and a solo collie for their own row. The sampler reads `/proc` (Linux) or `node:os` and nothing
+// else, except on macOS, where one async, killed-after-1-s `vm_stat` run per sample gives the memory
+// Activity Monitor shows, served one tick late (machine-stats.ts, VmStatWatch). Only a lead and a solo collie keep the watch: the day of minutes,
+// the alert rules and the push. A peer is not a front door (ADR 0013), so it has no Machines page.
+const machineSampler = new MachineSampler({
+  host: HOST,
+  readText: (path) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return null;
+    }
+  },
+  // Only macOS runs a command (`vm_stat`). Async, never awaited by the tick, killed after 1 s; any
+  // failure resolves null.
+  run: async (command, args) => {
+    try {
+      const proc = Bun.spawn([command, ...args], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: { LC_ALL: "C" } });
+      const timer = setTimeout(() => proc.kill("SIGKILL"), 1000);
+      try {
+        const [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+        return code === 0 ? text : null;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      return null;
+    }
+  },
+  os: { cpus, totalmem, freemem, loadavg },
+  now: Date.now,
+  // The disks that hold the home folder, the root (the system drive on Windows) and the state folder.
+  // Every read is async and started, never awaited, from the sampler's tick (machine-disks.ts).
+  disks: new DiskWatch({
+    platform: HOST.platform,
+    paths: [homedir(), HOST.platform === "win32" ? `${process.env.SystemDrive ?? "C:"}\\` : "/", cfg.stateDir],
+    statfs: (path) => statfsAsync(path),
+    dev: async (path) => (await statAsync(path)).dev,
+    realpath: (path) => realpathAsync(path),
+    mounts: () => readFileAsync("/proc/self/mounts", "utf8").catch(() => null),
+    now: Date.now,
+  }),
+});
+
+/**
+ * The machines a lead or a solo collie answers for, read on every call. A lead's list is the crew
+ * overview's own rows (the same closure `GET /api/crew` answers from), so the two pages cannot name a
+ * machine two ways. A solo collie that never enrolled has no member id and answers as `local`.
+ */
+function machineRoster(): MachineRosterEntry[] {
+  const data = trustStore.current();
+  return machineRosterOf(
+    crewStatus?.() ?? null,
+    data === null ? { id: SOLO_MACHINE_ID, name: hostname() } : crewSelfOf(data),
+  );
+}
+
+const machineWatch =
+  crew.mode === "peer"
+    ? undefined
+    : new MachineWatch({
+        now: Date.now,
+        roster: machineRoster,
+        history: await loadMachineHistory(cfg.stateDir, Date.now()),
+        alerts: await MachineAlertStore.load(cfg.stateDir),
+        saveHistory: (history, now) => saveMachineHistory(cfg.stateDir, history, now),
+        // The cache warning's two gates, for the cache warning's reason (ADR 0042): quiet hours apply,
+        // and the operator's switch for the kind is read live.
+        muted: () => snooze.isMuted(),
+        enabled: () => notifyPrefs.current().machines,
+        send: (msg) => void push.send(msg),
+        // A deposed lead's roster is void (§18.12): it stops sweeping, and it must stop judging and
+        // pushing about machines it no longer answers for, and stop recording its own minutes too.
+        active: () => deposed === null,
+      });
+
+// The same tick the crew sweep rides (CREW_PROTOCOL.md §10.1, §11): no second timer. The sampler reads
+// at most once every 15 s, or every 5 s while a phone has the Machines list or the Crew tab open (the
+// watch says which, `machines.ts` holds the arithmetic); a peer has no watch and always reads at the
+// slow rate. The watch judges once a minute.
+registry.get()?.engine.onTick(() => {
+  const sample = machineSampler.tick(machineWatch?.sampleEveryMs());
+  if (machineWatch === undefined) return;
+  if (sample !== null) {
+    const self = machineRoster().find((m) => m.isLead);
+    if (self !== undefined) machineWatch.observe(self.id, sample, Date.now());
+  }
+  machineWatch.tick();
+});
 
 if (crewLead) {
   registry.get()?.engine.onTick(() => {
@@ -1622,7 +1945,11 @@ async function performTakeover(deviceLabel: string): Promise<{ ok: boolean; mess
       // credential it already holds. A label collision refuses the whole takeover and writes nothing —
       // checked BEFORE the store is rewritten, so a refusal really does leave everything as it was.
       const devices = syncedDevices();
-      const clash = collidingLabels(pairing.registry(), devices);
+      // An unreadable registry cannot be checked for a collision, and adopting into it would write a
+      // torn reading back: refuse before anything is written, as a collision does.
+      const own = readableRegistry();
+      if (own === null) return { kind: "refused", reason: "commit-failed" };
+      const clash = collidingLabels(own, devices);
       if (clash.length > 0) return { kind: "refused", reason: "pairing-collision", labels: clash };
       const result = await commitCrewChange(trustStore, audit, (current) =>
         current === null ? null : adoptLeadership(current, { roster, confirmed, now: Date.now() }),
@@ -1769,9 +2096,23 @@ const server = startServer({
   // Built above so the cache tracker probes through the same adapters this serves history from.
   journals: journals ?? undefined,
   cache: paneCache ?? undefined,
+  gitHeads,
   cacheWatch,
+  folders,
+  worktreeReceipts,
+  worktreeBases,
+  launchReceipts,
+  starterReceipts,
+  answerReceipts,
+  controlReceipts,
+  worktreeChoices,
+  addedLaunchers,
+  recentRuns,
+  // Every machine's load and its alert rules (ADR 0084). Undefined on a peer, whose routes then 404.
+  machines: machineWatch,
   crew,
   pairing,
+  localCredential,
   stt,
   crewLead,
   crewStatus,
@@ -1805,10 +2146,13 @@ const server = startServer({
             // §20: this machine's own run, beside its preflight. It is what lets a lead's page say
             // "updating" or "rolled back" about a member instead of only "still behind".
             updateRun: () => peerRunWire(readUpdateRun(cfg.stateDir)),
-            // §20's two REQUEST headers, handed to this peer's own follow. A build with no follower
-            // — a lead, or a checkout with nothing compiled — passes `undefined` and ignores both,
-            // which is a correct peer.
-            onFollow: crewFollower === undefined ? undefined : (a) => crewFollower.observe(a),
+            // ADR 0084: this machine's own last load sample, the one the sampler already holds.
+            machineStats: () => machineSampler.latest(),
+            // §20's two REQUEST headers, handed to this peer's own follow, and the release header to a
+            // durable peer's old-lead notice. A build with neither — a lead, or a checkout with nothing
+            // compiled that drives no durable program — passes `undefined` and ignores both, which is
+            // a correct peer.
+            onFollow,
             onMembershipChange: crewStoreChanged,
             // Gap A (§18.9), and its rotation-shaped sibling. Two receipts, one holder, in memory.
             onLeadDialled: (at) => leadContact.record(at),
@@ -1864,6 +2208,8 @@ const shutdown = async () => {
   // Stop accepting new connections and let in-flight requests drain briefly (non-forced stop)
   // before we tear down the poll loops and exit.
   await server.stop();
+  // The CLI's read credential dies with the process that holds its hash (bridge/local-secret.ts).
+  await removeLocalSecret(cfg.stateDir, localSecret);
   clearInterval(refreshTimer);
   registry.disposeAll();
   // The codex speech-to-text provider owns a `codex app-server` child (bridge/stt/codex-auth.ts).
@@ -1873,6 +2219,8 @@ const shutdown = async () => {
   // persist them before exiting, or every restart quietly resurrects alerts you'd already cleared.
   activity.stop();
   await activity.flush();
+  // The day of minutes is saved every five minutes from the tick; the last few go to disk here.
+  await machineWatch?.flush();
   clearInterval(sweepTimer);
   clearTimeout(updateFirstCheck);
   clearInterval(updateTimer);

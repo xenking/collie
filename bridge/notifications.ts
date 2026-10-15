@@ -1,4 +1,5 @@
-import { paneName, panePlace } from "./pane-name.ts";
+import { panePlace, soleTabName, type NameableP } from "./pane-name.ts";
+import { pushTitle, type PushTitleCode, type PushTitleDetail } from "./push-titles.ts";
 import type { PushMessage } from "./push.ts";
 import type { AgentStatus, AgentView } from "./types.ts";
 
@@ -29,6 +30,10 @@ export interface NotifyClock<H> {
 export interface HerdSummary {
   /** Headline: "claude needs you" for one, or "3 agents need you" for several. */
   title: string;
+  /** The catalogue code `title` was rendered from, so the phone can say it in its own language. */
+  titleCode: PushTitleCode;
+  /** The values `title` was filled with — the agent's name, or the digest's count. */
+  titleDetail?: PushTitleDetail;
   /** Sub-line: the pane's PLACE ("collie › UI work") for one outstanding alert, or the panes' names
    *  for a digest — each one `name · place` where two of them read the same. */
   body: string;
@@ -91,7 +96,15 @@ export function makeNotifySink(
     render: (s) => {
       if (mute.isMuted()) return;
       const body = host === undefined ? s.body : `${host} · ${s.body}`;
-      const msg: PushMessage = { title: s.title, body, tag: herdTag, paneId: s.paneId, renotify: s.renotify };
+      const msg: PushMessage = {
+        title: s.title,
+        titleCode: s.titleCode,
+        body,
+        tag: herdTag,
+        paneId: s.paneId,
+        renotify: s.renotify,
+      };
+      if (s.titleDetail !== undefined) msg.titleDetail = s.titleDetail;
       if (sessionName !== undefined) msg.session = sessionName;
       if (host !== undefined) msg.host = host;
       void push.send(msg);
@@ -103,9 +116,34 @@ export function makeNotifySink(
   };
 }
 
+// ── A PUSH NAMES A PANE BY THE OPERATOR'S LABEL, NEVER BY THE PROGRAM'S TITLE ─────────────────────
+// Every other surface leads with `paneName` (pane-name.ts), which falls back to the terminal title.
+// A push may not. A program sets that title with an escape sequence, so anything running in the pane
+// chooses it, and it can carry a path, a command line or a secret. A push crosses a third-party push
+// service and shows on a lock screen, which is the last place for any of those. So the push asks
+// {@link pushName}, which is the one name rule with the title taken out, and with no fallback to it,
+// not even a stale one. A pane with no label of the operator's gets the neutral harness word, and
+// the digest's collision rule adds its place when two read the same. The body is masked on top
+// (`push.ts` § redactPushMessage), but the title stays out by rule, not by luck. Written down in
+// docs/security.md too.
+
+/**
+ * What a push calls a pane: the operator's label (`paneLabel`), Claude's `/rename` name, or the
+ * operator's name for a one-pane tab; else `shell` or the harness word. Never `terminalTitle`.
+ */
+export function pushName(pane: NameableP): string {
+  if (pane.paneLabel) return pane.paneLabel;
+  if (pane.sessionName) return pane.sessionName;
+  const tab = soleTabName(pane);
+  if (tab !== null) return tab;
+  return pane.kind === "shell" ? "shell" : pane.agent;
+}
+
 interface Alert {
   agent: string;
-  /** What this pane is CALLED — the one name rule, `bridge/pane-name.ts`. */
+  /** Raised by the ask guard for an ask that travels as data: the title says "Permission needed". */
+  ask?: true;
+  /** What a push calls this pane — {@link pushName}, the operator's label and never the title. */
   label: string;
   /** Where it sits — `space › tab`, or the space alone. The one place rule, same module. */
   place: string;
@@ -140,9 +178,19 @@ export class NotificationCoordinator<H = unknown> {
     private readonly isNotifiable: (status: AgentStatus) => boolean,
   ) {}
 
-  /** Wire to `StateEngine.onTransition`. */
-  onTransition(agent: AgentView, _from: AgentStatus, to: AgentStatus): void {
+  /**
+   * Wire to `StateEngine.onTransition`. `cause` is `"ask"` when the ask guard raised the push
+   * (`durable/ask-push.ts`): the title then says a permission is needed, in generic words.
+   */
+  onTransition(agent: AgentView, from: AgentStatus, rawTo: AgentStatus, cause?: "ask"): void {
     const id = agent.paneId;
+    // Herdr 0.9 can report a finished turn as `idle` instead of `done`, and tmux and zellij never
+    // report `done` (issue #345), so a `working → idle` flip IS the completion and is read as `done` from here on: the Finished pref,
+    // the debounce, the verb and the payload all behave as for a real `done`. Only that exact pair
+    // counts. `blocked → idle` (the operator answered the prompt) and every other way into `idle`
+    // stay a resolve. Known limit: an agent the operator interrupts also goes `working → idle` and
+    // will push. Not `isNewWork`: that one includes `blocked → idle`.
+    const to: AgentStatus = from === "working" && rawTo === "idle" ? "done" : rawTo;
     if (!this.isNotifiable(to)) {
       // Resolved to a non-notifiable (or preference-disabled) state: drop a still-pending alert,
       // retract a delivered one.
@@ -153,13 +201,14 @@ export class NotificationCoordinator<H = unknown> {
     this.cancelPending(id);
     const alert: Alert = {
       agent: agent.agent,
-      label: paneName(agent),
+      label: pushName(agent),
       place: panePlace(agent),
       // SAFETY: `onTransition` is only reached for a status the prefs call notifiable, and the
       // notifiable set IS `NotifiableStatus` (blocked/done) — `isNotifiable` returns false for
       // every other member of `AgentStatus`, so this branch cannot be entered with one.
       status: to as NotifiableStatus,
     };
+    if (cause === "ask" && to === "blocked") alert.ask = true;
     const handle = this.clock.schedule(() => {
       this.pending.delete(id);
       this.outstanding.set(id, alert);
@@ -225,10 +274,12 @@ export class NotificationCoordinator<H = unknown> {
     const entries = [...this.outstanding.entries()];
     if (entries.length === 1) {
       const [paneId, a] = entries[0]!;
-      const verb = a.status === "blocked" ? "needs you" : "is done";
       // One outstanding agent → deep-link straight to its pane on tap.
+      // An ask's push is GENERIC by rule: the pane's push name and nothing of the ask, because the
+      // ask's title and its tool line are the program's words and can carry a path or a command.
+      const title = a.ask === true ? pushTitle("ask.permission", { pane: a.label }) : pushTitle(a.status === "blocked" ? "agent.blocked" : "agent.done", { agent: a.agent });
       return {
-        title: `${a.agent} ${verb}`,
+        ...title,
         // The PLACE, and nothing else. A push says the same two things the screens say — what it is
         // called (the title, above) and where it sits — so the notification and the dashboard row it
         // deep-links to read alike. The cwd is deliberately gone: a full absolute path on a lock
@@ -243,12 +294,8 @@ export class NotificationCoordinator<H = unknown> {
     const n = alerts.length;
     const allBlocked = alerts.every((a) => a.status === "blocked");
     const allDone = alerts.every((a) => a.status === "done");
-    const title = allBlocked
-      ? `${n} agents need you`
-      : allDone
-        ? `${n} agents done`
-        : `${n} agents need attention`;
-    return { title, body: digestLabels(alerts).join(", "), renotify };
+    const code = allBlocked ? "herd.blocked" : allDone ? "herd.done" : "herd.mixed";
+    return { ...pushTitle(code, { count: n }), body: digestLabels(alerts).join(", "), renotify };
   }
 
   private cancelPending(id: string): void {

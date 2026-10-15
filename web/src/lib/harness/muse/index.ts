@@ -1,5 +1,5 @@
 // The Muse harness adapter — Tier 1 chrome + Tier-2 approval / single-select / multi-select /
-// trust lifts for Muse Code 1.3.0 (agent string "muse").
+// trust lifts for Muse Code 1.3.x–1.4.7 (agent string "muse").
 //
 // The TUI this reads (see DIALOG_NOTES.md beside this file for the full probe log):
 //
@@ -9,23 +9,29 @@
 //     ❯ <draft…>                       (bare while a dialog owns the keyboard)
 //       <continuations…>
 //     ─────────────────                 (full-width bottom rule)
+//     main · … / ├/└ <task>             (background-tasks popup, §5 — tolerated
+//                                        chrome while tasks exist, never lifted)
 //       muse-spark-1.3 · …              (opaque statusline)
 //
-//   - Approval REPLACES the box (no ❯ row): `Would you like to run the following command?` + `$` /
-//     `Stage N/M` / `Current argv:` subject + `› N.` options. Digit alone (family `permission`).
+//   - Approval REPLACES the box (no ❯ row): command (`Would you like to run the following
+//     command?` + `$` / `Stage N/M` / `Current argv:`) or network (`Would you like to allow this
+//     network access?` + `network:` / `full URL:`) + `›`/`⟩ N.` options + a static 1.4.7 hint row.
+//     Digit alone (family `permission`).
 //   - Questions LEAVE the bare ❯ under them: `Request user input` header (live timer — anchors
-//     detection, never enters a signature) + question + `› N.` options + footer. Digits MOVE the
-//     pointer; Enter selects (family `select`, keys [digit, Enter]).
+//     detection, never enters a signature) + question + `›`/`⟩ N.` options + footer (a multi-
+//     question dialog adds an `N of M` progress row above it). Digits MOVE the pointer; Enter
+//     selects (family `select`, keys [digit, Enter]).
 //   - Checkbox adds `[ ]`/`[x]` prefixes + a numbered `Submit answer (N checked)` row and a review
-//     phase (`Review answers before submit` + `> Submit answers` / `Interrupt turn`). Pointer-mode
+//     phase (`Review answers before submit` + `⟩ Submit answers` / `Interrupt turn`). Pointer-mode
 //     choreography throughout (`toggle`/`submit: "pointer"`): digit-jump + verified Enter to toggle,
 //     a verified pointer walk + freshly-bound Enter to submit — review swallows digits entirely.
 //   - Trust is pre-session (no chrome at all): `Do you trust this workspace?` + period-less `N  Label`
 //     options. Digit alone (family `trust`).
 //
 // Registering this adapter flips Muse panes off one-shot sends onto the guarded reply path:
-// type-then-verify against `extractInputDraft`, with the paste-token supplement (paste.ts) for the
-// per-line `[Pasted Content N chars]` collapse. Three accepted tradeoffs are stated here because
+// type-then-verify against `extractInputDraft`, with two supplements: the paste token (paste.ts)
+// for the per-line `[Pasted Content N chars]` collapse, and the attach chips and quoted paths
+// (attach.ts) for a typed path Muse rewrites in place. Three accepted tradeoffs are stated here because
 // they are load-bearing for review:
 //
 //   1. Signatures run question → dialog end with NO transcript lookback. The transcript rows above
@@ -33,25 +39,33 @@
 //      tap. Cost: two consecutive byte-identical dialogs share one signature, so a tap on the first
 //      may land on the second — the same command/answer the user consented to. Same bargain on all
 //      four dialogs.
-//   2. The palette, `/resume` picker, `/tasks` drawer and `/workflows` room are unmeasured (outside
+//   2. The `/resume` picker, `/tasks` drawer and `/workflows` room are unmeasured (outside
 //      the dialog notes' scope): if one leaves a live ❯ below it, the pre-flight types into it and type-then-verify
 //      withholds the submit key (a stall, not a misfire — the backstop holds where the pre-flight
-//      cannot see). See composerReady.
+//      cannot see). See composerReady. (The drawer's INLINE sibling, the background-tasks popup
+//      between the bottom rule and the statusline, IS measured — DIALOG_NOTES.md §5 — and is
+//      tolerated as chrome rather than lifted, because the composer stays live under it.) The
+//      slash palette is measured narrowly (#276): one
+//      suggestion row naming the exact slash-led prompt reads as the prompt alone (Enter submits
+//      the exact match); partial or multi-row palettes keep the stalling read, because Enter
+//      there accepts the suggestion rather than submitting the typed text.
 //   3. An open `Note (optional):` row declines its dialog to raw (it owns the keyboard — probed) and
 //      fails the composer gate, so the phone shows the mirror and the keys pad, never buttons.
 
 import { lineText, trimTrailingBlank, type Block, type StyledLine } from "../../blocks";
 import type { HarnessAdapter } from "../types";
 import { detectApprovalRegion } from "./approval";
+import { museAttachCarriesSend } from "./attach";
 import { detectCheckboxRegion } from "./checkbox";
 import {
   composerPrompt,
   composerReady,
   extractInputDraft,
   extractStatusLines,
+  regionReachesTail,
   stripChrome,
 } from "./chrome";
-import { askHeaderDirectlyAbove, boxHoldsNoDraft, isVoiceRule, rstrip } from "./markers";
+import { askHeaderDirectlyAbove, boxHoldsNoDraft, isVoiceRule, locateTail, rstrip } from "./markers";
 import { museDraftIsOpaque, musePasteCarriesSend } from "./paste";
 import { detectQuestionRegion } from "./question";
 import { detectTrustRegion } from "./trust";
@@ -77,7 +91,7 @@ import { detectTrustRegion } from "./trust";
 export function museBuildBlocks(lines: StyledLine[]): Block[] {
   const approval = detectApprovalRegion(lines);
   if (approval !== null) {
-    return lift(lines, approval.startLine, {
+    return lift(lines, approval.startLine, approval.model.signature, {
       kind: "prompt-select",
       prompt: approval.model,
       lines: lines.slice(approval.startLine),
@@ -86,7 +100,7 @@ export function museBuildBlocks(lines: StyledLine[]): Block[] {
   const question = detectQuestionRegion(lines);
   if (question !== null) {
     if (!boxHoldsNoDraft(lines)) return unlifted(lines);
-    return lift(lines, question.startLine, {
+    return lift(lines, question.startLine, question.model.signature, {
       kind: "prompt-select",
       prompt: question.model,
       lines: lines.slice(question.startLine),
@@ -99,7 +113,7 @@ export function museBuildBlocks(lines: StyledLine[]): Block[] {
       boxHoldsNoDraft(lines) &&
       (checkbox.model.phase !== "review" || askHeaderDirectlyAbove(texts, checkbox.startLine));
     if (!live) return unlifted(lines);
-    return lift(lines, checkbox.startLine, {
+    return lift(lines, checkbox.startLine, checkbox.model.regionSignature, {
       kind: "multi-select",
       multi: checkbox.model,
       lines: lines.slice(checkbox.startLine),
@@ -107,7 +121,11 @@ export function museBuildBlocks(lines: StyledLine[]): Block[] {
   }
   const trust = detectTrustRegion(lines);
   if (trust !== null) {
-    return lift(lines, trust.startLine, { kind: "prompt-select", prompt: trust.model, lines: lines.slice(trust.startLine) });
+    return lift(lines, trust.startLine, trust.model.signature, {
+      kind: "prompt-select",
+      prompt: trust.model,
+      lines: lines.slice(trust.startLine),
+    });
   }
   return unlifted(lines);
 }
@@ -123,8 +141,13 @@ const FRAME_SCAN_ROWS = 12;
 
 /** The rows above `startLine` as a raw block, then the lifted dialog. The Voice rule an approval
  *  draws above its question is the composer's frame, not the dialog's subject, so the last one in
- *  reach is dropped from that block. */
-function lift(lines: StyledLine[], startLine: number, dialog: Block): Block[] {
+ *  reach is dropped from that block.
+ *
+ *  A dialog whose bound `region` the bridge cannot find in its tail window is not lifted at all
+ *  ({@link regionReachesTail}): every tap on it would be refused, so the screen stays raw and keeps
+ *  the unread-dialog card and its Escape, the answer it had before the tasks popup was read. */
+function lift(lines: StyledLine[], startLine: number, region: string, dialog: Block): Block[] {
+  if (!regionReachesTail(lines, region)) return unlifted(lines);
   let before = lines.slice(0, startLine);
   for (let i = before.length - 1; i >= 0 && before.length - 1 - i < FRAME_SCAN_ROWS; i--) {
     if (isVoiceRule(rstrip(lineText(before[i]!)))) {
@@ -134,6 +157,18 @@ function lift(lines: StyledLine[], startLine: number, dialog: Block): Block[] {
   }
   before = trimTrailingBlank(before);
   return before.length > 0 ? [{ kind: "raw", lines: before }, dialog] : [dialog];
+}
+
+/**
+ * Positive evidence that Muse's own TUI owns the tail, for the unread-dialog card (.adr/0053, addendum
+ * 2026-09-26): its bottom rule and statusline are there (`locateTail`). Every Muse dialog keeps them,
+ * the approval that replaces the box and the tasks popup between them included, while the shell after
+ * exit (`muse resume <id>`) and the banner Muse paints before its composer have neither, so the card
+ * no longer flashes over them (harness canary 2026-10-12, Muse 1.4.6). `composerReady` has already
+ * answered false by the time this is asked, so the frame is there and its box does not hold the keys.
+ */
+function museModalOnScreen(lines: StyledLine[]): boolean {
+  return locateTail(lines) !== null;
 }
 
 /**
@@ -152,9 +187,18 @@ export const museAdapter: HarnessAdapter = {
   // it does not always dismiss the request — which is why the card's caption names the key and never
   // promises "cancel".
   cancelKey: "Escape",
+  modalOnScreen: museModalOnScreen,
   extractInputDraft,
   extractStatusLines,
   composerPrompt,
-  draftCarriesSend: musePasteCarriesSend,
+  // Two token grammars, either of which proves the send landed: the paste collapse and the
+  // attach chips/quotes (#278). Each is sound on its own; the OR only widens evidence.
+  draftCarriesSend: (sent, draft) =>
+    musePasteCarriesSend(sent, draft) || museAttachCarriesSend(sent, draft),
   draftIsOpaque: museDraftIsOpaque,
+  // Muse 1.4.4 swallows an Enter sent within ~60ms of the text (#395); the bridge's own
+  // REPLY_SETTLE_MS in bridge/server.ts is the same 350, which web code cannot import.
+  submitSettleMs() {
+    return 350;
+  },
 };

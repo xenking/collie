@@ -106,10 +106,12 @@ describe("tableRuns — box drawing", () => {
     expect(runs(text)).toEqual([]);
   });
 
-  it("refuses a two-pane chrome box, whose ┬ and ┴ are border joins and not a table", () => {
-    // The shape that made omp's splash screen and its whole /model picker pan: a divider between two
-    // panes meets the lid at ┬ and the floor at ┴, and neither is a cross. 18 of the 121 committed
-    // pane fixtures were claimed this way. Only a ┼ anchors a run.
+  it("claims a two-pane box, whose ┬ and ┴ are a column boundary meeting a border", () => {
+    // REVERSED by ADR 0072, and this case is the reversal. A tee used to refuse the run on the
+    // reasoning that only a table draws a `┼`. True, and the wrong test: a two-pane box draws its
+    // divider meeting a border instead, so the rule refused every two-pane box there is. Refusing it
+    // does not leave the box wrapping. `FRAME_ROW` in blocks.ts clips a `│ … │` row, so the second
+    // pane was simply unreachable on a phone.
     const text = [
       "╭───────────────┬──────────────╮",
       "│ omp 18.1.2    │ opus-5       │",
@@ -117,7 +119,19 @@ describe("tableRuns — box drawing", () => {
       "╰───────────────┴──────────────╯",
     ].join("\n");
 
-    expect(runs(text)).toEqual([]);
+    expect(runs(text)).toEqual([{ start: 0, end: 3 }]);
+  });
+
+  it("still refuses a lone tee with no box under it", () => {
+    // The anchor alphabet widened; the three rules that keep it honest did not. A run of one row is
+    // discarded, so a frame row carrying a tee claims nothing on its own.
+    expect(runs(["╭───────┬───────╮", "", "some prose"].join("\n"))).toEqual([]);
+  });
+
+  it("still refuses a sentence that happens to contain a tee", () => {
+    // The anchor row must be a PURE frame row. This is the rule the old glyph test was leaning on a
+    // rare character to do for it.
+    expect(runs(["the ┬ glyph is a tee", "and this is prose too"].join("\n"))).toEqual([]);
   });
 
   it("keeps a titled lid in the run, though its letters stop it being a pure frame row", () => {
@@ -148,6 +162,21 @@ describe("tableRuns — box drawing", () => {
     ].join("\n");
 
     expect(runs(text)).toEqual([{ start: 0, end: 3 }]);
+  });
+
+  it("claims a table whose cells hold double-width characters, matching walls by terminal column", () => {
+    // Each ideograph is two terminal columns and one string index, so the walls of a CJK row stand at
+    // the anchor's COLUMN but not at its index. Matched by index, no row joined and the table wrapped
+    // into the stacked rules a phone cannot read (grok--reply-table-scrollbar.txt is the real one).
+    const text = [
+      "┌──────────┬────────┐",
+      "│ 用水位置 │ 建議   │",
+      "├──────────┼────────┤",
+      "│ 廚房     │ 淨水   │",
+      "└──────────┴────────┘",
+    ].join("\n");
+
+    expect(runs(text)).toEqual([{ start: 0, end: 4 }]);
   });
 
   it("refuses a neighbouring box whose walls stand somewhere else", () => {
@@ -234,10 +263,13 @@ describe("tableRuns — the empty result", () => {
 
 // The corpus gate. Every other grammar in this repo is developed against the byte-faithful captures
 // in fixtures/panes (harness/claude/prompt-select.test.ts, harness/conformance.ts), and this one
-// needs it more than most: an earlier anchor alphabet that accepted a `┬` claimed omp's welcome
-// splash and the WHOLE of its /model picker across 18 of these files, and every hand-written test
-// above still passed. Globbing rather than listing means a newly captured screen is covered the day
-// it lands.
+// needs it more than most: the anchor alphabet is one character class, and widening it by one glyph
+// silently changes what every screen in the corpus does. Globbing rather than listing means a newly
+// captured screen is covered the day it lands.
+//
+// The list below is EXHAUSTIVE on purpose, not a count. It is the whole answer to "what pans", and a
+// screen joining it is a diff a person has to read. ADR 0072 was taken by running this gate before
+// the change and reading exactly which screens moved.
 describe("tableRuns — the whole pane corpus", () => {
   const DIR = join(import.meta.dirname, "..", "fixtures", "panes");
 
@@ -252,13 +284,116 @@ describe("tableRuns — the whole pane corpus", () => {
       }
     }
 
-    // The one real table in the corpus: the Bluefin motd's `Command │ Description` two-column list,
-    // sitting in the scrollback above Claude's trust prompt — 200 columns wide in the 2026-07-04
-    // capture, 120 in the 2026-09-22 one. Everything else here is chrome — splashes, pickers,
-    // permission dialogs, wizards — and must keep wrapping.
+    // THE ONE REAL TABLE. The Bluefin motd's `Command │ Description` two-column list, sitting in the
+    // scrollback above Claude's trust prompt — 200 columns wide in the 2026-07-04 capture, 120 in the
+    // 2026-09-22 one. It anchors on a cross, as it always did.
+    //
+    // EVERYTHING ELSE HERE IS A TWO-PANE BOX, claimed since ADR 0072, and each one is a screen whose
+    // right-hand pane a phone could not reach before. `FRAME_ROW` in blocks.ts clips a `│ … │` row
+    // rather than wrapping it, so refusing these did not make them wrap, it made half of each one
+    // invisible. They pan now.
     expect(claimed).toEqual([
+      // A Claude Code box table with `⚠️` (VS16) in a cell. Claude pads it two columns wide, so with
+      // a base-only width that row's walls missed and the table split around it.
+      "claude--box-table-vs16-emoji.txt 0..10",
       "claude--trust-prompt-unnumbered.txt 5..10",
       "claude--trust-prompt.txt 5..10",
+      // THE SCREEN ADR 0072 WAS TAKEN FOR (discussion #301). Claude's dynamic-workflow view: the
+      // phase list on the left, the running agents on the right, 226 columns wide. The reporter saw
+      // it on a phone as a band of stacked rules with `· 74…` cut off the right edge, which is what
+      // clipping every `│ … │` row looks like when the box is wider than the screen. Its lid is
+      // TITLED (`╭ Phases ───┬ Read the corpus · 1 agent ───╮`) so the letters in it stop it being a
+      // pure frame row and it cannot be the anchor; the floor `╰───┴───╯` anchors instead and the run
+      // grows up through the whole box.
+      "claude--workflow-view.txt 8..59",
+      // Grok's replies with a Chinese table, claimed since walls are matched by terminal column
+      // rather than string index. Each run is the table and nothing else: both start at the header row
+      // (the lid scrolled out of the capture) and the highlighted one stops above the floor of Grok's
+      // highlight frame.
+      "grok--reply-table-highlighted.txt 9..26",
+      "grok--reply-table-scrollbar.txt 9..26",
+      // omp's welcome splash: the logo on the left, Tips / LSP servers / Recent sessions on the right.
+      // It sits in the scrollback of most omp captures, which is why it appears so often and always
+      // at the same rows. The menus and dialogs BELOW it are not claimed, and that is the point: the
+      // run stops where the box does.
+      //
+      // Absent from this list since .adr/0076: every omp modal that prints its own way out and that no
+      // grammar lifts (the `/model` picker, the Ask tool's multi-select screens) gets the unread-dialog
+      // card, which mirrors the whole pane in its own horizontally scrolling region instead of a raw
+      // block, so no raw block carries a table run there. That includes the `/model` box ADR 0072 once
+      // panned, which scrolls as part of the card's mirror, as Claude's generic-menu card always has.
+      //
+      // Back on this list since .adr/0077: the Ask tool's one-question single-select dialog is a
+      // `prompt-select` card now, and the transcript above it is an ordinary raw block again, splash
+      // included. The note editor `n` opens is an input, not a modal, so it never had the card.
+      //
+      // Back on this list since .adr/0078, for the same reason: the three omp 18.1.17 tool-approval
+      // screens are a `prompt-select` card now. The five 18.4.10 approval captures are not here because
+      // their splash has scrolled out of the buffer.
+      //
+      // Back on this list since .adr/0079, for the same reason again: the compact model picker's
+      // session state is a `prompt-select` card, so the splash above it is a raw block. Its splash is
+      // shorter (rows 2 to 14), drawn in the sandbox the picker was captured in. The 74-column capture
+      // is here although it is declined: omp clipped its footer, so no card stands over it either. The
+      // 103-column captures are absent because their splash has scrolled out, and the four declined
+      // states with a way out take the card.
+      "omp--approval-bash.txt 2..20",
+      "omp--approval-write--deny.txt 2..20",
+      "omp--approval-write.txt 2..20",
+      "omp--done--tool-result.txt 2..20",
+      "omp--done.txt 2..20",
+      "omp--draft-ghost-suggestion-busy.txt 2..20",
+      "omp--draft-ghost-suggestion.txt 2..20",
+      "omp--draft-single.txt 2..20",
+      "omp--draft-wrapped.txt 2..20",
+      "omp--fresh-idle.txt 2..20",
+      "omp--menu-dismissed.txt 2..20",
+      "omp--select-menu-moved.txt 2..20",
+      "omp--select-menu.txt 2..20",
+      "omp--slash-palette--filtered.txt 2..20",
+      "omp--slash-palette.txt 2..20",
+      "omp--tree.txt 2..20",
+      "omp--v18-4-ask-note-editor.txt 2..20",
+      "omp--v18-4-ask-single-moved.txt 2..20",
+      "omp--v18-4-ask-single.txt 2..20",
+      "omp--v18-4-borderless-draft.txt 2..20",
+      "omp--v18-4-borderless-idle.txt 2..20",
+      "omp--v18-4-borderless-wrapped.txt 2..20",
+      "omp--v18-4-claude-draft.txt 2..20",
+      "omp--v18-4-claude-idle.txt 2..20",
+      "omp--v18-4-claude-titled-draft.txt 2..20",
+      "omp--v18-4-claude-titled.txt 2..20",
+      "omp--v18-4-claude-wrapped.txt 2..20",
+      "omp--v18-4-composer-idle.txt 2..20",
+      "omp--v18-4-switch-clipped.txt 2..14",
+      "omp--v18-4-switch-moved-up.txt 2..14",
+      "omp--v18-4-switch-moved.txt 2..14",
+      "omp--v18-4-switch-narrow-moved.txt 2..14",
+      "omp--v18-4-switch-narrow.txt 2..14",
+      "omp--v18-4-switch-overcontext-moved.txt 2..14",
+      "omp--v18-4-switch-overcontext.txt 2..14",
+      "omp--v18-4-switch-ptr-fable.txt 2..20",
+      "omp--v18-4-switch-ptr-haiku.txt 2..20",
+      "omp--v18-4-switch-ptr-opus-current.txt 2..20",
+      "omp--v18-4-switch-ptr-sonnet.txt 2..20",
+      "omp--v18-4-switch-roles-chips.txt 2..14",
+      "omp--v18-4-switch-search-short-moved.txt 2..14",
+      "omp--v18-4-switch-search-short.txt 2..14",
+      "omp--v18-4-switch-search-son.txt 2..20",
+      "omp--v18-4-switch-search.txt 2..14",
+      "omp--v18-4-switch-top-edge.txt 2..14",
+      "omp--v18-4-switch-top.txt 2..14",
+      "omp--v18-4-switch-wrapped.txt 2..14",
+      "omp--v18-4-switch.txt 2..14",
+      "omp--v18-4-tree.txt 2..20",
+      "omp--v18-rule-draft.txt 2..20",
+      "omp--v18-rule-idle.txt 2..20",
+      "omp--v18-rule-wrapped.txt 2..20",
+      "omp--working.txt 2..20",
+      // A box table printed by a shell in a Herdr 0.9.3 pane, with ⚠️ and ❤️ (a text-default emoji
+      // plus U+FE0F) in boxed rows. Herdr draws each one two columns wide, so every wall after them
+      // stands where the anchor's junctions do. Scoring them as one column wrapped the table again.
+      "shell--box-table-vs16-emoji.txt 2..9",
     ]);
   });
 });

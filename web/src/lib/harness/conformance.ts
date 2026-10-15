@@ -14,7 +14,9 @@
 //   3. KEY-GRAMMAR VALIDITY — every keystroke any interactive block can emit is a valid Herdr
 //      `pane.send_keys` key (HERDR_API.md §"send_keys key grammar"): a single literal char, a bare
 //      special key, or a `+`-joined modifier chord. Multi-char digit runs ("10") and the paging/edit
-//      keys (PageUp/Home/End/Delete) are rejected — Herdr answers those with `invalid_key`.
+//      keys (PageUp/Home/End/Delete) are rejected — Herdr answers those with `invalid_key`. A key
+//      plan a model declares as data (`advanceKeys`, a review's `submitKeys`/`cancelKeys`/`backKeys`)
+//      must also be non-empty, since a button bound to an empty plan sends nothing.
 //   4. THE GENERIC MODAL CONTRACT — for any fixture that lifts a `menu` block: every action key came
 //      out of the shared whitelist (menu-hints.ts) and none is a digit (.adr/0009), the model carries
 //      a non-empty signature that MOVES when the region's text does (it is the whole race guard), and
@@ -28,18 +30,39 @@
 //      (lib/dialog-guard.ts) leans on to refuse a tap on a stale render; an adapter that emits a
 //      constant signature would disable it silently. A kind the adapter never emits registers a todo.
 //
+//   6. THE WALK PAIRS (ADR 0080 point 5, harness/walk-pairs.ts): a grammar whose pointed list is walked
+//      must keep its dialog's identity while the pointer moves: the corpus must hold two real captures
+//      of the dialog with the pointer on different rows, and they must be `promptsSameIdentity`. The
+//      ratchet fails for any fixture whose grammar has neither such a pair nor a listed gap.
+//
 // Pure + offline: it drives the adapter over the byte-faithful fixture corpus (web/src/fixtures/
 // panes/*.txt) through the same parseAnsi → splitLines pipeline the renderer uses. It never touches
 // a pane or the network (guard.ts owns that), so it can gate a read-only Tier-1 lift from fixtures
 // alone.
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { parseAnsi } from "../ansi";
-import { lineText, splitLines, type Block, type StyledLine } from "../blocks";
+import { displayWidth } from "../text-width";
+import { lineText, splitLines, type Block, type MultiSelectModel, type StyledLine } from "../blocks";
 import type { HarnessAdapter } from "./types";
+import {
+  identityDiff,
+  promptsEqual,
+  promptsSameIdentity,
+  sameKeys,
+  splitWalk,
+  type PromptModel,
+} from "./prompt-model";
+import { WALK_GAPS, WALK_PAIRS, walkGroupKey } from "./walk-pairs";
+// The bridge's own verifier, imported so the phone's `styledSignature` is checked against what the
+// bridge really computes from the same bytes (a web test may import the bridge's pure modules; the
+// bridge imports web/src/lib/styled-region.ts the other way, and neither pulls a cycle).
+import { verifyExpectedStyled, verifyPromptBinding } from "../../../../bridge/prompt-binding.ts";
+import { cropRawColumns, type ColumnRange } from "../column-range";
+import { trailingTaskChecklistStart } from "../task-checklist";
 import {
   DIALOG_CONTRACT,
   dialogComparators,
@@ -67,8 +90,12 @@ import {
 // sits one level ABOVE the per-detector tests, so it's two ".."s to src, not three.
 const PANES_DIR = join(import.meta.dirname, "..", "..", "fixtures", "panes");
 
+function loadRaw(name: string): string {
+  return readFileSync(join(PANES_DIR, name), "utf8");
+}
+
 function loadLines(name: string): StyledLine[] {
-  return splitLines(parseAnsi(readFileSync(join(PANES_DIR, name), "utf8")));
+  return splitLines(parseAnsi(loadRaw(name)));
 }
 
 // A single unstyled visual line — the minimum an AnsiSegment needs (no colour flags). Used to
@@ -156,12 +183,45 @@ function modelsIn<K extends DialogKind>(blocks: Block[], kind: K): DialogModels[
   });
 }
 
-/** Append a marker to line `i`, keeping every existing segment (and its styling — the wizard's
- *  current chip is marked ONLY by a background colour, so a re-synthesised plain line would change
- *  more than the text). */
-function perturbLine(lines: StyledLine[], i: number): StyledLine[] {
+/** Change one letter of line `i` that lies inside `columns`, keeping its width and every style. A model
+ *  read from a column range (`bindColumns`) ignores what lies outside it, so the marker
+ *  {@link perturbLine} appends at the row's end would land beside the dialog, not in it. Null when
+ *  the row has no ASCII letter in range. */
+function perturbLineInColumns(lines: StyledLine[], i: number, columns: ColumnRange): StyledLine[] | null {
+  let column = 0;
+  const segments = lines[i]!.segments;
+  for (let s = 0; s < segments.length; s++) {
+    const chars = Array.from(segments[s]!.text);
+    for (let c = 0; c < chars.length; c++) {
+      if (column >= columns.start && column < columns.end && /[a-z]/.test(chars[c]!)) {
+        chars[c] = chars[c] === "q" ? "x" : "q";
+        const copy = [...lines];
+        copy[i] = { ...lines[i]!, segments: segments.with(s, { ...segments[s]!, text: chars.join("") }) };
+        return copy;
+      }
+      column += displayWidth(chars[c]!);
+    }
+  }
+  return null;
+}
+
+/** Change visible text without discarding style-only dialog identity. The in-text probe keeps
+ * fixed-width borders intact when appending outside the box would invalidate the grammar. */
+function perturbLine(lines: StyledLine[], i: number, withinText: boolean): StyledLine[] {
+  const segments = [...lines[i]!.segments];
+  if (withinText) {
+    const at = segments.findLastIndex((segment) => /[\p{L}\p{N}]/u.test(segment.text));
+    if (at < 0) return lines;
+    const segment = segments[at]!;
+    segments[at] = {
+      ...segment,
+      text: segment.text.replace(/[\p{L}\p{N}]/u, (char) => char === "z" ? "x" : "z"),
+    };
+  } else {
+    segments.push({ text: " zqx", style: {}, muted: false });
+  }
   const copy = [...lines];
-  copy[i] = { segments: [...lines[i]!.segments, { text: " zqx", style: {}, muted: false }] };
+  copy[i] = { segments };
   return copy;
 }
 
@@ -198,7 +258,9 @@ function perturbRegion<K extends DialogKind>(
   const start = lines.length - region.lines.length; // the region is the buffer's tail slice
   const footer = lastNonBlank(lines);
   const signature = DIALOG_CONTRACT[kind].signature;
-  const before = signature(modelsIn(blocks, kind).at(-1)!);
+  const tapped = modelsIn(blocks, kind).at(-1)!;
+  const before = signature(tapped);
+  const columns = dialogComparators(kind).columns?.(tapped);
 
   const candidates = [
     ...range(start, lines.length), // the region itself, top-down
@@ -207,9 +269,14 @@ function perturbRegion<K extends DialogKind>(
   for (const i of candidates) {
     if (i === footer) continue;
     if (lineIsBlank(lines[i]!)) continue;
-    const after = modelsIn(adapter.buildBlocks(perturbLine(lines, i)), kind);
-    if (after.length !== count) continue; // this row is load-bearing for detection — try another
-    if (signature(after.at(-1)!) !== before) return after.at(-1)!;
+    for (const withinText of [false, true]) {
+      const perturbed =
+        columns === undefined ? perturbLine(lines, i, withinText) : perturbLineInColumns(lines, i, columns);
+      if (perturbed === null) continue;
+      const after = modelsIn(adapter.buildBlocks(perturbed), kind);
+      if (after.length !== count) continue; // this row is load-bearing for detection — try another
+      if (signature(after.at(-1)!) !== before) return after.at(-1)!;
+    }
   }
   return null;
 }
@@ -292,16 +359,16 @@ export function emittableKeys(block: Block): string[] | null {
     case "prompt-select":
       return block.prompt.options.flatMap((o) => o.keys);
     case "wizard": {
-      // Both phases can navigate steps; the review phase's controls ARE submit(1)/cancel(2).
-      const controls = [
-        ...WIZARD_BACK_KEYS,
-        ...WIZARD_NEXT_KEYS,
-        ...WIZARD_SUBMIT_KEYS,
-        ...WIZARD_CANCEL_KEYS,
-      ];
+      // Both phases can navigate steps; the review phase's controls ARE submit/cancel, the plans the
+      // model declares or the 1/2 constants.
+      const nav = [...WIZARD_BACK_KEYS, ...WIZARD_NEXT_KEYS];
       return block.wizard.phase === "question"
-        ? [...block.wizard.options.flatMap((o) => o.keys), ...controls]
-        : controls;
+        ? [...block.wizard.options.flatMap((o) => o.keys), ...nav, ...WIZARD_SUBMIT_KEYS, ...WIZARD_CANCEL_KEYS]
+        : [
+            ...nav,
+            ...(block.wizard.submitKeys ?? WIZARD_SUBMIT_KEYS),
+            ...(block.wizard.cancelKeys ?? WIZARD_CANCEL_KEYS),
+          ];
     }
     case "preview-select": {
       // preview-action.ts's recipe: a digit moves the pointer, Enter selects, `n` opens the note
@@ -321,8 +388,9 @@ export function emittableKeys(block: Block): string[] | null {
     case "multi-select":
       // checkbox: a digit toggles each option (and the "Chat about this" escape) in digit mode, or
       // jumps the pointer there in pointer mode — either way the digits ride plus Up/Down/Enter.
-      // review: the confirm screen's `1. Submit answers / 2. Cancel` in digit mode, or a pointer
-      // walk + Enter in pointer mode.
+      // A declared `advanceKeys` plan rides too. review: the confirm screen's `1. Submit answers /
+      // 2. Cancel` in digit mode, a pointer walk + Enter in pointer mode, or the declared plans in
+      // keys mode, plus the declared way back.
       if (block.multi.phase === "checkbox") {
         return [
           ...block.multi.options.map((o) => String(o.n)),
@@ -330,9 +398,10 @@ export function emittableKeys(block: Block): string[] | null {
           "Up",
           "Down",
           "Enter",
+          ...(block.multi.advanceKeys ?? []),
         ];
       }
-      return block.multi.submit === "pointer" ? ["Up", "Down", "Enter"] : ["1", "2"];
+      return [...reviewActionKeys(block.multi), ...(block.multi.backKeys ?? [])];
     case "menu":
       // The generic grammar emits ONLY the keys the screen's own footer named, plus the arrows it
       // advertised. Walking `actions` here is what pins .adr/0009's ban in CI: a digit can only
@@ -363,6 +432,67 @@ export function emittableKeys(block: Block): string[] | null {
   }
 }
 
+/** The keys a multi-select review's submit and cancel can send, per its `submit` recipe. */
+function reviewActionKeys(multi: Extract<MultiSelectModel, { phase: "review" }>): string[] {
+  if (multi.submit === "pointer") return ["Up", "Down", "Enter"];
+  if (multi.submit === "keys") return [...multi.submitKeys, ...multi.cancelKeys];
+  return ["1", "2"];
+}
+
+/**
+ * Every key PLAN a block's model declares as data, named by field — as opposed to the plans the
+ * action modules derive from rows or constants. Each is sent as one write, so an empty plan is a
+ * button that sends nothing, and the suite refuses it (every key in it is also walked by
+ * {@link emittableKeys}, which refuses an empty string). Kinds that declare no plans return none.
+ */
+export function declaredKeyPlans(block: Block): { field: string; keys: string[] }[] {
+  const plans: { field: string; keys: string[] | undefined }[] = [];
+  if (block.kind === "multi-select" && block.multi.phase === "checkbox") {
+    plans.push({ field: "advanceKeys", keys: block.multi.advanceKeys });
+  }
+  if (block.kind === "multi-select" && block.multi.phase === "review") {
+    plans.push(
+      { field: "submitKeys", keys: block.multi.submitKeys },
+      { field: "cancelKeys", keys: block.multi.cancelKeys },
+      { field: "backKeys", keys: block.multi.backKeys },
+    );
+  }
+  if (block.kind === "wizard" && block.wizard.phase === "review") {
+    plans.push(
+      { field: "submitKeys", keys: block.wizard.submitKeys },
+      { field: "cancelKeys", keys: block.wizard.cancelKeys },
+    );
+  }
+  return plans.flatMap((p) => (p.keys === undefined ? [] : [{ field: p.field, keys: p.keys }]));
+}
+
+/** The index of the one option whose plan is a bare Enter (the pointed offered row), or null. A label
+ *  would not do: two sessions in a resume list can share a title. */
+function enterIndex(model: PromptModel): number | null {
+  const at = model.options.findIndex((o) => sameKeys(o.keys, ["Enter"]));
+  return at < 0 ? null : at;
+}
+
+/** Whether any option's plan is a real walk: arrows then Enter, at least one arrow. */
+function hasWalkedPlan(model: PromptModel): boolean {
+  return model.options.some((o) => (splitWalk(o.keys)?.walk.length ?? 0) > 0);
+}
+
+/**
+ * Every fixture in the whole corpus that `adapter` lifts into a `prompt-select` model with a walked
+ * plan, and that model (the last one at the tail). Read off the adapter over EVERY capture, not off a
+ * test file's cohort lists, so a grammar cannot leave its walked dialogs out of the ratchet by filing
+ * their captures elsewhere. Another adapter's capture lifts nothing here: that is the fail-closed leg.
+ */
+function walkedFixtures(adapter: HarnessAdapter): Map<string, PromptModel> {
+  const out = new Map<string, PromptModel>();
+  for (const name of readdirSync(PANES_DIR).filter((f) => f.endsWith(".txt")).toSorted()) {
+    const model = modelsOf(adapter, name, "prompt-select").at(-1);
+    if (model !== undefined && hasWalkedPlan(model)) out.set(name, model);
+  }
+  return out;
+}
+
 /**
  * Register the conformance invariants for `adapter` against its fixture cohorts:
  *  - `ownFixtures`     — this adapter's dialog captures (EACH must lift ≥1 interactive block).
@@ -380,8 +510,8 @@ export function describeAdapterConformance(
     ownFixtures: string[];
     foreignFixtures: string[];
     neutralFixtures: string[];
-    /** Captures where the composer is ready but no region can bind, because the harness repaints
-     *  the prompt rows between two reads (Codex Astra's starfield). Each one is a named exception
+    /** Captures where the composer is ready but no region can bind: an animated prompt row or one
+     *  outside the bridge's tail window. Each one is a named exception
      *  to "a region exists exactly when the composer is ready": the sweep goes out unbound there,
      *  and the list says so in the test output rather than in a silent null. */
     unboundComposerFixtures?: string[];
@@ -435,7 +565,7 @@ export function describeAdapterConformance(
         const ready = adapter.composerReady.bind(adapter);
         for (const name of all) {
           if (unbound.includes(name)) {
-            it(`${name}: the composer is ready, and no region binds (animated prompt rows)`, () => {
+            it(`${name}: the composer is ready, and no region can bind`, () => {
               const lines = loadLines(name);
               expect(ready(lines)).toBe(true);
               expect(prompt(lines)).toBeNull();
@@ -600,8 +730,18 @@ export function describeAdapterConformance(
             // Submit left 6 rows below the match) until a live toggle caught it. Same normalisation
             // as the composerPrompt leg above: trailing whitespace off, blanks dropped.
             const lines = loadLines(name);
-            const fresh = normalizeRegion(lines.map(lineText).join("\n"));
+            const whole = normalizeRegion(lines.map(lineText).join("\n"));
             for (const model of modelsOf(adapter, name, kind)) {
+              // A model read from a column range is matched, as the bridge matches it, against the
+              // read cut to that range (lib/column-range.ts).
+              const columns = contract.columns?.(model);
+              const read =
+                columns === undefined
+                  ? whole
+                  : normalizeRegion(splitLines(parseAnsi(cropRawColumns(loadRaw(name), columns))).map(lineText).join("\n"));
+              // Nor, as the bridge does not, is a task checklist that ends the read counted against
+              // the tail (lib/task-checklist.ts).
+              const fresh = read.slice(0, trailingTaskChecklistStart(read) ?? read.length);
               const expected = normalizeRegion(contract.region(model));
               const matchEnd = lastMatchEnd(fresh, expected);
               expect(matchEnd, `${name}: the ${kind} region is not on its own screen`).toBeGreaterThan(-1);
@@ -610,6 +750,19 @@ export function describeAdapterConformance(
                 `${name}: ${fresh.length - 1 - matchEnd} non-blank rows sit below the ${kind} region — ` +
                   `the bridge can only bind within the last ${BRIDGE_PROMPT_TAIL_LINES}`,
               ).toBeLessThan(BRIDGE_PROMPT_TAIL_LINES);
+            }
+          });
+
+          // A model that names a column range (`bindColumns`) binds to what the bridge's own verifier
+          // finds in the raw capture after cutting it to that range: the phone's crop and the
+          // bridge's must agree cell for cell.
+          it(`${name}: a ${kind} column range binds to its own raw capture through the bridge's verifier`, () => {
+            for (const model of modelsOf(adapter, name, kind)) {
+              const columns = contract.columns?.(model);
+              if (columns === undefined) continue;
+              expect(verifyPromptBinding(loadRaw(name), contract.region(model), contract.styled?.(model), columns)).toEqual(
+                contract.styled?.(model) === undefined ? { ok: true } : { ok: true, styled: "checked" },
+              );
             }
           });
 
@@ -641,6 +794,165 @@ export function describeAdapterConformance(
       }
     });
 
+    // The pointer-walk shape the action layer relies on (ADR 0080, lib/prompt-action.ts). It splits a
+    // plan with `splitWalk`, sends the arrows, and waits for the tapped row's plan to become exactly
+    // ["Enter"]. That only works if every walk-class plan is one direction of arrows (Up, Down, Left or
+    // Right, whatever the grammar's list runs along) then Enter (a
+    // mixed walk is not a walk of one pointer), and at most one row is the pointed one (two rows
+    // answering to a bare Enter means the pointer is ambiguous and the verify step could pass on the
+    // wrong row).
+    describe("pointer walks (walk, verify, commit)", () => {
+      for (const name of ownFixtures) {
+        const models = modelsOf(adapter, name, "prompt-select");
+        if (models.length === 0) continue;
+        it(`${name}: walk plans are one-direction arrows then Enter, and at most one row is pointed`, () => {
+          for (const model of models) {
+            for (const option of model.options) {
+              const plan = splitWalk(option.keys);
+              if (plan === null) continue;
+              expect(
+                new Set(plan.walk).size,
+                `${name}: "${option.label}" mixes arrow directions in ${JSON.stringify(option.keys)}`,
+              ).toBeLessThanOrEqual(1);
+            }
+            const pointed = model.options.filter((o) => sameKeys(o.keys, ["Enter"]));
+            expect(
+              pointed.length,
+              `${name}: ${pointed.length} rows carry the plan ["Enter"], the pointer is ambiguous`,
+            ).toBeLessThanOrEqual(1);
+          }
+        });
+      }
+    });
+
+    // THE WALK PAIRS (ADR 0080 point 5, harness/walk-pairs.ts). A walked tap reads the screen again
+    // after the arrows and sends Enter only when that read is the SAME dialog (`promptsSameIdentity`)
+    // with the tapped row pointed. A `coreSignature` that kept text which follows the pointer (a detail
+    // row, a description of the highlighted row, a position counter) fails that check after every walk.
+    // Only real captures show it, so the corpus must hold a pair for each grammar that walks.
+    //
+    // Which fixtures count is read off the adapter, not off the cohort lists: every fixture in the
+    // corpus the adapter lifts into a `prompt-select` with a walked plan. A grammar cannot opt out by
+    // leaving its captures out of `ownFixtures`.
+    describe("walk pairs (the pointer moves, the dialog does not)", () => {
+      const walked = walkedFixtures(adapter);
+      const pairs = WALK_PAIRS.filter(([agent]) => agent === adapter.agent);
+
+      if (walked.size === 0) it.todo(`${adapter.agent}: lifts no walked pointer list from the corpus`);
+      for (const [, nameA, nameB] of pairs) {
+        it(`${nameA} <> ${nameB}: the pointer moved, the dialog is the same`, () => {
+          const a = walked.get(nameA);
+          const b = walked.get(nameB);
+          expect(a, `${nameA} is not a walked prompt-select of ${adapter.agent}`).toBeDefined();
+          expect(b, `${nameB} is not a walked prompt-select of ${adapter.agent}`).toBeDefined();
+          expect(
+            walkGroupKey(adapter.agent, a!),
+            `${nameA} and ${nameB} are not one grammar group, so not one dialog`,
+          ).toBe(walkGroupKey(adapter.agent, b!));
+          // The pair must really move the pointer: the row answering to a bare Enter (the pointed
+          // offered row, none while it is on a hidden row) differs. Two captures of one pointer
+          // position would prove nothing.
+          expect(enterIndex(a!), `${nameA} and ${nameB} have the pointer on the same row`).not.toBe(
+            enterIndex(b!),
+          );
+          for (const [name, model] of [[nameA, a!], [nameB, b!]] as const) {
+            const rows = model.options.filter((o) => sameKeys(o.keys, ["Enter"]));
+            expect(rows.length, `${name}: ${rows.length} rows carry the plan ["Enter"]`).toBeLessThanOrEqual(1);
+          }
+          expect(
+            promptsSameIdentity(a!, b!) && promptsSameIdentity(b!, a!),
+            `${nameA} and ${nameB} are one dialog with the pointer on another row, yet are not the same ` +
+              `identity: a walked tap on this grammar answers "changed" and never commits. Its ` +
+              `coreSignature keeps text that follows the pointer (a detail row, a description of the ` +
+              `highlighted row, a position counter). Blank it in the grammar.`,
+          ).toBe(true);
+          // The verdict is the diff: `promptsSameIdentity` is `identityDiff === null`, on the real captures.
+          for (const [x, y] of [[a!, b!], [b!, a!]] as const) {
+            expect(identityDiff(x, y), `${nameA} <> ${nameB}`).toBeNull();
+            expect(promptsSameIdentity(x, y)).toBe(identityDiff(x, y) === null);
+          }
+          expect(promptsEqual(a!, b!), `${nameA} and ${nameB} are byte-identical, not a moved pointer`).toBe(
+            false,
+          );
+          // A pointer drawn only as a style leaves the two signatures EQUAL, so the bridge's text
+          // binding cannot tell the pair apart. Such a grammar must hand the bridge the styled lines
+          // (ADR 0080 point 7), and they must move with the pointer.
+          if (a!.signature === b!.signature) {
+            expect(
+              a!.styledSignature !== undefined && b!.styledSignature !== undefined,
+              `${nameA} and ${nameB}: the pointer is a style: the grammar must set styledSignature so the bridge can bind to it`,
+            ).toBe(true);
+            expect(
+              a!.styledSignature,
+              `${nameA} and ${nameB}: the pointer is a style: the grammar must set styledSignature so the bridge can bind to it, and it must differ between the two pointers`,
+            ).not.toBe(b!.styledSignature);
+          }
+        });
+
+        // The phone's value is what the bridge computes. For a pair whose models carry one, each side's
+        // `styledSignature` is found in its OWN raw capture by the bridge's verifier, and is NOT
+        // found in the other capture of the pair: the same dialog with the pointer elsewhere.
+        it(`${nameA} <> ${nameB}: styledSignature binds to its own capture and refuses the other`, () => {
+          const a = walked.get(nameA);
+          const b = walked.get(nameB);
+          if (a?.styledSignature === undefined || b?.styledSignature === undefined) return;
+          const rawA = readFileSync(join(PANES_DIR, nameA), "utf8");
+          const rawB = readFileSync(join(PANES_DIR, nameB), "utf8");
+          expect(verifyExpectedStyled(rawA, a.signature, a.styledSignature), `${nameA} against its own styledSignature`).toEqual({ ok: true });
+          expect(verifyExpectedStyled(rawB, b.signature, b.styledSignature), `${nameB} against its own styledSignature`).toEqual({ ok: true });
+          expect(verifyExpectedStyled(rawB, a.signature, a.styledSignature).ok, `${nameB} must not pass ${nameA}'s styledSignature`).toBe(false);
+          expect(verifyExpectedStyled(rawA, b.signature, b.styledSignature).ok, `${nameA} must not pass ${nameB}'s styledSignature`).toBe(false);
+        });
+      }
+
+      // Every walked capture whose model carries a styledSignature, pair or not: the bridge's
+      // verifier accepts it against the capture's raw bytes. This is the contract between the two
+      // sides: the same function over the same bytes gives the same lines.
+      for (const [name, model] of walked) {
+        if (model.styledSignature === undefined) continue;
+        it(`${name}: the bridge finds the phone's styledSignature in the raw capture`, () => {
+          const raw = readFileSync(join(PANES_DIR, name), "utf8");
+          expect(verifyExpectedStyled(raw, model.signature, model.styledSignature!)).toEqual({ ok: true });
+        });
+      }
+
+      // The ratchet. Every walked fixture's grammar group has a pair or a reason.
+      const groups = new Map<string, string[]>();
+      for (const [name, model] of walked) {
+        const key = walkGroupKey(adapter.agent, model);
+        groups.set(key, [...(groups.get(key) ?? []), name]);
+      }
+      const paired = new Set(
+        pairs.flatMap(([, a]) => (walked.has(a) ? [walkGroupKey(adapter.agent, walked.get(a)!)] : [])),
+      );
+      for (const [key, names] of groups) {
+        for (const name of names) {
+          it(`${name}: its grammar group "${key}" has a walk pair or a listed gap`, () => {
+            expect(
+              paired.has(key) || Object.hasOwn(WALK_GAPS, key),
+              `${name} lifts a pointed list with walked plans, group "${key}", and nothing proves the ` +
+                `grammar survives its own walk. Capture the same dialog with the pointer on another row, ` +
+                `add both fixtures to WALK_PAIRS in harness/walk-pairs.ts (agent "${adapter.agent}"), or ` +
+                `list the group in WALK_GAPS ({ since, reason }) and in the pinned list in conformance.test.ts: a new gap is a reviewed decision, and a second capture is the fix.`,
+            ).toBe(true);
+          });
+        }
+        if (Object.hasOwn(WALK_GAPS, key)) {
+          it(`"${key}": the listed gap is still a gap (no pair has landed since)`, () => {
+            expect(
+              paired.has(key),
+              `"${key}" now has a declared walk pair: delete its line from WALK_GAPS in harness/walk-pairs.ts`,
+            ).toBe(false);
+          });
+        }
+      }
+      for (const key of Object.keys(WALK_GAPS).filter((k) => k.startsWith(`${adapter.agent} | `))) {
+        it(`"${key}": the listed gap names a group this adapter still lifts`, () => {
+          expect(groups.has(key), `"${key}" has no walked fixture: delete its line from WALK_GAPS`).toBe(true);
+        });
+      }
+    });
+
     describe("key-grammar validity (every emittable key is send_keys-valid)", () => {
       if (ownFixtures.length === 0) it.todo("no own dialog fixtures supplied");
       for (const name of ownFixtures) {
@@ -654,6 +966,12 @@ export function describeAdapterConformance(
                 isValidHerdrKey(key),
                 `${name} / ${block.kind} emits invalid key ${JSON.stringify(key)}`,
               ).toBe(true);
+            }
+            for (const plan of declaredKeyPlans(block)) {
+              expect(
+                plan.keys.length,
+                `${name} / ${block.kind} declares an empty ${plan.field} plan`,
+              ).toBeGreaterThan(0);
             }
           }
         });

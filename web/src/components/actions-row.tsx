@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Layers } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { Layers, ListTree, Undo2, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { HarnessBar, useHarnessBarItems } from "@/components/harness-bar";
+import { StatusDot } from "@/components/status-badge";
 import { OverflowEdges } from "@/components/ui/overflow-edges";
 import { SectionLabel } from "@/components/ui/section-label";
-import { STRIP_ROW_PILL, STRIP_SCROLLER } from "@/components/ui/labelled-strip";
+import { BELT_ICON, STRIP_ROW_PILL, STRIP_SCROLLER } from "@/components/ui/labelled-strip";
+import { useDashPrefs } from "@/hooks/use-dash-prefs";
+import type { Hand } from "@/hooks/use-display-prefs";
 import { useLocale } from "@/hooks/use-locale";
 import { hasResizeObserver } from "@/lib/env";
 import { t as translate } from "@/lib/i18n";
@@ -78,8 +81,8 @@ import { cn } from "@/lib/utils";
 // anyway: "what can I press from here". Merged, the composer gets a row back and the harness
 // commands sit at the same height as the keys they were always meant to live beside.
 //
-// THE BELT'S RIGHT END IS THE SWITCH MARK, AND THE MACHINE IS NOT HERE ANY MORE. The write host was
-// pinned at that end for a day. Altan's verdict on the phone, once the pull-up chevron had shipped
+// THE BELT'S PINNED END IS THE SWITCH MARK (the right end; the left under `hand="left"`, see {@link Hand}),
+// AND THE MACHINE IS NOT HERE ANY MORE. The write host was pinned at that end for a day. Altan's verdict on the phone, once the pull-up chevron had shipped
 // on the rule: the chevron "is now blocking the Quick action, it's a bad spot". So the chevron went,
 // the pinned slot became the switcher's own control — a real target, at the pill register, above the
 // send button, and now a bare Layers mark behind a hairline rather than a pill with a word on it —
@@ -114,9 +117,42 @@ import { cn } from "@/lib/utils";
 //  * The row is a scroller by design and the edge mask already says "there is more this way", which
 //    is the answer it was built to give. One thumb-flick reaches the harness section.
 //
+// ONE SCALE FOR THE WHOLE BELT (operator, 2026-09-23, from the phone: "make the belt slightly
+// higher and the icons slightly larger, like 15%", plus a Settings row to go further). The root
+// carries `--belt-scale` inline, from the dash pref `beltScale` (1.15 default, 1.3 Large, 1.5
+// Larger), and `index.css` derives every size on the belt from it: the band (`--belt-band`), its
+// padding, the pill height, the icon-only pills' width, the icons and the words. Nothing on the belt
+// picks a size of its own any more, so nothing can grow out of step. The px figures in the comments
+// below are the scale-1 belt they were measured on; at the default scale the band is 45px (4 + 37 +
+// 4), the pills 37px, the icons 18px. The key rail and every other strip are untouched: the
+// `--belt-*` properties exist only under this root.
+//
 // The general pills DRAW a short word and ANNOUNCE the full one (`word` vs `label` below): the row
 // has one word of room per pill, and "Type into terminal" and "Display settings" are still what a
 // screen reader hears and what a test addresses.
+
+/**
+ * Which thumb the belt is laid out for (the Settings "Hand" choice, `hooks/use-display-prefs.ts`).
+ * `"right"` is the shipped layout and renders byte for byte as it always did. `"left"` is its true
+ * mirror, not a re-ordering of parts: the pinned block (the Switch mark, Changes, the composer's X,
+ * and the fade they stand on) sits at the belt's LEFT end, still directly above Send; the scrolling
+ * pills run right to left, so the general part leads from the RIGHT end with Keys the rightmost
+ * pill and the harness section stands to its left; the belt rests scrolled to its right end and
+ * scrolling reveals the rest toward the left. What a pill SAYS does not mirror: an icon then its
+ * word, read left to right, whatever side of the belt it stands on.
+ *
+ * It is `direction: rtl` on the scroller and on each run of pills (and `ltr` back on the pills),
+ * not `flex-row-reverse` and not a render-order reversal. A right-to-left scroller is the one shape
+ * every engine agrees on: it rests at its right end with `scrollLeft` 0, scrolls into negative
+ * `scrollLeft`, and counts its overflow toward the left. The DOM, and so the tab and reading order,
+ * is the right-hand one: Keys first, the harness section after it, the pinned block last.
+ *
+ * Everything below that says "the right end" is the pinned end of the RIGHT hand; read it as the
+ * left end under `hand="left"`. The trailing spacer stays a trailing child (so it lands at the left
+ * end of a right-to-left row), the fade runs the other way, the scroller's own edge mask moves to
+ * the right, and the pinned pills' order and hit-box reach mirror.
+ */
+export type { Hand };
 
 /** The row's "on" look — an open dock, an armed mode. `hover:` is pinned to the same tint: without
  *  it, hovering an already-on control repaints it with the ghost variant's hover background and it
@@ -141,6 +177,12 @@ const OFF = "text-muted-foreground";
  * it ANSWERS is unchanged at 46px — `STRIP_ROW_PILL`'s `::before` reaches past the drawn box, the
  * way every pill on this belt does.
  *
+ * WITH THE CHANGES PILL (EXPERIMENT, operator, 2026-09-23) the block holds a second 32px pill to the
+ * left of the mark, 6px apart (the belt's one pill gap): 117 + 32 + 6 = 155, see
+ * {@link SWITCH_PILL_INSET_WITH_CHANGES}. WITH THE COMPOSER'S X (M40 spec 04) a third pill stands
+ * left of both while the phone's box holds a draft: 155 + 32 + 6 = 193, see
+ * {@link SWITCH_PILL_INSET_WITH_CLEAR}.
+ *
  * THIS NUMBER IS NO LONGER THE ANSWER — IT IS THE GUESS BEFORE ONE EXISTS. A constant here drifts
  * the moment the Switch block's own box changes (a locale with a wider glyph, a future word back on
  * the pill) and nothing re-measures it, which is exactly how the last pill ended up hidden under the
@@ -150,6 +192,87 @@ const OFF = "text-muted-foreground";
  * block, not the belt, is what gets measured.
  */
 const SWITCH_PILL_INSET = 117;
+
+/** EXPERIMENT (operator, 2026-09-23): the first-frame fallback when the Changes pill stands beside
+ *  the mark. 117 + 32 (the Changes pill) + 6 (`gap-1.5` between the two pills) = 155. The Changes
+ *  pill ALONE (no mark to switch to) is the same 32px box, so it falls back to 117. Any TWO pinned
+ *  pills take this number, the X and the mark included: every pinned pill is the same box. */
+const SWITCH_PILL_INSET_WITH_CHANGES = 155;
+
+/** The first-frame fallback with all THREE pinned pills: the composer's X (see `clear` below), the
+ *  Changes pill and the mark. 155 + 32 (the X) + 6 (its gap) = 193. */
+const SWITCH_PILL_INSET_WITH_CLEAR = 193;
+
+/** The three constants above, indexed by how many pills the block holds, less one. */
+const SWITCH_PILL_INSETS = [SWITCH_PILL_INSET, SWITCH_PILL_INSET_WITH_CHANGES, SWITCH_PILL_INSET_WITH_CLEAR] as const;
+
+/**
+ * The first-frame fallback AT A BELT SCALE, for a block holding `pills` pinned pills (1 to 3). The
+ * three constants above are the scale-1 arithmetic; only the icon-only pills grow with `--belt-scale`
+ * (the hairline, the gaps, `pr-3` and the 64px fade do not), so each 32 in them becomes
+ * `--belt-pill`, the same `round(2rem * scale)` index.css uses. Default scale 1.15: 85 + 37 = 122
+ * for one pill, 85 + 37 + 6 + 37 = 165 for two, 85 + 3 × 37 + 2 × 6 = 208 for three.
+ */
+export function switchPillInset(scale: number, pills: number): number {
+  const count = Math.min(Math.max(Math.round(pills), 1), SWITCH_PILL_INSETS.length);
+  const pill = Math.round(32 * scale);
+  return SWITCH_PILL_INSETS[count - 1] - count * 32 + count * pill;
+}
+
+/** Each pinned pill's answered box, by where it stands in the block. On the block's outer side it
+ *  reaches 7px: on the left into the 8px beside the hairline, on the right into `pr-3`. Toward a
+ *  neighbour it reaches 3px, half the 6px gap, so two reaches never meet. At the default scale that
+ *  is 37 + 7 + 3 = 47px across for an end pill and 43px for the middle one, over the 44px floor
+ *  either way. Literal class names, so Tailwind's scan finds all four. */
+function pinnedReach(first: boolean, last: boolean, hand: Hand = "right"): string {
+  // The left-hand block runs mirrored (`flex-row-reverse`), so the DOM-first pill stands on the
+  // block's INNER side, the right, and the DOM-last on its outer side, the left.
+  if (hand === "left") {
+    return cn(last ? "before:-left-[7px]" : "before:-left-[3px]", first ? "before:-right-[7px]" : "before:-right-[3px]");
+  }
+  return cn(first ? "before:-left-[7px]" : "before:-left-[3px]", last ? "before:-right-[7px]" : "before:-right-[3px]");
+}
+
+/** The icon-only pills on the pinned block: square at the belt's scaled pill size, no padding and no
+ *  border. With no border the pill's padding box IS its drawn box, so the vertical reach is
+ *  `--belt-pad` rather than STRIP_ROW_PILL's `--belt-reach` (which adds 1px for the border the
+ *  scroller's pills carry): the hit box ends on the band's edge, never 1px past it.
+ *
+ * TAP FEEDBACK, IDENTICAL ON EVERY PINNED PILL (operator, phone: "can we get a focus hover
+ * animation/color change on both icons? so I know I've clicked"). Living here, not at any call
+ * site, is what MAKES them identical rather than hand-kept copies. The composer's X (M40 spec 04)
+ * took the same class on arrival, so it answers a tap exactly as the Changes pill does.
+ *
+ *  - `active:bg-foreground/15` is the belt's own alpha-wash recipe (see the file header's ground
+ *    argument) at a stronger step than the belt's own ground (`bg-foreground/6`) — visible, and
+ *    symmetric across both themes by the same construction.
+ *  - `active:scale-[0.92]` OVERRIDES `ui/button.tsx`'s base `active:scale-[0.98]` — same class
+ *    group, same single `active:` modifier, so `cn()`'s `twMerge` keeps this one (it is appended
+ *    after the base string, at the Button component's own `cn()` call). `motion-reduce:` then
+ *    cancels it back to `scale-100` for an operator who asked the OS for less motion — the same
+ *    idiom `app-header.tsx`'s `motion-reduce:transition-none` uses, relying on Tailwind emitting a
+ *    media-wrapped variant AFTER the plain one so it wins the cascade without a merge conflict (a
+ *    `motion-safe:` gate on the plain rule would not: its modifier SET differs from the base rule's,
+ *    so `twMerge` would keep both, and which wins would depend on that same cascade order anyway —
+ *    cancelling is the one path that is unambiguous). The tint is untouched by either: a colour
+ *    change is not the motion the preference asks Collie to drop.
+ *  - `hover:bg-foreground/8`, a softer step below the active tint, plain `hover:` — the belt's own
+ *    general pills (`OFF` below) already hover unguarded through the ghost variant, so a
+ *    `(hover: hover)` gate here would make these two pills the one exception on the row.
+ *  - `duration-[120ms]` is the app's own tap speed (`ui/strip-host.tsx`'s `SWAP_CLASS`), layered
+ *    onto the base `transition-all` — no new transition-property, just a faster one.
+ *  - No size, border or padding changes in any state, so the 44px+ answered box
+ *    (`STRIP_ROW_PILL`'s `::before`) and the belt's height never move under a thumb.
+ *  - Nothing added for iOS: the pills are real `<button>` elements via `ui/button.tsx`, the same
+ *    element every other pressable row in this app uses with a bare `active:` class and no
+ *    touchstart shim (`command-palette.tsx`, `space-overview.tsx`, `agent-card.tsx`) — `:active`
+ *    already fires on tap there without one, and there is no precedent in this tree for adding one. */
+const PINNED_PILL =
+  "relative w-(--belt-pill) min-w-(--belt-pill) border-0 px-0 has-[>svg]:px-0 before:-inset-y-(--belt-pad) hover:bg-foreground/8 active:bg-foreground/15 active:scale-[0.92] motion-reduce:active:scale-100 duration-[120ms]";
+
+/** Extra air between the last scrolling pill and the pinned block at full scroll-right, added to the
+ *  trailing spacer. Altan, from his phone, 2026-09-23: "add a wider margin right to the belt content". */
+const BELT_END_AIR = 16;
 
 /**
  * The pinned Switch block's own width, read off its DOM node — the trailing spacer's width must
@@ -190,7 +313,10 @@ function useSwitchBlockWidth(active: boolean): SwitchBlockWidth {
       if (!node || !active || !hasResizeObserver()) return;
       const ro = new ResizeObserver((entries) => {
         const entry = entries[0];
-        if (entry) setWidth(entry.contentRect.width);
+        // The BORDER box, not `contentRect`: `contentRect` is the content box and leaves out the
+        // block's own `pl-16` and `pr-3` (76px), so the spacer came out 76px short and the last pill
+        // stopped under the fade. Measured in Chromium at 390px, 2026-09-23.
+        if (entry) setWidth(entry.borderBoxSize?.[0]?.inlineSize ?? node.getBoundingClientRect().width);
       });
       ro.observe(node);
       observerRef.current = ro;
@@ -244,8 +370,10 @@ export interface ActionsRowProps {
   onRun: (text: string) => Promise<boolean>;
   /** Bound to the composer's `locked`. Greys the harness buttons in place. */
   disabled?: boolean;
+  /** Which thumb the belt is laid out for; see {@link Hand}. Default `"right"`, the shipped layout. */
+  hand?: Hand;
   /**
-   * THE PANE SWITCHER, PINNED AT THE BELT'S RIGHT END. Absent by default, and absent is the whole of
+   * THE PANE SWITCHER, PINNED AT THE BELT'S RIGHT END (the left under `hand="left"`). Absent by default, and absent is the whole of
    * the old behaviour: nothing renders and no class on this row changes.
    *
    * It used to be a 30px band of its own above the composer, then a small up-chevron centred on this
@@ -256,7 +384,8 @@ export interface ActionsRowProps {
    * an ordinary belt pill, icon and word like every other, but pinned rather than scrolling, so it
    * never pans away and it covers nothing that scrolls under it.
    *
-   * IT SITS DIRECTLY ABOVE SEND, which is the whole of why the right end. The thumb that reaches for
+   * IT SITS DIRECTLY ABOVE SEND, which is the whole of why the right end, and why the LEFT end for a
+   * left thumb (Send moves with the hand, composer.tsx). The thumb that reaches for
    * the send button is already there, the pill is the one thing on this belt that leaves the
    * composer, and a pinned object at the end of a scroller costs the scroller only its own width.
    *
@@ -284,14 +413,73 @@ export interface ActionsRowProps {
     /** Another pane needs you: a red dot on the mark's corner. The label says so in words. */
     alert?: boolean;
   };
+  /**
+   * EXPERIMENT (operator, 2026-09-23): the Changes view's entry (ADR 0065), moved out of the pane
+   * actions sheet onto the pinned block, as an icon-only pill LEFT of the Switch mark. Absent when
+   * the pane reports no folder (the caller decides). To revert: drop this prop and its pill, and put
+   * the `onChanges` row back in pane-actions-sheet.tsx (git history).
+   */
+  changes?: {
+    /** Opens the Changes route for this pane. */
+    onClick: () => void;
+    /** ALREADY TRANSLATED. The button's accessible name, `chat.changes.label` ("Files"). */
+    label: string;
+  };
+  /**
+   * THE COMPOSER'S CLEAR SLOT (M40 spec 04, issue #291; Altan, 2026-09-26/27). An icon-only X on
+   * the pinned block, directly LEFT of the Changes pill, left of the Switch mark when there is no
+   * Changes pill, alone when neither shows. The scrolling pills are for acts inside the terminal;
+   * the pinned block holds Collie's own controls, and emptying the phone's own draft is one of them.
+   *
+   * The composer passes it only while its box holds text or chips (`mode: "clear"`), and for the
+   * Undo window after a tap (`mode: "undo"`). Absent otherwise, so the belt at rest is unchanged.
+   * While it is here the block is one pill wider and grows LEFT, over the scroller's end; the
+   * scrolling pills do not move. The X and Undo are the same button in the same box, only the glyph
+   * and the name swap, so the swap moves nothing (a reserved slot, DESIGN.md §2).
+   *
+   * It keeps the phone keyboard up: the button refuses its own `mousedown`, the event whose default
+   * moves focus, so the field keeps it. NOT `pointerdown`, which the composer's attach button
+   * refuses: measured under Playwright's WebKit with the iPhone descriptor (2026-09-27), a tap on a
+   * button that cancels its own `pointerdown` gets no `mousedown`, no `mouseup` and no `click` at
+   * all. Cancelling `mousedown` keeps the focus in both engines and the click in both
+   * (`e2e/composer-clear.spec.ts`).
+   */
+  clear?: {
+    /** `"clear"` draws the X; `"undo"` draws the Undo mark in the same box. */
+    mode: "clear" | "undo";
+    onClick: () => void;
+    /** ALREADY TRANSLATED. "Clear message" or "Undo clear". */
+    label: string;
+    /** Undo only: a tap on any OTHER control on this belt ends the Undo window (Altan, 2026-09-27).
+     *  Undo has no timer, so it leaves on the operator's next act, and a belt tap is one. The
+     *  press has already landed when this runs, so the pinned block narrowing under it moves
+     *  nothing the finger was aiming at. A sideways scroll fires no click and keeps Undo. */
+    onOtherPress?: () => void;
+    /** Inert (`aria-disabled`, dimmed, the tap ignored) while a send is in flight or Type is armed.
+     *  Not `disabled`: a disabled button takes no `mousedown`, so a tap on it would blur the field
+     *  and drop the keyboard. */
+    inert?: boolean;
+  };
 }
 
-export function ActionsRow({ general, agent, mine, onRun, disabled, handle }: ActionsRowProps) {
+export function ActionsRow({ general, agent, mine, onRun, disabled, hand = "right", handle, changes, clear }: ActionsRowProps) {
   useLocale();
 
   const harnessItems = useHarnessBarItems(agent, mine);
-  const switchBlock = useSwitchBlockWidth(!!handle);
-  const switchInset = switchBlock.width ?? SWITCH_PILL_INSET;
+  const { beltScale } = useDashPrefs().prefs;
+  // Anything pinned at the pinned end (right, or left under `hand="left"`): the composer's X, the Changes pill, the Switch mark, in any
+  // mix. The drag surface (`handle.ref`, `touch-pan-x`) stays tied to `handle` alone.
+  const pinnedCount = (clear ? 1 : 0) + (changes ? 1 : 0) + (handle ? 1 : 0);
+  const pinned = pinnedCount > 0;
+  const switchBlock = useSwitchBlockWidth(pinned);
+  const switchInset = switchBlock.width ?? switchPillInset(beltScale, pinnedCount);
+  const left = hand === "left";
+  // The room the pinned block takes off the scroller, bought with a real flex child (see the
+  // trailing spacer below). It is the LAST child under either hand: a right-to-left row lays the
+  // last child at its left end, which is where the left-hand block stands.
+  const pinnedSpacer = pinned ? (
+    <span aria-hidden className="h-full shrink-0" style={{ width: switchInset + BELT_END_AIR }} />
+  ) : null;
 
   // Nothing to draw at all. Render nothing rather than an empty scroller, so the row costs no
   // height.
@@ -326,6 +514,21 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, handle }: Ac
       // and that is not the "conditional class" the paragraph above warns against — `touch-pan-x`
       // with no listener behind it would forbid a vertical page gesture and give nothing back.
       ref={handle?.ref}
+      // The belt's one scale; index.css derives every `--belt-*` size from it (header above).
+      // SAFETY: a CSS CUSTOM PROPERTY, and the value is a number from BELT_SCALES. React passes it
+      // through to the style attribute verbatim; `CSSProperties` only declares the known property
+      // names, so a `--*` key has no other way to be spelled.
+      style={{ "--belt-scale": beltScale } as CSSProperties}
+      // Capture, so the Undo window ends in the same tap as the pill's own act, and only for a
+      // control that is not the Undo button itself (`clear.onOtherPress` above).
+      onClickCapture={
+        clear?.onOtherPress === undefined
+          ? undefined
+          : (e) => {
+              if (e.target instanceof Element && e.target.closest("[data-belt-clear]") !== null) return;
+              clear.onOtherPress?.();
+            }
+      }
       className={cn(
         "relative -mx-3 mb-1 flex items-center border-b border-border bg-foreground/6",
         handle && "touch-pan-x",
@@ -344,7 +547,10 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, handle }: Ac
           64px remains and the fade visibly SHRINKS — Altan, from the phone: "the fade is longer by
           default than when I scroll to the very right." `edges="left"` makes the right fade the
           Switch block's alone, constant in every scroll state, and keeps this primitive's own mask on
-          the left, where it still means something once scrolled. A caller with no handle passes no
+          the left, where it still means something once scrolled. Under `hand="left"` all of this runs
+          the other way round: the block's fade is at the LEFT, so this primitive paints `"right"` only,
+          and it measures a right-to-left scroller (its `scrollLeft` is 0 at rest and negative when
+          panned). A caller with no handle passes no
           `edges` at all — the default `"both"` is unchanged.
           `pl-3` stays fixed (paired with the `-mx-3` above, the route's own gutter); the scroller
           carries no `paddingRight` at all — see the trailing spacer, a sibling of the last pill
@@ -367,12 +573,25 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, handle }: Ac
           the `::before` still overflows the scroller's box, and `overflow-x: auto` forces
           `overflow-y` to compute to `auto` too, which turns that overflow into a real vertical
           scrollbar under a thumb. `STRIP_SCROLLER` keeps forcing `overflow-x-auto`; this belt alone
-          forces the other axis shut. */}
-      <OverflowEdges edges={handle ? "left" : "both"} cue="none">
+          forces the other axis shut.
+          SCALED since 2026-09-23: `py-1` is `py-(--belt-pad)` now, 4px at the default scale and 5px
+          and 6px at the larger two, and the pills' `::before` reaches exactly that far again
+          (`--belt-reach`, STRIP_ROW_PILL), so every pill answers the whole band. */}
+      <OverflowEdges edges={pinned ? (left ? "right" : "left") : "both"} cue="none">
         {(scrollerRef) => (
           <div
             ref={scrollerRef}
-            className={cn(STRIP_SCROLLER, "bg-primary/10 pl-3 py-1 overflow-y-hidden", !handle && "pr-3")}
+            className={cn(
+              STRIP_SCROLLER,
+              "bg-primary/10 py-(--belt-pad) overflow-y-hidden",
+              // `pl-3` is the route's gutter on the scroller's start edge, `pr-3` on its end edge
+              // when nothing is pinned. A left-hand row starts at the RIGHT (`[direction:rtl]`, see
+              // {@link Hand}), so with a block pinned the gutter is `pr-3` and the left end is the
+              // spacer's (the block's own `pl-3` is the gutter over there).
+              left && pinned ? "pr-3" : "pl-3",
+              !pinned && "pr-3",
+              left && "[direction:rtl]",
+            )}
           >
             {general.length > 0 && (
               // The word "Controls" is `sr-only` and load-bearing: sighted it labelled a run of
@@ -386,7 +605,7 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, handle }: Ac
                 // NO BOX OF ITS OWN. Collie's controls stand directly on the belt's ground: no
                 // outline, no ground, no padding — a group in the accessibility tree and a flex run
                 // in the paint. The harness section is the only thing on this belt that is drawn.
-                className="flex shrink-0 items-center gap-1.5"
+                className={cn("flex shrink-0 items-center gap-1.5", left && "[direction:rtl]")}
               >
                 <SectionLabel id="composer-controls-label" className="sr-only">
                   {translate("composer.controls.label")}
@@ -402,15 +621,15 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, handle }: Ac
                     aria-expanded={action.expanded}
                     aria-pressed={action.pressed}
                     onClick={action.onSelect}
-                    className={cn(`${STRIP_ROW_PILL} gap-1.5 text-xs`, action.on === true ? ON : OFF)}
+                    className={cn(`${STRIP_ROW_PILL} gap-1.5`, action.on === true ? ON : OFF, left && "[direction:ltr]")}
                   >
-                    <action.icon className="size-4 shrink-0" />
+                    <action.icon className={BELT_ICON} />
                     {action.word ?? action.label}
                   </Button>
                 ))}
               </div>
             )}
-            <HarnessBar agent={agent} mine={mine} onRun={onRun} disabled={disabled} />
+            <HarnessBar agent={agent} mine={mine} onRun={onRun} disabled={disabled} hand={hand} />
             {/* THE TRAILING SPACER — a real flex child, not padding. `paddingRight` on this
                 scroller was tried first and measured wrong in Chrome: the scroller is a `flex`
                 row and the harness section is itself a nested `flex` row (`BELT_SECTION`), so the
@@ -423,12 +642,13 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, handle }: Ac
                 fade. `shrink-0` and an explicit inline width sidestep the whole question — a real
                 child always counts toward `scrollWidth`, at any nesting depth. `aria-hidden`
                 because it draws nothing and answers nothing; the width tracks
-                {@link useSwitchBlockWidth} exactly the way the removed padding used to. */}
-            {handle && <span aria-hidden className="h-full shrink-0" style={{ width: switchInset }} />}
+                {@link useSwitchBlockWidth} exactly the way the removed padding used to, plus
+                {@link BELT_END_AIR} so the last pill stops with clear air before the block. */}
+            {pinnedSpacer}
           </div>
         )}
       </OverflowEdges>
-      {/* THE SWITCH PILL, PINNED AT THE BELT'S RIGHT END — see {@link SWITCH_PILL_INSET} above for
+      {/* THE SWITCH PILL, PINNED AT THE BELT'S RIGHT END, OR ITS LEFT END UNDER `hand="left"` — see {@link SWITCH_PILL_INSET} above for
           why the scroll cue steps around it, and `handle` for why it stands here at all.
           It is a SIBLING of the OverflowEdges wrapper, and that is load-bearing: a mask applies to
           its element's whole subtree (overflow-edges.tsx says so at the middle div), so a pill
@@ -459,14 +679,22 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, handle }: Ac
           included, is exactly the width the scroller's `paddingRight` must match (see
           {@link useSwitchBlockWidth}), so measuring anything narrower (the inner button alone, say)
           would under-report it and the last pill would scroll in under the fade again. */}
-      {handle && (
+      {pinned && (
         <span
           ref={switchBlock.ref}
-          className="pointer-events-none absolute inset-y-0 right-0 z-10 flex items-center pr-3 pl-16"
+          className={cn(
+            "pointer-events-none absolute inset-y-0 z-10 flex items-center",
+            left ? "left-0 pr-16 pl-3" : "right-0 pr-3 pl-16",
+          )}
         >
           <span
             aria-hidden
-            className="pointer-events-none absolute inset-0 bg-chrome [mask-image:linear-gradient(to_right,transparent,black_4rem)]"
+            className={cn(
+              "pointer-events-none absolute inset-0 bg-chrome",
+              left
+                ? "[mask-image:linear-gradient(to_left,transparent,black_4rem)]"
+                : "[mask-image:linear-gradient(to_right,transparent,black_4rem)]",
+            )}
           >
             <span className="absolute inset-0 bg-chrome" />
           </span>
@@ -485,34 +713,97 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, handle }: Ac
               IT DRAWS NOTHING AND ANNOUNCES "Switch pane", so the accessible name is now the only
               name it has — WCAG 2.5.3 has nothing to reconcile once there is no visible word, and a
               test addresses that name rather than a glyph. */}
-          <span className="pointer-events-auto flex items-center self-stretch">
-            <span aria-hidden className="mr-2 h-5 w-px bg-border" />
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-label={handle.label}
-              aria-haspopup="dialog"
-              onClick={handle.onClick}
-              // No padding and no border: what is left of the pill is `STRIP_ROW_PILL`'s own box,
-              // narrowed on this one pill alone. `w-8 min-w-8` drops `min-w-11`'s 44px floor — the
-              // floor every OTHER pill on this belt still stands on — down to 32px, the operator's
-              // pick ("Option 6" of the belt-shade deck; playground, removed 2026-09-14 once it had
-              // served, see git history): the Switch mark is a single centred icon with no label, so
-              // it alone can go narrower than a pill with a word to hold. Both classes are needed —
-              // `min-w-11` would otherwise still win against a bare `w-8`.
-              className={cn(`${STRIP_ROW_PILL} relative w-8 min-w-8 border-0 px-0 has-[>svg]:px-0`)}
-            >
-              <Layers className="size-4 shrink-0 text-primary" />
-              {/* The red dot, on the mark's top-right corner, absolutely placed so it never moves the
-                  belt. `ring-chrome` cuts it out of the glyph it overlaps. */}
-              {handle.alert === true && (
-                <span
-                  aria-hidden
-                  className="pointer-events-none absolute top-1 right-1 size-2 rounded-full bg-status-blocked ring-2 ring-chrome"
-                />
-              )}
-            </Button>
+          <span
+            // `flex-row-reverse` under `hand="left"`: the block mirrors as a whole (Switch mark on
+            // the belt's edge, hairline on the side the scroller is on) and the DOM, and so the
+            // reading order, stays as it was.
+            className={cn("pointer-events-auto flex items-center gap-1.5 self-stretch", left && "flex-row-reverse")}
+          >
+            {/* The hairline keeps its 8px to the first pill: the row's `gap-1.5` (6px) plus `mr-0.5`
+                (2px). The two pills stand 6px apart, the belt's one pill gap. */}
+            <span aria-hidden className={cn("h-(--belt-rule) w-px bg-border", left ? "ml-0.5" : "mr-0.5")} />
+            {/* THE COMPOSER'S X, AND UNDO IN THE SAME BOX (M40 spec 04, the `clear` prop above).
+                First in the block, so it grows the block to the left and nothing to its right moves.
+                ONE element in both modes: only the glyph and the name change, so the swap cannot
+                move a pixel, and a screen reader's focus stays on the button and hears the new name.
+                `onMouseDown` refuses the press's focus move, which keeps the field focused and the
+                phone keyboard up; the `clear` prop says why it is not `onPointerDown`. */}
+            {clear && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                data-belt-clear=""
+                aria-label={clear.label}
+                aria-disabled={clear.inert === true ? true : undefined}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  if (clear.inert !== true) clear.onClick();
+                }}
+                className={cn(
+                  `${STRIP_ROW_PILL} ${PINNED_PILL}`,
+                  pinnedReach(true, pinnedCount === 1, hand),
+                  clear.inert === true && "opacity-50",
+                )}
+              >
+                {clear.mode === "undo" ? (
+                  <Undo2 className={cn(BELT_ICON, "text-primary")} />
+                ) : (
+                  <X className={cn(BELT_ICON, "text-primary")} />
+                )}
+              </Button>
+            )}
+            {/* EXPERIMENT (operator, 2026-09-23): the Changes entry, moved here from the pane actions
+                sheet. Same box as the Switch mark beside it; it navigates rather than opening a sheet,
+                so no `aria-haspopup`. Revert with the `changes` prop above. */}
+            {changes && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-label={changes.label}
+                onClick={changes.onClick}
+                // `PINNED_PILL` below, and a hit box set by where the pill stands (`pinnedReach`):
+                // 7px out on an end of the block, 3px toward a neighbour, so two reaches never meet.
+                className={cn(`${STRIP_ROW_PILL} ${PINNED_PILL}`, pinnedReach(!clear, !handle, hand))}
+              >
+                <ListTree className={cn(BELT_ICON, "text-primary")} />
+              </Button>
+            )}
+            {handle && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-label={handle.label}
+                aria-haspopup="dialog"
+                onClick={handle.onClick}
+                // No padding and no border: what is left of the pill is `STRIP_ROW_PILL`'s own box,
+                // narrowed on this one pill alone. `w-8 min-w-8` drops `min-w-11`'s 44px floor — the
+                // floor every OTHER pill on this belt still stands on — down to 32px, the operator's
+                // pick ("Option 6" of the belt-shade deck; playground, removed 2026-09-14 once it had
+                // served, see git history): the Switch mark is a single centred icon with no label, so
+                // it alone can go narrower than a pill with a word to hold. Both classes are needed —
+                // `min-w-11` would otherwise still win against a bare `w-8`.
+                // SCALED since 2026-09-23: `w-8 min-w-8` is `PINNED_PILL`'s `w-(--belt-pill)` now,
+                // square with the pill's own scaled height, 37px at the default scale. Its hit box
+                // reaches 3px left (half the 6px gap to a pill beside it, 7px when it stands alone)
+                // and 7px right (into `pr-3`), 47px across.
+                className={cn(`${STRIP_ROW_PILL} ${PINNED_PILL}`, pinnedReach(!clear && !changes, true, hand))}
+              >
+                <Layers className={cn(BELT_ICON, "text-primary")} />
+                {/* The needs-you mark (the triangle), on the mark's top-right corner, absolutely placed
+                    so it never moves the belt. The chrome-coloured disc and ring cut it out of the
+                    glyph it overlaps. 10px since 2026-10-14: at 12px the triangle read as heavy as the
+                    Layers glyph itself, and its disc bit into the glyph's corner. */}
+                {handle.alert === true && (
+                  <StatusDot
+                    status="blocked"
+                    className="pointer-events-none absolute top-0.5 right-0.5 size-2.5 rounded-full bg-chrome ring-2 ring-chrome"
+                  />
+                )}
+              </Button>
+            )}
           </span>
         </span>
       )}

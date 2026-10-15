@@ -204,7 +204,7 @@ function mergeCommands(builtins: readonly BuiltinCommandDef[], discovered: reado
       dangerous: argHint === "",
     });
   }
-  return [...commands.values()].sort((left, right) => {
+  return [...commands.values()].toSorted((left, right) => {
     if (left.common !== right.common) return left.common ? -1 : 1;
     return left.command < right.command ? -1 : left.command > right.command ? 1 : 0;
   });

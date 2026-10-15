@@ -46,6 +46,45 @@ export function isVoiceRule(text: string): boolean {
   return VOICE_RULE.test(rstrip(text));
 }
 
+// The background-tasks popup's header (`main · ↓ to select`, `main · Enter
+// to view`, `main · Enter to view · x to stop` — or bare `main` while the
+// box holds a draft). `main` is matched LITERALLY: it is the only group name
+// measured (DIALOG_NOTES.md §5), so any other name fails closed to the
+// unread-dialog card rather than guessing. The hint after it is free text —
+// the position (rule above, task rows below) is what makes the row chrome,
+// never the wording.
+const TASKS_POPUP_HEADER = /^main( · .+)?$/;
+
+/** True when the row heads the background-tasks popup between rule and status. */
+export function isTasksPopupHeader(text: string): boolean {
+  return TASKS_POPUP_HEADER.test(rstrip(text));
+}
+
+// A background-tasks popup row: `├ <spinner> <name>  <state>  <elapsed>`
+// (`└` on the last). Matched on the leading tree glyph + space ALONE, on
+// purpose: the name is agent-authored, the state is `running` or
+// `ran Ns, exit M`, the spinner cycles glyphs (◆ ◈ ◇ ⢴ measured) and the
+// elapsed ticks every second — so nothing past the branch carries identity.
+// The header above + the statusline below do that work instead. `tree(1)`
+// output cannot match: it prints `├──` (branch + box rules, no space).
+const TASKS_POPUP_ROW = /^[├└] /;
+
+/** True when the row could be a task row of the background-tasks popup. */
+export function isTasksPopupRow(text: string): boolean {
+  return TASKS_POPUP_ROW.test(rstrip(text));
+}
+
+// While the popup holds focus its header names the keys it answers: `main · Enter to view · x to
+// stop` (DIALOG_NOTES.md §5). `x` stops the selected task, and a typed message is keys, so while
+// the header names `x` the box does not own every key. The one hint matched on its words, because
+// focus itself is drawn in colour alone, and the match only ever refuses.
+const TASKS_POPUP_STOP_HINT = / · x to stop$/;
+
+/** True when a popup header names `x to stop`: the popup holds focus on a running task. */
+export function tasksPopupNamesStopKey(text: string): boolean {
+  return isTasksPopupHeader(text) && TASKS_POPUP_STOP_HINT.test(rstrip(text));
+}
+
 // The statusline (`  muse-spark-1.3 · max · <cwd> · <mode>`): opaque fields the
 // adapter never parses, joined by ` · ` separators that ARE structural. The
 // leading two spaces are the gutter. Required below the bottom rule so a
@@ -70,8 +109,12 @@ export function promptRowText(text: string): string | null {
 
 // A draft continuation: the 2-space-indented wrap rows below the `❯` row. Only
 // ever read as part of the located composer run (see locateTail), never
-// scanned for — dialog rows share the indentation.
-const CONTINUATION_ROW = /^  \S/;
+// scanned for — dialog rows share the indentation. Only the gutter is asserted:
+// the draft's own text may begin with spaces, and `/^  \S/` read an indented
+// line as a torn frame, which lost the composer and refused the send while the
+// draft sat there (harness canary 2026-10-12, Muse 1.4.6; codex/chrome.ts
+// CONTINUATION is the same lesson).
+const CONTINUATION_ROW = /^  \s*\S/;
 
 /** True when the row could continue a draft (2-space indent, non-blank). */
 export function isContinuationRow(text: string): boolean {
@@ -100,6 +143,8 @@ export interface MuseTail {
   prompt: number | null;
   /** The Voice rule directly above the prompt, or null when absent. */
   voice: number | null;
+  /** The background-tasks popup's header row, or null when no popup sits under the rule. */
+  popup: number | null;
 }
 
 /**
@@ -107,8 +152,11 @@ export interface MuseTail {
  *
  *     (optional Voice rule)     (d) titled rule, tolerated absent
  *     ❯ <draft…>                (c) the prompt row — may be missing (approval)
- *       <continuations…>        (c) 0..MAX_DRAFT_ROWS indented rows below it
+ *       <continuations…>        (c) 0..MAX_DRAFT_ROWS indented rows below it, blank
+ *                                 paragraph breaks inside the draft included (#274)
  *     ─────────────────         (a) the bottom rule — the anchor
+ *     main · …                  (b2) the background-tasks popup, tolerated absent
+ *     ├/└ <task>  <state>       (b2) 1+ task rows under the header (DIALOG_NOTES.md §5)
  *       <statusline>            (b) opaque status row, last non-blank
  *
  * The approval dialog replaces the box but keeps rule + statusline, so (c) is
@@ -120,12 +168,37 @@ export function locateTail(lines: StyledLine[]): MuseTail | null {
   const status = lastNonBlankIndex(texts);
   if (status < 1) return null;
   if (!isStatusline(texts[status]!)) return null;
-  const rule = status - 1;
+  // (b2) Step up over the background-tasks popup when it sits between the rule
+  // and the statusline. The walk only STARTS on a task-shaped row — on a popup-less
+  // screen that row is the bottom rule, so the transcript above the rule is never
+  // entered. A task run with no header above it fails closed to null, as does a
+  // header naming an unmeasured group: the screen keeps today's card rather than
+  // misreading its tail.
+  let rule = status - 1;
+  let popup: number | null = null;
+  if (isTasksPopupRow(texts[rule]!)) {
+    let top = rule;
+    while (top - 1 >= 0 && isTasksPopupRow(texts[top - 1]!)) top--;
+    if (top - 1 < 0 || !isTasksPopupHeader(texts[top - 1]!)) return null;
+    popup = top - 1;
+    rule = top - 2;
+    if (rule < 0) return null;
+  }
   if (!isBottomRule(texts[rule]!)) return null;
 
-  // (c) Walk up over draft continuations to the prompt row.
+  // (c) Walk up over the draft run to the prompt row: continuations AND the blank rows a
+  // paragraph break leaves inside the box (#274). A blank used to stop the walk, so a healthy
+  // two-paragraph draft read as prompt null — "no composer" — which wedged the send path (verify
+  // reads null forever) and drew the unread-dialog card over the live box. The walk still stops
+  // at the first non-blank non-continuation row, so an approval option run resolves the same
+  // null at its subject rows, and the ❯ row itself always stops the walk before transcript.
   let i = rule - 1;
-  while (i >= 0 && rule - 1 - i < MAX_DRAFT_ROWS && isContinuationRow(texts[i]!)) i--;
+  while (
+    i >= 0 &&
+    rule - 1 - i < MAX_DRAFT_ROWS &&
+    (isContinuationRow(texts[i]!) || isBlank(texts[i]!))
+  )
+    i--;
   // A prompt row heading the run — or null when continuation-shaped rows (an approval option run)
   // or nothing sits above the rule. Either way the tail chrome below stays real; only the box is
   // absent.
@@ -136,13 +209,14 @@ export function locateTail(lines: StyledLine[]): MuseTail | null {
   const above = prompt ?? rule;
   const voice = above > 0 && isVoiceRule(texts[above - 1]!) ? above - 1 : null;
 
-  return { rule, status, prompt, voice };
+  return { rule, status, prompt, voice, popup };
 }
 
-// Either pointer glyph Muse paints: `›` on approval/question/checkbox rows,
-// ASCII `>` on trust/review rows. Matched as text — the red bold SGR moves per
-// responder (and the light responder's red differs from dark's).
-const POINTER = "[›>]";
+// The pointer glyphs Muse paints on approval/question/checkbox rows: `›` (U+203A) through
+// 1.3.x, `⟩` (U+27E9) from 1.4.7 — matched as a set so both generations lift. (Trust and review
+// rows have their own pointer forms, parsed where they are used.) Matched as text — the red bold
+// SGR moves per responder (and the light responder's red differs from dark's).
+const POINTER = "[›⟩>]";
 
 // A numbered option row: optional pointer, `N.`, the label. Matched on the LEFT-TRIMMED row:
 // the indentation carries no meaning (gutter + pointer-or-indent arrange 0–4 leading spaces — an
@@ -161,8 +235,9 @@ export function parseNumberedOption(text: string): { n: number; label: string } 
 
 // Trust's option form: `N` + two (or more) spaces + label, NO period — unlike
 // every other Muse dialog. The `\s{2,}` both requires the gap and excludes the
-// `N.` form (a period is not whitespace). Trimmed like the numbered form.
-const TRUST_OPTION = /^(?:>\s*)?(\d+)\s{2,}(\S.*)$/;
+// `N.` form (a period is not whitespace). Trimmed like the numbered form. The pointer is ASCII
+// `>` on 1.3.x; `⟩` rides along in case the 1.4.7 pointer swap reached this screen too.
+const TRUST_OPTION = /^(?:[⟩>]\s*)?(\d+)\s{2,}(\S.*)$/;
 
 /** Parse `> N  Label` / `N  Label` (trust's period-less form), or null. */
 export function parseTrustOption(text: string): { n: number; label: string } | null {
@@ -182,6 +257,21 @@ export function parseSubmitRow(text: string): { n: number; checked: number } | n
   return { n: Number(m[1]), checked: Number(m[2]) };
 }
 
+// The slash-command palette's suggestion row: 2-space indent (continuation-shaped, which is why it
+// pollutes the draft read), `/command`, a padded gap, the description (`  /usage  Show session
+// usage`). The gap is column padding, so two-or-more spaces. Unlike the option forms this is NOT
+// trimmed: the indent is structural. Only ever read under a slash-led prompt row (chrome.ts): the
+// palette opens for slash input alone, so that gate keeps a prose continuation starting with `/`
+// (a path) from parsing as a suggestion.
+const PALETTE_ROW = /^  (\/\S+)\s{2,}(\S.*)$/;
+
+/** Parse a palette suggestion row into its command, or null. */
+export function parsePaletteRow(text: string): { command: string } | null {
+  const m = PALETTE_ROW.exec(rstrip(text));
+  if (!m) return null;
+  return { command: m[1]! };
+}
+
 // A lifted menu's rows must be CONTIGUOUS screen rows. trailingMenuRows takes a numeric suffix,
 // which would otherwise fuse a transcript numbered list sitting above the menu into it whenever the
 // numbering happens to continue (transcript 1,2 + menu 3,4 reads as one run) — and the fused rows
@@ -196,10 +286,17 @@ export function menuRowsContiguous<T extends { index: number }>(menu: T[]): bool
 // know. (Observed: one row on single-select, two on checkbox.)
 const MAX_FOOTER_ROWS = 3;
 
+// A multi-question dialog paints its progress (`1 of 2`) as its own row between the options and
+// the footer. It is page chrome, not footer — the run stops below it, so the lead match sees the
+// footer alone. A wrapped footer fragment can never take this shape (mid-phrase text), so the stop
+// only ever excludes the progress row.
+const PROGRESS_LINE = /^\d+ of \d+$/;
+
 /** The footer run directly above the tail chrome (`top` = voice ?? prompt ?? rule): its start
- *  and end rows plus the rows joined with a space (a wrap seam is a word space). Null when no
- *  non-blank run sits there, or when the run is unbounded above (it swallowed option rows through a
- *  torn frame — the join would match a fragment). Callers classify the join by their lead string. */
+ *  and end rows plus the rows joined with a space (a wrap seam is a word space). A multi-question
+ *  progress row (`N of M`) above the run bounds it instead of failing it. Null when no non-blank
+ *  run sits there, or when the run is unbounded above (it swallowed option rows through a torn
+ *  frame — the join would match a fragment). Callers classify the join by their lead string. */
 export function footerAboveChrome(
   texts: string[],
   top: number,
@@ -209,9 +306,11 @@ export function footerAboveChrome(
   if (fi < 0) return null;
   let start = fi;
   while (start - 1 >= 0 && texts[start - 1]!.trim() !== "" && fi - (start - 1) < MAX_FOOTER_ROWS) {
+    if (PROGRESS_LINE.test(texts[start - 1]!.trim())) break;
     start--;
   }
-  if (start - 1 >= 0 && texts[start - 1]!.trim() !== "") return null;
+  const above = start - 1 >= 0 ? texts[start - 1]!.trim() : "";
+  if (above !== "" && !PROGRESS_LINE.test(above)) return null;
   const joined = texts
     .slice(start, fi + 1)
     .map((t) => t.trim())
@@ -310,6 +409,10 @@ export function trailingMenuRows<T extends { n: number }>(rows: T[]): T[] {
 // verify — typing replaces the tip, so the guard compares against real text either way.
 export const INPUT_PLACEHOLDERS: ReadonlySet<string> = new Set([
   "Start a message with ! to run a shell command yourself",
+  // Seen live 2026-09-23: the tip rotates (#274 addendum).
+  "/loop 10m <prompt> schedules a recurring prompt",
+  // Seen live 2026-09-23: the tip rotates per context (#278 addendum).
+  "Paste an image with Ctrl+V — file paths and URLs work too",
 ]);
 
 /**
@@ -361,7 +464,7 @@ export function boxIsBare(lines: StyledLine[]): boolean {
 
 /**
  * True when the nearest non-blank row above `row` is a live `Request user input … — running`
- * header. The review screen's lift requires it: its own rows (`> Submit answers`, `Interrupt turn`)
+ * header. The review screen's lift requires it: its own rows (`⟩ Submit answers`, `Interrupt turn`)
  * are short, fixed and easy to quote, and the header's `— running` is what only a live dialog shows.
  */
 export function askHeaderDirectlyAbove(texts: string[], row: number): boolean {

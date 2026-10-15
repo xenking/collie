@@ -54,10 +54,16 @@ const BOX_COMPOSER_FIXTURES = [
   "omp--draft-ghost-suggestion-busy.txt",
   "omp--draft-single.txt",
   "omp--draft-wrapped.txt",
+  "omp--fresh-agents-hint.txt",
+  "omp--fresh-effort-hint.txt",
   "omp--fresh-idle.txt",
   "omp--menu-dismissed.txt",
   "omp--slash-palette--filtered.txt",
   "omp--slash-palette.txt",
+  "omp--v18-4-composer-idle.txt",
+  "omp--v18-10-draft-blank-line.txt",
+  "omp--v18-10-draft-indented.txt",
+  "omp--v18-10-draft-two-lines.txt",
   "omp--working.txt",
 ];
 
@@ -68,8 +74,14 @@ const ALL_OMP_FIXTURES = readdirSync(PANES_DIR)
 const NON_BOX_COMPOSER_FIXTURES = ALL_OMP_FIXTURES.filter((f) => !BOX_COMPOSER_FIXTURES.includes(f));
 
 describe("locateComposer — the real corpus, pinned so any change to the walk shows up as a diff", () => {
-  const PINNED: { fixture: string; top: number; bottom: number; suggestEnd: number }[] = [
+  const PINNED: { fixture: string; top: number; bottom: number; suggestEnd: number; draftEnd?: number }[] = [
     { fixture: "omp--fresh-idle.txt", top: 26, bottom: 27, suggestEnd: 28 },
+    // omp 18.4's empty-composer hint (`⇧⇥ to change thinking effort`) sits right-aligned in the
+    // bottom border: it changes what the row SAYS, never where the box is.
+    { fixture: "omp--fresh-effort-hint.txt", top: 1, bottom: 2, suggestEnd: 3 },
+    // The same border with the higher-priority hint, `← ← to see 1 running agent`: a background
+    // subagent was running. Its key run is two glyphs with a space between them.
+    { fixture: "omp--fresh-agents-hint.txt", top: 1, bottom: 2, suggestEnd: 3 },
     { fixture: "omp--draft-single.txt", top: 26, bottom: 27, suggestEnd: 28 },
     // The same screen with omp's inline suggestion painted after the draft: the ghost changes what
     // the row SAYS, never where the box is.
@@ -84,19 +96,27 @@ describe("locateComposer — the real corpus, pinned so any change to the walk s
     { fixture: "omp--done--tool-result.txt", top: 49, bottom: 50, suggestEnd: 51 },
     { fixture: "omp--working.txt", top: 32, bottom: 33, suggestEnd: 34 },
     { fixture: "omp--menu-dismissed.txt", top: 26, bottom: 27, suggestEnd: 28 },
+    // omp 18.4.10 after `/resume` forked a session: a 177-row buffer whose boxed composer is empty and
+    // whose top border carries the 18.4 powerline (`… ▶─2%───┃─1.1M─`, no branch named `master`).
+    { fixture: "omp--v18-4-composer-idle.txt", top: 175, bottom: 176, suggestEnd: 177 },
     // The slash palette renders BELOW the box — so `suggestEnd` runs past `bottom + 1` and the strip
     // takes the palette with the box.
     { fixture: "omp--slash-palette.txt", top: 26, bottom: 27, suggestEnd: 31 },
     { fixture: "omp--slash-palette--filtered.txt", top: 26, bottom: 27, suggestEnd: 33 },
+    // OMP 18.10 paints a draft's later lines UNDER its open-ended prompt row: `bottom` is the prompt,
+    // and the rows down to `draftEnd` are the draft, a blank line of it included.
+    { fixture: "omp--v18-10-draft-two-lines.txt", top: 11, bottom: 12, suggestEnd: 14, draftEnd: 14 },
+    { fixture: "omp--v18-10-draft-blank-line.txt", top: 11, bottom: 12, suggestEnd: 15, draftEnd: 15 },
+    { fixture: "omp--v18-10-draft-indented.txt", top: 11, bottom: 12, suggestEnd: 15, draftEnd: 15 },
   ];
 
   // These eleven indices are byte-identical to the ones the width-gated scanner produced. That is
   // evidence that dropping the measurements cost nothing the corpus can see: every boxed composer
   // capture still resolves to the same rows and every other capture still resolves to null.
-  it.each(PINNED)("$fixture locates the box", ({ fixture, top, bottom, suggestEnd }) => {
+  it.each(PINNED)("$fixture locates the box", ({ fixture, top, bottom, suggestEnd, draftEnd }) => {
     const box = locateComposer(fixtureLines(fixture));
     expect(box).not.toBeNull();
-    expect(box!).toEqual({ top, firstDraftRow: top + 1, bottom, suggestEnd });
+    expect(box!).toEqual({ top, firstDraftRow: top + 1, bottom, suggestEnd, draftEnd: draftEnd ?? bottom + 1 });
   });
 
   it("covers every boxed composer capture in the corpus", () => {
@@ -143,13 +163,18 @@ describe("extractInputDraft", () => {
     // A slash command mid-typing is a draft like any other — the palette below the box is chrome.
     { fixture: "omp--slash-palette.txt", draft: "/" },
     { fixture: "omp--slash-palette--filtered.txt", draft: "/new" },
-    // Empty composers. omp paints NO placeholder in an empty box, which is why this adapter ships no
-    // INPUT_PLACEHOLDERS allow-list — there is nothing to filter out.
+    // Empty composers. omp 17/18.1 painted nothing in an empty box; omp 18.4 paints a right-aligned
+    // key hint there (`⇧⇥ to change thinking effort`), which is placeholder text, not a draft.
+    // Reading it as one showed "Draft in terminal" on every fresh session (markers.ts
+    // `draftPlaceholder`).
+    { fixture: "omp--fresh-effort-hint.txt", draft: null },
+    { fixture: "omp--fresh-agents-hint.txt", draft: null },
     { fixture: "omp--fresh-idle.txt", draft: null },
     { fixture: "omp--done.txt", draft: null },
     { fixture: "omp--done--tool-result.txt", draft: null },
     { fixture: "omp--working.txt", draft: null },
     { fixture: "omp--menu-dismissed.txt", draft: null },
+    { fixture: "omp--v18-4-composer-idle.txt", draft: null },
   ];
 
   it.each(DRAFTS)("$fixture reads its draft", ({ fixture, draft }) => {
@@ -170,7 +195,20 @@ describe("extractStatusLines", () => {
     expect(rows[0]!.segments.length).toBeGreaterThan(1);
   });
 
-  it.each(BOX_COMPOSER_FIXTURES.filter((f) => f !== "omp--done.txt"))(
+  // The two omp 18.4 hint captures carry the capturing operator's own statusline template, not
+  // the `π … ▶` powerline these assertions read, and neither does the 18.4.10 idle capture, whose
+  // row runs on into a context meter (`▶─2%───┃─1.1M`) and names branch `main`. The three 18.10 draft
+  // captures run on into the same meter (`▶───5%───…128K─`).
+  it.each(
+    BOX_COMPOSER_FIXTURES.filter(
+      (f) =>
+        f !== "omp--done.txt" &&
+        f !== "omp--fresh-effort-hint.txt" &&
+        f !== "omp--fresh-agents-hint.txt" &&
+        f !== "omp--v18-4-composer-idle.txt" &&
+        !f.startsWith("omp--v18-10-draft-"),
+    ),
+  )(
     "%s: trims the border glyphs off both ends, keeping the whole powerline",
     (name) => {
       const text = lineText(extractStatusLines(fixtureLines(name))[0]!);
@@ -226,7 +264,14 @@ describe("stripChrome", () => {
     },
   );
 
-  it.each(NON_BOX_COMPOSER_FIXTURES)(
+  // The nine omp 18.10 Ask captures end with a file newline, which reads as one trailing blank row, and
+  // dropping that row is chrome stripping, not a bug: the same-reference contract is for captures whose
+  // last row is already content.
+  const ENDS_IN_CONTENT = NON_BOX_COMPOSER_FIXTURES.filter(
+    (name) => lineText(fixtureLines(name).at(-1)!).trim() !== "",
+  );
+
+  it.each(ENDS_IN_CONTENT)(
     "%s: returns the SAME reference when there is no chrome to strip",
     (name) => {
       // The conservatism contract: callers may treat `result === lines` as "nothing was removed".
@@ -351,6 +396,70 @@ describe("locateComposer — Unicode anywhere in the box must never produce a nu
 });
 
 describe("locateComposer — OMP 18.1.2's open-ended prompt row", () => {
+  // OMP 18.10.1, harness canary 2026-10-12: a multi-line draft keeps its first line on the prompt
+  // row and paints the rest UNDER it behind a three-space gutter. Read as autocomplete, those rows
+  // were dropped from the draft, so the reply guard never saw the message's tail and every
+  // multi-line send stalled; a blank line in the draft refused the composer outright.
+  describe("OMP 18.10's later draft lines under the prompt row", () => {
+    const status = " π > ⬢ sonnet > ⑂ master ▶───5%────128K─";
+    const composerWith = (...below: string[]) => lines(["transcript", "", status, "╰─ Reply with only OK.", ...below].join("\n"));
+
+    it("reads every later line, a blank line and a pasted rule included", () => {
+      const buffer = composerWith("   ──────────", "   some text", "", "   end");
+      expect(locateComposer(buffer)).toEqual({ top: 2, firstDraftRow: 3, bottom: 3, suggestEnd: 8, draftEnd: 8 });
+      expect(hasComposer(buffer)).toBe(true);
+      expect(extractInputDraft(buffer)).toBe("Reply with only OK. ────────── some text end");
+      expect(extractStatusLines(buffer).map(lineText)).toEqual([status]);
+    });
+
+    it("a blank row straight under the prompt is a blank line of the draft", () => {
+      expect(extractInputDraft(composerWith("", "   A paragraph after a blank line."))).toBe(
+        "Reply with only OK. A paragraph after a blank line.",
+      );
+    });
+
+    it("takes omp's suggestion off the last line only", () => {
+      const ghosted = lines(
+        [status, "╰─ Reply with only OK.", "   \u001b[38;2;229;229;231mend\u001b[38;2;107;114;128mpoint\u001b[0m"].join("\n"),
+      );
+      expect(extractInputDraft(ghosted)).toBe("Reply with only OK. end");
+    });
+
+    it("a box under the prompt still declines, with or without a blank before it", () => {
+      expect(locateComposer(composerWith("", "╭─ Switch Model ──────╮"))).toBeNull();
+      expect(locateComposer(composerWith("   some text", "╭─ Switch Model ──────╮"))).toBeNull();
+    });
+
+    it("a trailing blank run is padding, not a draft line", () => {
+      expect(extractInputDraft(composerWith("   some text", "", ""))).toBe("Reply with only OK. some text");
+    });
+
+    // The bridge matches the binding against NON-blank rows only, so blank lines in the draft must not
+    // count toward its tail window: seven rows under the prompt, four of them text, still bind.
+    it("binds the prompt row when the draft's blank lines are what make it tall", () => {
+      const buffer = composerWith("   a", "", "   b", "", "   c", "", "   d");
+      expect(composerPrompt(buffer)).toBe("╰─ Reply with only OK.");
+    });
+
+    // The real screens, from the harness canary on OMP 18.10.1 (fixtures README).
+    it.each([
+      ["omp--v18-10-draft-two-lines.txt", "Reply with only OK. Second line of the message."],
+      ["omp--v18-10-draft-blank-line.txt", "Reply with only OK. A paragraph after a blank line."],
+      ["omp--v18-10-draft-indented.txt", "Reply with only OK. indented code line another indented line"],
+    ])("%s reads the whole draft and binds the prompt row", (name, draft) => {
+      const buffer = fixtureLines(name);
+      expect(hasComposer(buffer)).toBe(true);
+      expect(extractInputDraft(buffer)).toBe(draft);
+      expect(composerPrompt(buffer)).toBe("╰─ Reply with only OK.");
+    });
+
+    it("takes the unbound write once six later lines hold text, as for a long palette", () => {
+      const rows = ["   1", "   2", "   3", "   4", "   5"];
+      expect(composerPrompt(composerWith(...rows))).toBe("╰─ Reply with only OK.");
+      expect(composerPrompt(composerWith(...rows, "   6"))).toBeNull();
+    });
+  });
+
   it("locates the live two-row shape and re-surfaces its status and draft", () => {
     const status = " idle  GPT-5.6-Sol ────────2%────────1M─";
     const buffer = lines(["transcript", "", status, `╰─ draft-probe${" ".repeat(80)}`].join("\n"));
@@ -360,6 +469,7 @@ describe("locateComposer — OMP 18.1.2's open-ended prompt row", () => {
       firstDraftRow: 3,
       bottom: 3,
       suggestEnd: 4,
+      draftEnd: 4,
     });
     expect(hasComposer(buffer)).toBe(true);
     expect(extractInputDraft(buffer)).toBe("draft-probe");

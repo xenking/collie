@@ -1,0 +1,154 @@
+# The Windows test suites, in ONE place. CI (`windows` job in ci.yml) and the Windows VM
+# (`make win-test`, guest-test.ps1 in the workspace) both call this file, so they cannot drift.
+#
+# The caller gets the code, the toolchain and `bun install` ready. This script does none of that.
+# It runs `bun test` over bridge, cli and scripts, and prints one line per suite. Exit 0 means: no
+# failing test, and no suite with more skipped tests than its own budget allows. Any other result
+# exits 1.
+#
+# Works in Windows PowerShell 5.1 and in PowerShell 7.
+#
+#   -Out       where the logs go: <suite>.log and <suite>.fails per suite (one failing name per line)
+#   -MaxSkipsBridge, -MaxSkipsCli, -MaxSkipsScripts
+#              the most skipped tests that still count as green, PER SUITE, so a new skip in one suite
+#              cannot hide behind a removed one in another. A test must not be skipped just to get
+#              green, so a higher count is a failure. Raise a number only with a reason.
+#              Bridge went from 2 to 0 when M43 spec 04 checked the access list instead of the mode.
+#              Today, 99 in all, each one named, with its reason:
+#              bridge 62. 5 are the POSIX-only and engine cases below, 21 are the durable example apps, and
+#                36 are the durable socket tests (see "Durable, bridge" below).
+#                Of the first 5, four are in bridge/stt/local-cli.test.ts. Windows has no executable bit
+#                and no file owner check in this provider:
+#                - "commandFileProblem: regular executable passes, symlinks are followed" (the
+#                  executable bit; a symlink needs a privilege on Windows)
+#                - "status refuses a directory and a non-executable file, and names neither" (the
+#                  executable bit)
+#                - "only an old directory with the prefix, owned by this user, is removed" (the
+#                  owner check by uid)
+#                - "loading the provider sweeps its temp root once, in the background" (without a
+#                  uid the sweep removes nothing on Windows, so there is nothing to see)
+#                The fifth is bridge/stt/whistle.test.ts, "the whistle provider - the real engine, end
+#                to end > a 13 s WAV becomes text through a real child of this Collie". It runs only
+#                where COLLIE_TEST_WHISTLE_DIR holds the measured model, which is never committed, so
+#                no CI job or VM has it (Linux CI skips it too).
+#              Durable, bridge (21 + 36). Windows has no socket transport (WIRE.md section 1A), so a test
+#                that is about the Unix socket itself cannot run there. The tests about the wire (controls,
+#                asks, answers, receipts, events, Chat, starters, the conformance suite) run on Windows
+#                against the fake program on 127.0.0.1 (`FakeDurableProgram.startWire`). The 21 are every
+#                test of bridge/mux/durable/example.test.ts (10) and example-cloudflare.test.ts (11): the
+#                example apps listen on a Unix socket or need `wrangler`. The 36 are
+#                bridge/mux/durable/client.test.ts: "the privacy check", "the path walk" and "the request"
+#                (26; the socket client's owner, mode, link and path rules, and its deadline and size cap on
+#                a socket); bridge/mux/durable/adapter.test.ts (6: the factory reading
+#                COLLIE_DURABLE_SOCKET, the startup line, socket path rules, a program that asks for a token,
+#                a socket that loses its mode, a socket that is not there); events.test.ts (the factory
+#                handed a socket path), asks.test.ts (a socket with nothing listening) and
+#                http-client.test.ts (the socket client sends no Authorization header), one each; and
+#                bridge/durable/log.test.ts (a mode 0755 folder put back to 0700).
+#              cli 14. 12 are every test of the "doctor durable" describe in cli/doctor.test.ts: each reads a
+#                real Unix socket. Its Windows rows are tested in cli/durable-findings.test.ts with a fake
+#                platform. The other 2:
+#                "a per-call override wins over the Exec's own environment (#283) > a child
+#                killed by a signal says which one" (Windows has no POSIX signals), and
+#                "collie _whistle-transcribe - the real engine, end to end > a child of this checkout's CLI turns 10.4 s of speech into text"
+#                (the same missing model as the bridge case).
+#              scripts 23: every test of scripts/install.test.ts ("scripts/install.sh > ..."):
+#                install.sh is POSIX sh, and Windows installs with install.ps1, tested beside it.
+param(
+  [Parameter(Mandatory = $true)][string]$Out,
+  [int]$MaxSkipsBridge = 62,
+  [int]$MaxSkipsCli = 14,
+  [int]$MaxSkipsScripts = 23
+)
+$skipBudget = @{ bridge = $MaxSkipsBridge; cli = $MaxSkipsCli; scripts = $MaxSkipsScripts }
+$ErrorActionPreference = "Continue"
+$ProgressPreference = "SilentlyContinue"
+
+# Always run from the repository root, whatever directory the caller is in.
+Set-Location (Split-Path -Parent $PSScriptRoot)
+$Out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Out)
+
+# Some suites shell out to bash. Git for Windows has one, but it is not on PATH by default.
+# Put Git's own bash FIRST: Windows can also have `System32\bash.exe`, the WSL launcher, and that one is no use.
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+$gitBin = if ($gitCmd) { Join-Path (Split-Path -Parent (Split-Path -Parent $gitCmd.Source)) "bin" } else { "C:\Program Files\Git\bin" }
+if (Test-Path (Join-Path $gitBin "bash.exe")) { $env:Path = "$gitBin;" + $env:Path }
+Write-Output ("bash     {0}" -f $(if (Get-Command bash -ErrorAction SilentlyContinue) { (Get-Command bash).Source } else { "NOT FOUND" }))
+
+# Hermetic: the suites must not read a config or state dir that a live bridge on this machine uses.
+foreach ($v in "HERDR_PLUGIN_CONFIG_DIR", "HERDR_PLUGIN_STATE_DIR", "COLLIE_STATE_DIR", "COLLIE_PORT", "HERDR_SOCKET_PATH") {
+  Remove-Item "Env:$v" -ErrorAction SilentlyContinue
+}
+New-Item -ItemType Directory -Force -Path $Out, "$Out\cfg", "$Out\state" | Out-Null
+$env:HERDR_PLUGIN_CONFIG_DIR = "$Out\cfg"
+$env:HERDR_PLUGIN_STATE_DIR = "$Out\state"
+
+function Read-Utf8Lines([string]$path) {
+  if (-not (Test-Path -LiteralPath $path)) { return @() }
+  return [System.IO.File]::ReadAllLines($path)
+}
+
+# The count that bun prints on a line like "  12 skip". A missing line means zero.
+function Get-BunCount([string[]]$lines, [string]$word) {
+  foreach ($l in $lines) { if ($l -match "^\s*(\d+) $word\s*$") { return [int]$Matches[1] } }
+  return 0
+}
+
+$failed = $false
+$allFails = @()
+$overBudget = @()
+$totalSkips = 0
+
+# One suite = one command line. cmd.exe does the redirect, so PowerShell never wraps or
+# re-encodes the output, and the "(fail) name" lines stay whole.
+$suites = [ordered]@{
+  bridge  = "bun test ./bridge"
+  cli     = "bun test ./cli"
+  scripts = "bun test ./scripts"
+}
+foreach ($name in $suites.Keys) {
+  $log = "$Out\$name.log"
+  cmd /c "$($suites[$name]) > `"$log`" 2>&1"
+  $bunExit = $LASTEXITCODE
+  $lines = Read-Utf8Lines $log
+  $pass = Get-BunCount $lines "pass"
+  $fail = Get-BunCount $lines "fail"
+  $skip = Get-BunCount $lines "skip"
+  $failing = @($lines | Where-Object { $_ -like "(fail) *" } |
+    ForEach-Object { ($_ -replace "^\(fail\) ", "") -replace "\s+\[[\d.]+ms\]$", "" } |
+    Sort-Object -Unique)
+  # Not `Set-Content`: with an empty list it leaves the old file in place, and a green run would
+  # keep the failures of an earlier red one.
+  [System.IO.File]::WriteAllLines("$Out\$name.fails", [string[]]$failing)
+  Write-Output ("{0,-8} {1} pass, {2} fail, {3} skip" -f $name, $pass, $fail, $skip)
+  $totalSkips += $skip
+  if ($skip -gt $skipBudget[$name]) { $overBudget += ("{0} {1}, allowed {2}" -f $name, $skip, $skipBudget[$name]) }
+  $allFails += @($failing | ForEach-Object { "{0}: {1}" -f $name, $_ })
+  if ($pass -eq 0) {
+    # No summary line, or none passed: a suite that ran nothing must not look green.
+    Write-Output ("         {0}: no passing test in {1}" -f $name, $log)
+    $failed = $true
+  }
+  if ($fail -gt 0 -or $failing.Count -gt 0) { $failed = $true }
+  elseif ($bunExit -ne 0) {
+    # bun failed with no failing test: a crash, a timeout, or a file that did not load.
+    Write-Output ("         bun exit {0} with no failing test, last lines of {1}:" -f $bunExit, $log)
+    $lines | Select-Object -Last 8 | ForEach-Object { Write-Output "         $_" }
+    $failed = $true
+  }
+}
+
+$allowed = $MaxSkipsBridge + $MaxSkipsCli + $MaxSkipsScripts
+Write-Output ("skips    {0} (allowed {1}: bridge {2}, cli {3}, scripts {4})" -f $totalSkips, $allowed, $MaxSkipsBridge, $MaxSkipsCli, $MaxSkipsScripts)
+if ($overBudget.Count -gt 0) {
+  Write-Output ("         too many skipped tests: {0}." -f ($overBudget -join "; "))
+  Write-Output "         Remove the skip. If a test truly cannot run on Windows, raise that suite's -MaxSkips<Suite> in scripts/windows-suites.ps1 and say why in the PR."
+  $failed = $true
+}
+if ($allFails.Count -gt 0) {
+  Write-Output "failing tests (first 40):"
+  $allFails | Select-Object -First 40 | ForEach-Object { Write-Output "         $_" }
+}
+Write-Output "logs     $Out"
+if ($failed) { exit 1 }
+exit 0

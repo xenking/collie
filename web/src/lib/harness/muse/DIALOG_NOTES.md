@@ -4,7 +4,7 @@ Verified keystroke recipes for the four dialogs `harness/muse/` lifts, probed
 keystroke-by-keystroke against Muse Code 1.3.0 (1.3.0-R3401.1) in a scratch
 Herdr pane (`/tmp/collie-muse-sandbox`, `--approval-mode untrusted
 --approval-judge off`) on 2026-09-18. Fixtures:
-`web/src/fixtures/panes/muse--*.txt` (18 files, all CRLF, one
+`web/src/fixtures/panes/muse--*.txt` (31 files, all CRLF, one
 length-preserving email sanitization).
 
 Every probe below names the key sent and the screen observed after it. Nothing
@@ -19,6 +19,8 @@ While any dialog below is up, the composer tail stays on screen (except trust,
 which is pre-session): the `── Voice input (⌥ + v to start) ──` rule, the `❯`
 row (bare — no placeholder while a dialog owns the keyboard), the full-width
 `─` bottom rule, and the `muse-spark-1.3 · <plan> · <cwd> · <mode>` statusline.
+While background tasks exist, the tasks popup (§5) sits between the rule and
+the statusline — chrome, tolerated by the tail walk, never lifted.
 So `composerReady` can never be "the box is there" alone: it is "the box is
 there AND no dialog detector claims the screen" (the grok plan-menu pattern).
 
@@ -63,6 +65,32 @@ Probed recipe — digit alone (family `permission`):
 Option 2 ("Always allow …") persists a workspace rule. It is still a plain
 digit answer — the persistence is Muse's own semantics for that row, and the
 label says so on the button. No special-casing.
+
+## 1b. Approval — "Would you like to allow this network access?" (added 2026-09-23, #280)
+
+Fixtures: `muse--approval-network.txt` (pointer on 1), `muse--approval-network-moved.txt`
+(pointer on 2, as seen live).
+
+```
+Would you like to allow this network access?
+
+  network: www.gt:443 https
+  full URL: https://www.gt/sitio/faq.php#faq-47
+
+› 1. Yes, proceed (y)
+  2. Yes, don't ask again this session (p)  www.gt:443 (https)
+  3. Always allow this network destination  www.gt:443 (https)
+  4. No, and tell Muse Code what to do differently (esc)
+```
+
+Same tail contract as §1 (box replaced, no footer row, digit alone) with its own
+question + subject pair. Options 2–3 carry a trailing scope (`host:port (scheme)`)
+that the lifted labels keep — it names what the digit blesses. Option 3 carries
+no parenthetical shortcut (digit-only on the terminal too).
+
+Probed recipe — digit alone (family `permission`): `1` ALONE approved once and
+the fetch ran (`◆ Fetched https://example.com`), no Enter. `keys: ["1"]` /
+`["2"]` / `["3"]` / `["4"]`.
 
 ## 2. Single-select question — "Enter to select"
 
@@ -199,6 +227,159 @@ rather than keys.
 Probed recipe — digit alone (family `trust`): `1` submitted immediately
 (session started, no Enter). `keys: ["1"]` / `["2"]`.
 
+## 5. The background-tasks popup — tolerated, never lifted (added 2026-09-26)
+
+Fixtures: `muse--tasks-popup.txt` (one task running, bare box),
+`muse--tasks-popup-draft.txt` (same, `qq` in the box, header bare),
+`muse--tasks-popup-approval.txt` (an `ls` approval with the popup under it).
+Probed keystroke-by-keystroke against Muse Code 1.4.0 (1.4.0-R4302.1) in a
+scratch Herdr pane (`/tmp/collie-muse-tasks`, `--approval-mode untrusted
+--approval-judge off --trust-workspace`). The same shape was confirmed on
+1.3.0-R3401.1 (a live screen + scrollback bytes, not a probe session).
+
+While background tasks exist, Muse paints this run between the bottom rule
+and the statusline:
+
+```
+──────────────────────────────────────────────────  (bottom rule)
+main · ↓ to select                                  (header + hint)
+└ ◆ Run sleep delay command  running          24s   (one row per task)
+  muse-spark-1.3 · max · <cwd> · <mode>              (statusline)
+```
+
+Two tasks branch `├` / `└`. The header hint tracks state: `↓ to select`
+with an empty box, `Enter to view` over a finished task,
+`Enter to view · x to stop` while the popup holds focus, bare `main` while
+the box holds a draft. A finished task reads `ran 12s, exit 0` with a frozen
+elapsed; a running one's elapsed ticks every second. The spinner glyph
+cycles (◆ ◈ ◇ and a braille frame measured) and the timer is right-aligned,
+so NOTHING past the branch glyph carries identity — the header above and the
+statusline below do. `main` is the only group name measured; any other name
+fails closed to the unread-dialog card.
+
+It is tolerated as chrome rather than lifted because the composer stays
+LIVE under it — every line below is a sent key and the screen after it:
+
+- Typing `hello` with the popup up: the draft lands in the `❯` box and the
+  header drops its hint (bare `main`). Clearing the draft brings the hint
+  back. Typing with the popup FOCUSED also lands in the box and unfocuses
+  the popup. The box always owns the keyboard.
+- `Down` with an empty box moves focus onto the popup (header gains
+  `Enter to view · x to stop`); the selected row is marked by COLOUR alone
+  (red name, brighter glyph — no pointer glyph, no text change), so no
+  shape grammar can see it. `Down`/`Enter` on a single task are no-ops.
+- `Escape` dismisses the popup (tail back to rule-over-statusline).
+- The popup coexists with the approval dialog (approval replaces the box;
+  rule + popup + statusline persist), so the tail walk must step over it
+  for the approval lift too — otherwise the approval loses its buttons to
+  the unread card, whose Esc would abort the command.
+
+Visibility dynamics (observed, not fully isolated): the popup shows while
+at least one task runs; a task finishing while it is up transitions to
+`ran …, exit …` in place, while one finishing mid-turn (popup absent)
+leaves no popup behind. A lingering finished row clears on its own after a
+few minutes. The strip cuts the popup with the chrome; the transcript's own
+`Backgrounded` / `Finished` rows keep the operator informed.
+
+The bridge's tail window limits what lifts over the popup (added at merge,
+2026-09-27). A tap's first write is bound to the dialog's region, and the
+bridge accepts the binding only when the region ends within the last 6
+non-blank rows (`bridge/prompt-binding.ts`). The popup adds a header and one
+row per task under the rule. An approval over one or two tasks still fits.
+An approval over three or more, or a question or checkbox dialog over any
+popup, would refuse every tap. `museBuildBlocks` declines those lifts
+(`regionReachesTail`), so those screens keep the unread-dialog card and its
+Escape, as they did before the popup was read. On an approval that Escape
+aborts the command; the Keys pad still reaches the digits. No capture shows
+the popup under a question or checkbox dialog, or with three tasks: the
+tests build those screens from the captured rows.
+
+A focused popup refuses the composer (added at merge, 2026-09-27). While the
+header names `x to stop`, `composerReady` answers false. Typed text did land
+in the box with the popup focused, but the header says `x` stops the task,
+and the probe above does not record an `x` typed in that state. So the phone
+does not type there. It shows the unread-dialog card, whose Escape dismisses
+the popup. `Enter to view` alone names no key a message could start with, so
+that header stays ready. No capture holds the focused header; the tests
+rewrite the captured header row.
+
+## 6. Muse 1.4.7 — the `⟩` pointer, multi-question pages, approval hint (added 2026-10-12)
+
+Probed keystroke-by-keystroke against Muse Code 1.4.7 (1.4.7-R6101.1) in
+scratch Herdr panes (`/tmp/qarepro`, `/tmp/qatrust`, `/tmp/qaapprove`, the
+last with `--approval-mode untrusted --approval-judge off`). Fixtures:
+`muse--ask-multi-q1.txt` (page 1 of 2), `muse--ask-multi-q2.txt` (page 2),
+`muse--ask-multi-review.txt` (the confirm screen),
+`muse--ask-season.txt` (single question), `muse--ask-toppings-147.txt`
+(checkbox) + `muse--ask-toppings-147-moved.txt` (pointer on 2),
+`muse--approval-ls-147.txt` + `muse--approval-date-147.txt` (pointer on 2),
+`muse--trust-prompt-147.txt`.
+
+Three shape changes, all in the paint, none in the choreography. Every
+recipe in §§1–4 was re-probed below and holds; the detectors match both
+generations as a set (markers.ts `POINTER`), so the 1.3.0 corpus still
+lifts untouched.
+
+The pointer moved from `›` (U+203A) to `⟩` (U+27E9) on menu rows, and
+from ASCII `>` to `⟩` on review and trust rows. Every dialog:
+
+```
+◇ Request user input Color, Pet — running (1m 02s)
+
+  What is your favorite color?
+
+  ⟩ 1. Red                Red is your favorite color.
+    2. Green              Green is your favorite color.
+    3. Blue               Blue is your favorite color.
+    4. None of the above  Optionally, add details in notes (tab).
+
+  1 of 2
+  Enter to select · ↑/↓ to move · ←/→ to switch question · Tab for an optional note · Esc to interrupt
+```
+
+A multi-question call paints one page per question with an `N of M`
+progress row between the options and its own footer, which names `←/→ to
+switch question`. The single-question footer is byte-identical to 1.3.0
+(no progress row, no `←/→` clause). Each page answers like §2 (digit
+moves, Enter selects) except that Enter ADVANCES to the next page
+instead of submitting; the flow ends on the review screen, which lists
+one `Question: answer` summary per question under the same lead row,
+with `⟩ Submit answers` pointed. One answered flow confirmed
+`Structured user input answered — Color: Red; Pet: Cat`, a second
+`Color: Green; Pet: Cat`.
+
+Approvals append a static hint under the options:
+
+```
+⟩ 1. Allow this stage once (y)
+  2. Always allow in this workspace: ls ... (p)
+  3. Abort the entire command (esc)
+Change approval defaults in /permissions
+```
+
+The grammar steps over it by exact match (a rewording fails closed to
+raw); it stays outside the signature. Trust is the §4 shape with a `⟩`
+pointer and no blank run between the explainer and the options.
+
+Re-probed recipes (key sent → screen after):
+
+- Radio: `2` moved the pointer 1 → 2, nothing submitted; `Enter`
+  submitted Tea (`Structured user input answered — Drink: Tea`).
+- Multi pages: `2` on page 1 moved the pointer (`1 of 2` kept);
+  `Enter` advanced to page 2 (pointer reset to 1); `Left` switched
+  back with the answer kept (pointer on 2); `Enter` re-confirmed;
+  answering page 2 reached review (`Color: Green`, `Pet: Cat`);
+  `Enter` on `Submit answers` submitted.
+- Checkbox: `2` moved 1 → 2 (`0 checked`); `Enter` toggled Walnuts
+  (`[x]`, `1 checked`); `Down ×3` + `Enter` on the Submit row advanced
+  to review (`Nuts: Walnuts`).
+- Review: `1` was swallowed (no change); `Esc` went back to the
+  checkbox phase with the toggle kept; the answered flow ends on the
+  same banner shape as §2.
+- Approval: `3` alone aborted (dialog gone, turn continued).
+- Trust: `2` alone quit to the shell; `1` alone trusted and started
+  the session.
+
 ## Decisions the adapter rests on
 
 - **The guarded reply path.** Registering the adapter moves Muse panes off one-shot sends onto
@@ -225,16 +406,43 @@ Probed recipe — digit alone (family `trust`): `1` submitted immediately
   reader now refuse a question/checkbox/note match only above a bare box, and a review match only
   with its live header above. Approval and trust need no such check: a match structurally implies
   no live box beside it.
+- **The tail walk steps over blank draft rows (added 2026-09-23, #274).** A paragraph break
+  inside the box used to stop the continuation walk, so a healthy two-paragraph draft read as
+  prompt null — "no composer". Verify then read null forever (stuck send), the unread-dialog
+  card drew over the live box, and each two-tap retry appended a full duplicate (the force path
+  types without the sweep). Observed live: one message typed six times. The walk now treats
+  blank rows as part of the draft run under the same bound; approval still resolves null at
+  its subject rows. Also probed the same night: the placeholder tip rotates (`/loop 10m
+  <prompt> schedules a recurring prompt`), so the set holds both known variants.
 - **Every lift keeps the rows above it (added at merge).** The prompt panel shows neither the
   approval's command nor the trust prompt's folder, so those rows stay on screen as raw text.
+- **The palette's exact-match row is not draft (added 2026-09-23, #276).** Typing `/usage`
+  opens one suggestion row inside the draft run, and folding it in could never verify. When
+  the prompt starts with `/` and the run below it is exactly one suggestion row naming that
+  same command, the draft reads as the prompt text alone — Enter submits the exact match
+  (probed). Partial input keeps the legacy polluted read and stalls safe: Enter there
+  accepts the highlighted suggestion (probed: `/us` ran `/usage`), so verifying the typed
+  text would bless a command the operator did not type. Multi-suggestion and slash-led
+  multi-line drafts stay unmeasured and stall the same safe way.
+- **Image paths attach on sight; other paths quote (added 2026-09-23, #278).** Typing an
+  image path converts it in place to `[Image #N]` (N in attach order); a second image becomes
+  `[Image #2]` beside it. A non-image path is double-quoted in place instead. Both break the
+  generic verify (sent path vs token text), so the adapter's second look maps chips back to
+  the sent text's image runs positionally, unquotes spans the sent text carries bare, and
+  requires whole-string equality — stale chips, count mismatches and mis-orderings all fail
+  it and stall safe. The draft read itself stays verbatim. The pre-clear sweep removes
+  chips, so retries re-attach from #1. Also probed: the placeholder tip rotates per
+  context (`Paste an image with Ctrl+V — file paths and URLs work too`), listed alongside.
 - **The review cancel button says `Interrupt turn` (added at merge).** That row ends the whole
   turn, and the button carries the terminal's own words rather than "Cancel".
 
 ## What was deliberately NOT lifted
 
 - The command palette, `/resume` picker, `/tasks` drawer and `/workflows`
-  control room: out of this file's scope, no captures, no detectors.
-- Network/peer approval variants: no capture showed them; they ride along only
-  if a future capture shows the approval shape above.
+  control room: out of this file's scope, no captures, no detectors. (The
+  drawer's INLINE sibling, the background-tasks popup, graduated to §5 —
+  tolerated as chrome, never lifted, because the composer stays live under it.)
+- File/peer approval variants: no capture showed them; they ride along only
+  if a future capture shows the approval shape above. (Network graduated to §1b on its capture.)
 - Plan approval: Muse 1.3.0 showed no plan-approval dialog shape to lift.
 - The `!`-shell escape and voice-input rule: chrome/tips, never dialogs.

@@ -10,10 +10,16 @@ import { Composer } from "./composer";
 
 import { pcm16, VoiceInput, type VoiceState } from "./voice-input";
 
+interface ReadyMessage {
+  kind: "ready";
+  replySpeech?: boolean;
+}
+
 class FakeSocket {
   static readonly OPEN = 1;
   static instances: FakeSocket[] = [];
   static autoReady = true;
+  static readyMessage: ReadyMessage = { kind: "ready" };
   readonly send = vi.fn();
   readyState = FakeSocket.OPEN;
   binaryType = "blob";
@@ -23,7 +29,7 @@ class FakeSocket {
 
   constructor(_url: string) {
     FakeSocket.instances.push(this);
-    if (FakeSocket.autoReady) queueMicrotask(() => this.emit({ kind: "ready" }));
+    if (FakeSocket.autoReady) queueMicrotask(() => this.emit(FakeSocket.readyMessage));
   }
 
   close() {
@@ -174,6 +180,87 @@ describe("VoiceInput", () => {
     await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"release"}'));
     await waitFor(() => expect(onVoiceStateChange).toHaveBeenLastCalledWith(null));
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("shows 'No speech was recognised' when the bridge reports idle before the empty final", async () => {
+    // bridge/voice.ts: a silent turn sets phase idle and sends voice-state idle, THEN the ordered
+    // empty `final`. The idle handler clears the voice state, so the final must still be recognised.
+    const onTranscript = vi.fn(async () => false);
+    const onError = vi.fn();
+    render(
+      <VoiceInput
+        replySpeechSupported={true}
+        recordingMode="toggle"
+        paneId="w1:p4"
+        showControl
+        disabled={false}
+        onTranscript={onTranscript}
+        onVoiceStateChange={vi.fn()}
+        onError={onError}
+      />,
+    );
+
+    const button = await startVoice();
+    fireEvent.click(button);
+    FakeSocket.instances[0]?.emit({ kind: "voice-state", generation: 1, phase: "idle" });
+    FakeSocket.instances[0]?.emit({ kind: "final", generation: 1, text: "" });
+
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("No speech was recognised"));
+    expect(onTranscript).not.toHaveBeenCalled();
+  });
+
+  it("hands off for TTS when the server says the pane can speak, whatever the prop said at mount", async () => {
+    // A parked OMP pane has no session at mount; the media route wakes it and the bridge's `ready`
+    // reports that its relay is live. The socket closure must follow the server, not the stale prop.
+    FakeSocket.readyMessage = { kind: "ready", replySpeech: true };
+    try {
+      const onTranscript = vi.fn(async () => true);
+      render(
+        <VoiceInput
+          replySpeechSupported={false}
+          recordingMode="toggle"
+          paneId="w1:p4"
+          showControl
+          disabled={false}
+          onTranscript={onTranscript}
+          onVoiceStateChange={vi.fn()}
+          onError={vi.fn()}
+        />,
+      );
+
+      const button = await startVoice();
+      fireEvent.click(button);
+      FakeSocket.instances[0]?.emit({ kind: "voice-state", generation: 1, phase: "working" });
+      FakeSocket.instances[0]?.emit({ kind: "final", generation: 1, text: "Привет" });
+
+      await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"handoff","generation":1}'));
+      expect(FakeSocket.instances[0]?.send).not.toHaveBeenCalledWith('{"kind":"release"}');
+    } finally {
+      FakeSocket.readyMessage = { kind: "ready" };
+    }
+  });
+
+  it("in toggle mode a slow press (held past 350 ms) still starts recording", async () => {
+    render(
+      <VoiceInput
+        replySpeechSupported={true}
+        recordingMode="toggle"
+        paneId="w1:p4"
+        showControl
+        disabled={false}
+        onTranscript={vi.fn(async () => false)}
+        onVoiceStateChange={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Start voice input" });
+    fireEvent.pointerDown(button, { button: 0, pointerId: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    fireEvent.pointerUp(button, { button: 0, pointerId: 1 });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"start"}'));
   });
 
   it("reconnects a handed-off relay after the mobile socket closes", async () => {
@@ -425,14 +512,8 @@ describe("VoiceInput", () => {
           text="pane output"
           terminalDraft={null}
           rawTerminalDraft={null}
-          prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
-          setWrap={vi.fn()}
-          stepFontSize={vi.fn()}
-          setRawTerminal={vi.fn()}
-          setTapToFocus={vi.fn()}
-          mirrorNative={false}
-          setMirrorNative={vi.fn()}
-          setExpandClippedReply={vi.fn()}
+          prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true }}
+          display={{ open: false, onToggle: vi.fn() }}
           onSent={vi.fn()}
         />,
       }]);

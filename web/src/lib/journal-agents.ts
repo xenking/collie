@@ -1,22 +1,29 @@
 // WHICH AGENTS CAN HAVE A READABLE TRANSCRIPT AT ALL — the client's half of the question
 // `bridge/journal/registry.ts` answers server-side.
 //
-// The bridge sets `AgentView.hasSession` only when a pane named a session AND its agent has a
-// journal adapter (`bridge/types.ts` toPaneWire). Both halves are folded into that one flag, so an
-// absent flag cannot say WHICH half failed — and the two want opposite words. An agent with no
-// journal adapter has nothing to explain: there is no transcript to read, ever, and a sentence
-// about it would be noise. An agent that HAS one and still reported no session is the case an
-// operator can fix (issue #137: a missing or outdated `herdr integration install <agent>` hook),
-// and silence there reads as a bug in Collie.
+// The bridge sets `AgentView.hasSession` when the agent has a journal adapter and a session is
+// addressable — reported on the pane record, or found by an adapter that discovers its own
+// (`bridge/types.ts` toPaneWire). Both halves are folded into that one flag, so an absent flag
+// cannot say WHICH half failed — and the two want opposite words. An agent with no journal adapter
+// has nothing to explain: there is no transcript to read, ever, and a sentence about it would be
+// noise. An agent that HAS one and still reported no session is the case an operator can fix
+// (issue #137: a missing or outdated `herdr integration install <agent>` hook), and silence there
+// reads as a bug in Collie. A discovering adapter (Muse, OpenClaw) never lands here: its panes always offer
+// the affordance, since no hook could fix what discovery already finds.
 //
 // So the frontend needs the name list, and it is a NAME LIST, never a detector: nothing may key a
-// grammar, a fetch or a pane's identity off a match here — the same rule `KNOWN_HARNESS_NAMES`
-// carries bridge-side. It decides one muted sentence and nothing else.
+// grammar, a fetch or a pane's identity off a match against `JOURNAL_AGENT_NAMES` — the same rule
+// `KNOWN_HARNESS_NAMES` carries bridge-side. It decides one muted sentence and nothing else.
+//
+// The two smaller sets below are declared per-agent FACTS, each mirrored from its own constant in
+// `bridge/journal/registry.ts` with the reason there. `FIRST_PROMPT_AGENTS` words a note.
+// `OFF_GRID_IMAGE_AGENTS` bounds one read: the newest turn's picture after a finished turn (#292).
+// It decides whether that read is worth making, never what a screen means.
 //
 // This is NOT `lib/harness/registry.ts`, and the two must not be folded together — that one owns
 // block grammars for the LIVE MIRROR (claude, codex, grok, omp, agy), this one owns reading an
-// on-disk log (claude, codex, grok, opencode, pi). A harness can plausibly have either without the
-// other, which is exactly why the bridge keeps two registries too.
+// on-disk log (claude, codex, grok, hermes, muse, openclaw, opencode, pi). A harness can plausibly have
+// either without the other, which is exactly why the bridge keeps two registries too.
 //
 // Kept in step with `bridge/journal/registry.ts` by hand, deliberately: the list is not on the wire
 // (no bridge publishes it), and a speculative fetch to discover it would cost a request per pane to
@@ -24,16 +31,56 @@
 
 /** The Herdr `agent` strings this build can read a session log for. Mirrors `journalAgents()` plus
  *  every alias in the bridge's `AGENT_ALIASES` — `omp` is Oh My Pi, which writes pi's log in pi's
- *  format, so it is a second NAME for the pi adapter and not a seventh adapter. */
-const JOURNAL_AGENTS: ReadonlySet<string> = new Set([
+ *  format, so it is a second NAME for the pi adapter and not an eighth adapter.
+ *
+ *  Exported for the version ledger's test (M41/05), which owes a `journal` line to every agent on
+ *  this list and cannot ask for one without the list. Still a NAME LIST and still never a detector:
+ *  read it to enumerate, ask {@link hasJournalAdapter} to decide. */
+export const JOURNAL_AGENT_NAMES: ReadonlySet<string> = new Set([
   "claude",
   "codex",
   "grok",
   "hermes",
+  "muse",
   "omp",
+  "openclaw",
   "opencode",
   "pi",
 ]);
+
+/** The agents that report their session to Herdr on the FIRST PROMPT, not at start. Mirrors
+ *  `REPORTS_SESSION_ON_FIRST_PROMPT` in `bridge/journal/registry.ts`, which holds the reason (#294):
+ *  Codex fires the hook Herdr's integration listens on only when its first prompt is submitted.
+ *  Must come after `JOURNAL_AGENT_NAMES` in this file: registry.test.ts reads the first set as that
+ *  one. */
+const FIRST_PROMPT_AGENTS: ReadonlySet<string> = new Set(["codex"]);
+
+/** The agents whose session is reported at start but whose log file appears only after the first
+ *  reply: pi, and Oh My Pi (`omp`), its second name. Not on the wire, so named here by hand; the
+ *  reason is in `lib/chat-gate.ts`. A pane of one with a session and no log yet may simply be new. */
+const LOG_AFTER_FIRST_REPLY_AGENTS: ReadonlySet<string> = new Set(["omp", "pi"]);
+
+/** The agents that draw a picture the mirror cannot see, because a direct Kitty placement leaves
+ *  nothing on the grid, and whose journal records it. Mirrors `DRAWS_IMAGES_OFF_GRID` in
+ *  `bridge/journal/registry.ts`, which holds the reason (#292). */
+const OFF_GRID_IMAGE_AGENTS: ReadonlySet<string> = new Set(["omp", "pi"]);
+
+/**
+ * Whether `agent` draws pictures the mirror cannot see, so its newest turn's picture is worth one
+ * journal read after each finished turn. Every other agent draws none and pays no such read.
+ */
+export function drawsImagesOffGrid(agent: string | undefined): boolean {
+  return agent !== undefined && OFF_GRID_IMAGE_AGENTS.has(agent);
+}
+
+/**
+ * Whether `agent` reports its session only once its first prompt is submitted. A pane of such an
+ * agent with no session may simply not have had a turn yet, so the note must not blame the
+ * integration outright.
+ */
+export function reportsSessionOnFirstPrompt(agent: string | undefined): boolean {
+  return agent !== undefined && FIRST_PROMPT_AGENTS.has(agent);
+}
 
 /**
  * Whether `agent` is one whose sessions Collie could read a transcript from.
@@ -43,5 +90,22 @@ const JOURNAL_AGENTS: ReadonlySet<string> = new Set([
  * promising that pane a fix it cannot apply would be worse than saying nothing.
  */
 export function hasJournalAdapter(agent: string | undefined): boolean {
-  return agent !== undefined && JOURNAL_AGENTS.has(agent);
+  return agent !== undefined && JOURNAL_AGENT_NAMES.has(agent);
+}
+
+/**
+ * Whether an IDLE pane of `agent` that this view first met already idle may be brand new, because the
+ * thing Chat reads is not there YET for a reason that is not a fault:
+ *
+ * - an agent that reports its session on the first prompt (Codex) has no session before one, and
+ * - an agent that writes its log after the first reply (pi) has a session and no log.
+ *
+ * Any other agent, or either of these showing the other half (Codex with a session, pi without one),
+ * has no such excuse: an idle pane with nothing to read may have a long past Chat cannot show (the
+ * hook is missing, Codex declined trust, the transcript was cleaned up), so its terminal stays.
+ */
+export function mayBeNewWithNothingToRead(agent: string | undefined, hasSession: boolean): boolean {
+  if (agent === undefined) return false;
+  if (FIRST_PROMPT_AGENTS.has(agent)) return !hasSession;
+  return LOG_AFTER_FIRST_REPLY_AGENTS.has(agent) && hasSession;
 }

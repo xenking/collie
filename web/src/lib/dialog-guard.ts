@@ -27,6 +27,7 @@
 import { sendKeys } from "./api";
 import { describeApiError, describeThrownError } from "./api-error-message";
 import { type StyledLine } from "./blocks";
+import type { ColumnRange } from "./column-range";
 import { withUnreadDialog } from "./harness";
 import { adapterFor } from "./harness/registry";
 import {
@@ -41,6 +42,7 @@ import {
   readModel,
   type ActionResult,
   type GuardOutcome,
+  type PollOutcome,
   type Sleep,
 } from "./harness/guard";
 import type { Scope } from "./scope";
@@ -116,6 +118,8 @@ export async function guardDialog<K extends DialogKind>(
     dialogDetector(target.kind, target.agent),
     contract[compare],
     contract.region,
+    contract.styled,
+    contract.columns,
   );
 }
 
@@ -131,25 +135,37 @@ export async function sendGuardedKeys<K extends DialogKind>(
 ): Promise<ActionResult> {
   const guarded = await guardDialog(target, compare);
   if (!guarded.ok) return guarded.result;
-  return sendBoundKeys(target, keys, guarded.region);
+  return sendBoundKeys(target, keys, guarded.region, guarded.styled, guarded.columns);
 }
 
 /** Send `keys`, mapping transport + prompt-binding failures onto the ActionResult union. `region`
  *  undefined = an unbound write (a later step of a multi-step choreography, which has deliberately
- *  changed the screen since the guard ran). */
+ *  changed the screen since the guard ran). `styled`, the canonical styled lines of the same region,
+ *  rides along as `expected_styled` when the model being bound carries them (ADR 0080 point 7), and
+ *  `columns`, the columns of each row the region was read from, as `expected_columns` when the model
+ *  carries a range (lib/column-range.ts); both are meaningless without a `region`. */
 export async function sendBoundKeys(
   target: { paneId: string; scope?: Scope },
   keys: string[],
   region?: string,
+  styled?: string,
+  columns?: ColumnRange,
 ): Promise<ActionResult> {
   try {
     const res =
       region === undefined
         ? await sendKeys(target.paneId, keys, target.scope)
-        : await sendKeys(target.paneId, keys, target.scope, region);
+        : columns !== undefined
+          ? await sendKeys(target.paneId, keys, target.scope, region, styled, columns)
+          : styled === undefined
+            ? await sendKeys(target.paneId, keys, target.scope, region)
+            : await sendKeys(target.paneId, keys, target.scope, region, styled);
     // The code is MATCHED here, not displayed: a rejected binding is its own outcome. Only the
     // branch below turns a refusal into words, and that is the one that goes through the catalogue.
-    if (!res.ok && res.code === "prompt_changed") return { status: "changed" };
+    if (!res.ok && res.code === "prompt_changed") {
+      // A bridge that names the check that refused gives the result a diagnosis (console only).
+      return res.reason === undefined ? { status: "changed" } : { status: "changed", why: `bridge: ${res.reason}` };
+    }
     if (!res.ok) return { status: "error", error: describeApiError(res) };
     return { status: "sent" };
   } catch (e) {
@@ -173,12 +189,13 @@ export async function readDialog<K extends DialogKind>(
 /**
  * Bounded verification polling between choreography steps, through the adapter: wait until `accept`
  * passes on a fresh re-derivation, keyed on the kind's `identity` comparator for drift. Three-valued
- * — see {@link pollUntil} for what "drifted" vs "timeout" oblige the caller to do.
+ * — see {@link pollUntil} for what "drifted" vs "timeout" oblige the caller to do. The `ok` outcome
+ * hands back the accepted model, so a caller binds its next write to the read that proved the state.
  */
 export async function pollDialog<K extends DialogKind>(
   target: DialogTarget<K> & { sleep?: Sleep },
   accept: (m: DialogModels[K]) => boolean,
-): Promise<"ok" | "drifted" | "timeout"> {
+): Promise<PollOutcome<DialogModels[K]>> {
   return pollUntil(
     target,
     target.model,

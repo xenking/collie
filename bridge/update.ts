@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Config } from "./config.ts";
 import type { Environment } from "./config-source.ts";
 import { herdrActionCommand } from "./front-door.ts";
+import type { ReleaseNotes, ReleaseNotesGroup } from "./release-notes.ts";
 import type { CrewMode, UpdateLinkChange, UpdateStatus } from "./types.ts";
 import type { UpdateRun } from "./update-run.ts";
 
@@ -436,10 +437,122 @@ export interface ApiTag {
 }
 
 /** The endpoint the banner AND the binary updater read — never `releases/latest`, which hides
- *  prereleases and stalls a whole beta train (docs/upgrading.md). */
-export function githubTagsUrl(repo: string): string {
-  return `https://api.github.com/repos/${repo}/tags?per_page=100`;
+ *  prereleases and stalls a whole beta train (docs/upgrading.md). With a {@link UPDATE_MIRROR_ENV}
+ *  rehearsal mirror, the same path on that mirror. `page` 1 is the URL it always was; a later page
+ *  adds `&page=N` (GitHub's own paging). */
+export function githubTagsUrl(repo: string, mirror: string | null = null, page = 1): string {
+  return `${mirror ?? "https://api.github.com"}/repos/${repo}/tags?per_page=${TAG_PAGE_SIZE}${page > 1 ? `&page=${page}` : ""}`;
 }
+
+/** GitHub's largest page. A page that comes back shorter than this is the last one. */
+export const TAG_PAGE_SIZE = 100;
+/** The most pages read: a thousand tags, far past this repository's, and a bound on a mirror that never ends. */
+export const TAG_PAGES_MAX = 10;
+
+/** One page of `/tags` as a caller fetched it: the JSON, or the caller's own failure. */
+export type TagPage<F> = { readonly ok: true; readonly value: JsonValue } | { readonly ok: false; readonly failure: F };
+
+/**
+ * Every tag, page after page, until a page is shorter than {@link TAG_PAGE_SIZE} (or
+ * {@link TAG_PAGES_MAX} pages). One page held every tag until the repository passed 100; the next
+ * tag after that would have been missed wherever the API's order put it. The first failure fails
+ * the whole read: a partial list could name the wrong newest release. Which tag wins is still the
+ * caller's own semver choice, so a repository with one page picks exactly what it picked before.
+ */
+export async function readAllTags<F>(
+  repo: string,
+  mirror: string | null,
+  fetchPage: (url: string) => Promise<TagPage<F>>,
+): Promise<{ ok: true; tags: ApiTag[] } | { ok: false; failure: F }> {
+  const tags: ApiTag[] = [];
+  for (let page = 1; page <= TAG_PAGES_MAX; page++) {
+    const answer = await fetchPage(githubTagsUrl(repo, mirror, page));
+    if (!answer.ok) return answer;
+    tags.push(...parseTagsResponse(answer.value));
+    if (!Array.isArray(answer.value) || answer.value.length < TAG_PAGE_SIZE) break;
+  }
+  return { ok: true, tags };
+}
+
+// ── The rehearsal mirror (M43 spec 08) ───────────────────────────────────────
+// A TEST SEAM, not a way to update. A rehearsal of `collie update` on a test machine must not touch
+// a real release, so it serves its own releases from a local HTTP server, in the shape GitHub serves
+// them: `<mirror>/repos/<repo>/tags` for the tag list and `<mirror>/<repo>/releases/download/<tag>/
+// <file>` for every asset. `scripts/install.ps1` reads the same shape from its own mirror variable.
+//
+// Only this machine's loopback address is accepted, so the seam cannot point an install at another
+// host. A value that is set and not loopback is refused, never ignored: `collie update` stops, and
+// the bridge's release check keeps asking GitHub and says why. No token goes to a mirror, because a
+// token goes to `api.github.com` alone ({@link githubHeaders}). A loud line says the seam is set.
+
+/** The variable that names a rehearsal mirror. A test seam only; see the section above. */
+export const UPDATE_MIRROR_ENV = "COLLIE_UPDATE_MIRROR";
+
+/** `http://127.0.0.1` or `http://localhost`, an optional port and an optional plain path. Nothing else. */
+const LOOPBACK_MIRROR = /^http:\/\/(127\.0\.0\.1|localhost)(:[0-9]{1,5})?(\/[A-Za-z0-9._~/-]*)?$/;
+
+/**
+ * The mirror {@link UPDATE_MIRROR_ENV} names: `base` null when it is unset or blank, the base URL
+ * without a trailing slash when it is a loopback URL, and `ok: false` with the value for anything else.
+ */
+export function updateMirror(
+  env: Readonly<Record<string, string | undefined>>,
+): { ok: true; base: string | null } | { ok: false; value: string } {
+  const value = env[UPDATE_MIRROR_ENV]?.trim() ?? "";
+  if (value === "") return { ok: true, base: null };
+  const base = value.replace(/\/+$/, "");
+  // A `.` or `..` path segment is refused as well: the base is joined with more path, and a client
+  // or a proxy that folds `..` would leave the base the pattern checked.
+  const dotted = /\/\.{1,2}(\/|$)/.test(base.slice("http://".length));
+  return LOOPBACK_MIRROR.test(base) && !dotted ? { ok: true, base } : { ok: false, value };
+}
+
+/** What every request to a mirror carries: a loopback server may not send the client to another host. */
+export const MIRROR_FETCH = { redirect: "error" } as const;
+
+/** The line every surface prints while a mirror is in use. */
+export const mirrorWarning = (base: string): string =>
+  `WARNING: ${UPDATE_MIRROR_ENV} is set. This is a test seam: releases come from ${base}, not from GitHub.`;
+
+/** The line for a mirror value that is not loopback. */
+export const mirrorRefusal = (value: string): string =>
+  `${UPDATE_MIRROR_ENV}='${value}' is not an http://127.0.0.1 or http://localhost URL. It is a test seam for rehearsals, never a download source.`;
+
+/**
+ * The bridge's two release reads, with the mirror decided ONCE, here, from `env`. Unset: GitHub, as
+ * always. A loopback mirror: that mirror, and `warning` to log once. A value that is set and not
+ * loopback: REFUSED, never GitHub in its place, because an operator who set it meant not to ask
+ * GitHub. The release check then fails with the refusal, and the phone shows no new version.
+ */
+export interface ReleaseFetchers {
+  readonly fetchTags: () => Promise<ApiTag[]>;
+  readonly fetchReleaseReading: (version: string) => Promise<ReleaseReadingResult>;
+  /** The one line to log at boot, or null when there is nothing to say. */
+  readonly warning: string | null;
+}
+
+export function releaseFetchers(repo: string, env: Readonly<Record<string, string | undefined>>): ReleaseFetchers {
+  const mirror = updateMirror(env);
+  if (!mirror.ok) {
+    const said = mirrorRefusal(mirror.value);
+    return {
+      fetchTags: () => Promise.reject(new Error(said)),
+      fetchReleaseReading: () => Promise.resolve(null),
+      warning: `${said} The release check is off until it is fixed or unset.`,
+    };
+  }
+  return {
+    fetchTags: githubTagsFetcher(repo, githubCredential(env), mirror.base),
+    fetchReleaseReading: releaseReadingFetcher(repo, mirror.base),
+    warning: mirror.base === null ? null : mirrorWarning(mirror.base),
+  };
+}
+
+/** The raw mirror value to hand a child that starts with a bare environment, or null when unset. */
+export const mirrorValue = (env: Readonly<Record<string, string | undefined>>): string | null => {
+  const value = env[UPDATE_MIRROR_ENV]?.trim() ?? "";
+  return value === "" ? null : value;
+};
 
 // ── The GitHub credential (#254) ─────────────────────────────────────────────
 // GitHub allows an anonymous caller 60 API calls an hour, counted per network address, so every
@@ -514,17 +627,19 @@ export function parseTagsResponse(data: JsonValue): ApiTag[] {
 export function githubTagsFetcher(
   repo: string,
   credential: GithubCredential | null = null,
+  mirror: string | null = null,
 ): () => Promise<ApiTag[]> {
-  const url = githubTagsUrl(repo);
   let refusedSaid = false;
-  return async () => {
-    const res = await fetch(url, {
+  const fetchPage = async (url: string): Promise<TagPage<never>> => {
+    const init: RequestInit = {
       headers: githubHeaders(url, credential, {
         accept: "application/vnd.github+json",
         "user-agent": "collie-update-check",
       }),
       signal: AbortSignal.timeout(TAGS_TIMEOUT_MS),
-    });
+    };
+    if (mirror !== null) init.redirect = MIRROR_FETCH.redirect;
+    const res = await fetch(url, init);
     // Once, not every tick: the check runs for the life of the process, and a line an hour is the
     // sort of log nobody reads. The price is that a token revoked later is said once and then only
     // shows as a banner that stops moving; `collie update --check` names it any time it is asked.
@@ -535,9 +650,13 @@ export function githubTagsFetcher(
       );
     }
     if (!res.ok) throw new Error(`github tags: HTTP ${res.status}`);
-    // SAFETY: `Response.json()` output IS a JsonValue by construction; every field below is checked
-    // before it is kept.
-    return parseTagsResponse((await res.json()) as JsonValue);
+    // SAFETY: `Response.json()` output IS a JsonValue by construction; `parseTagsResponse` checks
+    // every field before it is kept.
+    return { ok: true, value: (await res.json()) as JsonValue };
+  };
+  return async () => {
+    const all = await readAllTags(repo, mirror, fetchPage);
+    return all.ok ? all.tags : [];
   };
 }
 
@@ -564,6 +683,57 @@ export interface ReleaseReading {
    * courtesy on the cadence, never a gate, so nothing here may turn a bad document into an error.
    */
   urgent?: { reason: string };
+  /**
+   * What the release changed: its CHANGELOG bullets' bold leads, by group (1.21.1). Absent on every
+   * release before 1.21.1 and on a field that does not read as notes, which the Updates page shows
+   * as no list. A courtesy, like `urgent`: nothing here may turn a document into an error.
+   */
+  notes?: ReleaseNotesGroup[];
+}
+
+/** The most leads one group carries on the wire. */
+export const NOTES_LEADS_MAX = 40;
+/** The longest one lead may be. A bold lead is one sentence; anything longer is cut. */
+export const NOTES_LEAD_CHARS = 240;
+
+/**
+ * The five CHANGELOG groups, in the release page's order. A copy of `GROUPS` in
+ * `scripts/release-notes.ts`, kept here because this file sits on the CLI's bare-checkout path and a
+ * script with a shebang may not be imported there. `release-notes.test.ts` pins the two equal.
+ */
+export const NOTES_GROUPS: readonly string[] = ["Added", "Changed", "Fixed", "Packaging", "Docs"];
+
+const KNOWN_GROUPS: ReadonlySet<string> = new Set<string>(NOTES_GROUPS);
+
+/** Cut a lead at the cap, on a word boundary when there is one, and mark the cut. */
+function capLead(lead: string): string {
+  if (lead.length <= NOTES_LEAD_CHARS) return lead;
+  const cut = lead.slice(0, NOTES_LEAD_CHARS);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > 0 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
+/**
+ * The `notes` field of a release's sidecar, read defensively. Null for anything that is not a list
+ * of `{ name, leads }`; a malformed group or lead is dropped and the rest is kept. Groups come back
+ * in the release page's order, so two readers of one release never disagree about it.
+ */
+export function parseNotesField(data: JsonValue | undefined): ReleaseNotesGroup[] | null {
+  if (!Array.isArray(data)) return null;
+  const groups: ReleaseNotesGroup[] = [];
+  for (const entry of data) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const { name, leads } = entry;
+    if (typeof name !== "string" || !KNOWN_GROUPS.has(name)) continue;
+    if (groups.some((g) => g.name === name)) continue;
+    if (!Array.isArray(leads)) continue;
+    const kept = leads
+      .flatMap((lead) => (typeof lead === "string" && lead.trim() !== "" ? [capLead(lead.trim())] : []))
+      .slice(0, NOTES_LEADS_MAX);
+    if (kept.length > 0) groups.push({ name, leads: kept });
+  }
+  groups.sort((a, b) => NOTES_GROUPS.indexOf(a.name) - NOTES_GROUPS.indexOf(b.name));
+  return groups.length === 0 ? null : groups;
 }
 
 /** The newest urgent release in a delta, and why — the shape the snapshot carries. */
@@ -575,8 +745,8 @@ export interface UpdateUrgentReading {
 /** Where the asset sits. Constructed from (repo, version), never taken from a document, for the
  *  reason the manifest carries no URLs: a release must not be able to redirect a read to another
  *  host. The trust boundary stays "which repo", which is what COLLIE_UPDATE_REPO names. */
-export function releaseReadingUrl(repo: string, version: string): string {
-  return `https://github.com/${repo}/releases/download/v${version}/collie-release.json`;
+export function releaseReadingUrl(repo: string, version: string, mirror: string | null = null): string {
+  return `${mirror ?? "https://github.com"}/${repo}/releases/download/v${version}/collie-release.json`;
 }
 
 /** The asset, parsed. Null for anything that is not the document we asked for — a wrong shape, a
@@ -595,6 +765,9 @@ export function parseReleaseReading(data: JsonValue): ReleaseReading | null {
     const reason = urgent.reason;
     if (typeof reason === "string" && reason.trim() !== "") reading.urgent = { reason: reason.trim() };
   }
+  // The notes, on the same rule: read last, can only add, and a bad field is an ordinary release.
+  const notes = parseNotesField(data.notes);
+  if (notes !== null) reading.notes = notes;
   return reading;
 }
 
@@ -628,13 +801,16 @@ export type ReleaseReadingResult = ReleaseReading | "absent" | null;
  *  answer is the tag list, and this is a footnote on it. */
 export function releaseReadingFetcher(
   repo: string,
+  mirror: string | null = null,
 ): (version: string) => Promise<ReleaseReadingResult> {
   return async (version) => {
     try {
-      const res = await fetch(releaseReadingUrl(repo, version), {
+      const init: RequestInit = {
         headers: { accept: "application/json", "user-agent": "collie-update-check" },
         signal: AbortSignal.timeout(RELEASE_READING_TIMEOUT_MS),
-      });
+      };
+      if (mirror !== null) init.redirect = MIRROR_FETCH.redirect;
+      const res = await fetch(releaseReadingUrl(repo, version, mirror), init);
       // 404 is the ordinary answer for every release before 1.8.0, and it is DEFINITE: that release
       // is published and will never grow the asset. Every other bad status is this minute's problem.
       if (res.status === 404) return "absent";
@@ -744,6 +920,7 @@ export class UpdateStateStore {
   private pushedAt: string | null = null;
   private dismissed: string | null = null;
   private dismissedCrew: string | null = null;
+  private dismissedCrewStamp: number | null = null;
   private readonly file: string;
 
   constructor(private readonly cfg: Config) {
@@ -760,12 +937,17 @@ export class UpdateStateStore {
       const pushed = rec === null ? undefined : rec.lastPushedAt;
       const closed = rec === null ? undefined : rec.dismissedVersion;
       const closedCrew = rec === null ? undefined : rec.dismissedCrewVersion;
+      const closedCrewAt = rec === null ? undefined : rec.dismissedCrewAt;
       this.lastVersion = typeof last === "string" ? last : null;
       // A record written before M17/08 carries neither dismissal. Both read as "nothing dismissed",
       // which is the band's own default — an operator who closed the band on an older build simply
       // sees it once more.
       this.dismissed = typeof closed === "string" ? closed : null;
       this.dismissedCrew = typeof closedCrew === "string" ? closedCrew : null;
+      // A crew close written before 1.21.1 carries no stamp. It reads as null, which the band takes
+      // as "covers every run of that version": the close the operator made still holds.
+      this.dismissedCrewStamp =
+        typeof closedCrewAt === "number" && Number.isFinite(closedCrewAt) ? closedCrewAt : null;
       // A LEGACY record carries no timestamp. It reads as "no push yet" — the window opens at once
       // rather than crashing the monitor or pinning it shut for a day.
       this.pushedAt = typeof pushed === "string" ? pushed : null;
@@ -794,6 +976,12 @@ export class UpdateStateStore {
     return this.dismissedCrew;
   }
 
+  /** When the crew notice was closed (epoch ms, this machine's clock), or null when it never was or
+   *  the record predates the stamp. */
+  dismissedCrewAt(): number | null {
+    return this.dismissedCrewStamp;
+  }
+
   async setLastNotified(version: string, pushedAt: string): Promise<void> {
     this.lastVersion = version;
     this.pushedAt = pushedAt;
@@ -815,9 +1003,14 @@ export class UpdateStateStore {
     scope: DismissScope,
     version: string,
     notified?: { version: string; pushedAt: string },
+    at?: number,
   ): Promise<void> {
-    if (scope === "offer") this.dismissed = version;
-    else this.dismissedCrew = version;
+    if (scope === "offer") {
+      this.dismissed = version;
+    } else {
+      this.dismissedCrew = version;
+      this.dismissedCrewStamp = at ?? null;
+    }
     if (notified !== undefined) {
       this.lastVersion = notified.version;
       this.pushedAt = notified.pushedAt;
@@ -834,6 +1027,7 @@ export class UpdateStateStore {
       lastPushedAt: this.pushedAt,
       dismissedVersion: this.dismissed,
       dismissedCrewVersion: this.dismissedCrew,
+      dismissedCrewAt: this.dismissedCrewStamp,
     };
     const tmp = `${this.file}.tmp`;
     await writeFile(tmp, JSON.stringify(body, null, 2), { mode: 0o600 });
@@ -887,11 +1081,16 @@ export interface UpdateStore {
   dismissedVersion(): string | null;
   /** The version whose quiet CREW notice was closed, or null. */
   dismissedCrewVersion(): string | null;
-  /** Record a dismissal, folding the digest snooze into the same write when one is asked for. */
+  /** When that crew close was made (epoch ms), or null. A crew run that settles AFTER it is a new
+   *  run, and the band may name it again. */
+  dismissedCrewAt(): number | null;
+  /** Record a dismissal, folding the digest snooze into the same write when one is asked for. `at`
+   *  stamps a crew close; the offer scope ignores it. */
   setDismissed(
     scope: DismissScope,
     version: string,
     notified?: { version: string; pushedAt: string },
+    at?: number,
   ): Promise<void>;
 }
 
@@ -984,6 +1183,19 @@ export interface UpdateMonitorDeps {
    * update, the app goes blank, and it comes back claiming there was no update.
    */
   runState: () => UpdateRun | null;
+  /**
+   * The running version's own notes, from the CHANGELOG beside it (1.21.1). Optional: a monitor
+   * without it reports no current notes, which the Updates page shows as no list.
+   */
+  currentNotes?: () => Promise<ReleaseNotes | null>;
+}
+
+/** What `GET /api/update/check` carries about what releases changed (1.21.1). */
+export interface UpdateNotes {
+  /** The running version's notes, or null when its CHANGELOG section could not be read. */
+  current: ReleaseNotes | null;
+  /** Every release in the delta whose sidecar carried notes, oldest first, like `newerVersions`. */
+  offered: ReleaseNotes[];
 }
 
 export class UpdateMonitor {
@@ -1110,6 +1322,21 @@ export class UpdateMonitor {
     return fetched === "absent" ? null : fetched;
   }
 
+  /**
+   * What the releases changed, for the Updates page (1.21.1). NO REQUEST OF ITS OWN: the offered
+   * notes are the ones the last check already read (the newest {@link URGENT_READING_CAP} of the
+   * delta, for the urgent marker), and the current notes come off this install's own disk.
+   */
+  async notes(): Promise<UpdateNotes> {
+    const offered = this.newerVersions.flatMap((version) => {
+      const held = this.readings.get(version);
+      if (held === undefined || held === "absent" || held.notes === undefined) return [];
+      return [{ version, url: githubReleaseUrl(this.deps.repo, version), groups: held.notes }];
+    });
+    const current = this.deps.currentNotes === undefined ? null : await this.deps.currentNotes();
+    return { current, offered };
+  }
+
   /** The newest urgent release among the newest {@link URGENT_READING_CAP} of `versions`, or null. */
   private async urgencyOf(versions: readonly string[]): Promise<UpdateUrgentReading | null> {
     const asked = versions.slice(-URGENT_READING_CAP);
@@ -1156,6 +1383,9 @@ export class UpdateMonitor {
       scope,
       version,
       snoozes ? { version, pushedAt: this.nowIso() } : undefined,
+      // THE CREW CLOSE IS STAMPED (1.21.1). It covers the run the operator read, and a later run of
+      // the same version settles after this stamp, so the band can name a fresh failure again.
+      scope === "crew" ? this.deps.now() : undefined,
     );
   }
 
@@ -1228,6 +1458,10 @@ export class UpdateMonitor {
     // must carry NO `run` key rather than one whose value is `undefined`. The same for the package
     // command, which most installs have none of.
     if (run !== null) status.run = run;
+    // When the crew notice was closed, on the same rule: absent when it never was, or when the close
+    // predates the stamp. The band reads it beside `dismissedCrewVersion`.
+    const crewClosedAt = this.deps.store.dismissedCrewAt();
+    if (crewClosedAt !== null) status.dismissedCrewAt = crewClosedAt;
     // The link change (M27/06), on the same rule: absent when there is nothing to say, which is
     // every solo install, every ordinary release and every check that has not run yet.
     if (this.linkChange !== null) status.linkChange = this.linkChange;

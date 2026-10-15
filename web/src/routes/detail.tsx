@@ -1,10 +1,14 @@
-import { useEffect, useRef } from "react";
-import { useLoaderData, useLocation, useNavigate, useParams } from "react-router";
+import { useEffect, useMemo, useRef } from "react";
+import { useLoaderData, useLocation, useParams } from "react-router";
 
 import { AgentChat } from "@/components/agent-chat";
+import { FileLinksProvider, usePaneFileLinks } from "@/components/file-links";
+import { useDashPrefs } from "@/hooks/use-dash-prefs";
 import { useLoadingStalled } from "@/hooks/use-loading-stalled";
+import { useNav } from "@/hooks/use-nav";
 import { type PaneData } from "@/lib/loaders";
-import { homePath, panePath } from "@/lib/nav";
+import { GLIDE_PAIRS, glideBack } from "@/lib/glide";
+import { canStepBack, homePath, panePath, readFrom, upTarget } from "@/lib/nav";
 import { paneScopeKey } from "@/lib/scope";
 import { findPane, paneScope } from "@/lib/hosts";
 import { setStatus } from "@/lib/status";
@@ -26,9 +30,10 @@ export function DetailRoute() {
   // The session this pane belongs to (undefined = primary), read from the pane loader so every
   // navigation and write below stays scoped to it.
   const scope = pane.scope;
-  const navigate = useNavigate();
+  const nav = useNav();
   const location = useLocation();
   const stalled = useLoadingStalled();
+  const dashView = useDashPrefs().prefs.dashView;
 
   // SAFETY: `location.state` is whatever the navigation that got here attached — `unknown` by
   // definition. The only shape Collie ever puts there is `{ freshPane }` (components/agent-list's
@@ -54,64 +59,102 @@ export function DetailRoute() {
   // alone could hand this view another machine's pane — rendering its space, tab and cwd around a
   // mirror of, and a composer typing into, the one the URL actually addresses. Solo panes carry no
   // host and match unconditionally, so this is the same lookup it has always been.
+  //
+  // Last, the pane's row from a herd the phone kept (`PaneData.savedPane`), and only while the herd on
+  // screen is not a live answer. With the bridge away the root loader may hold no herd for this
+  // pane's address (the dashboard's was widened, or another machine's), and the pane is then still
+  // the pane the operator opened, drawn from what was saved. A live herd without the pane outranks
+  // it: that is the one answer that may say the pane closed.
   const agent =
     findPane(root.agents, paneId, scope, root.servers, root.sessions) ??
     findPane(root.shellPanes, paneId, scope, root.servers, root.sessions) ??
-    (fresh && fresh.paneId === paneId && !seen ? fresh : undefined);
-  const tabLabel = root.tabs.find((t) => t.tabId === agent?.tabId)?.label;
+    (fresh && fresh.paneId === paneId && !seen ? fresh : undefined) ??
+    (root.error ? pane.savedPane : undefined);
   const gone = !agent;
 
-  // Recover from a closed pane: once a healthy snapshot no longer has it, bounce Home instead of
+  // Recover from a closed pane: once a healthy snapshot no longer has it, go up a level instead of
   // leaving you on a dead "agent gone" view. Guarded on a connected, non-stale snapshot so a
-  // transient poll failure or reconnect doesn't evict a still-valid pane.
+  // transient poll failure or reconnect doesn't evict a still-valid pane. Up, not a replace onto
+  // Home: the dead pane must not stay in history for the next swipe to land on (ADR 0067). Once per
+  // pane, because an up can be a step back, and a second one would climb a level too far.
+  const exited = useRef<string | null>(null);
   useEffect(() => {
-    if (gone && root.bridge === "connected" && !root.error) {
+    if (gone && root.bridge === "connected" && !root.error && exited.current !== paneId) {
+      exited.current = paneId;
       // The operator did not close this pane from this phone. It went away under them — from
       // another device, from the terminal itself, or because the agent exited — and a poll is what
       // noticed. The status (and the orbit round it turns) is what stops the eviction that follows
       // being the first thing they see.
       setStatus("Pane closed", "info");
-      navigate(homePath(scope), { replace: true });
+      nav.up(homePath(scope));
     }
-  }, [gone, root.bridge, root.error, navigate, scope]);
+  }, [gone, root.bridge, root.error, nav, scope, paneId]);
+
+  // Up one level: to the space or the dashboard the pane was opened from (ADR 0067).
+  const up = () => nav.up(homePath(scope));
+  // The back arrow glides the header's dot, tile and name back down into the row this pane was
+  // opened from (lib/glide.ts, the `pane` pair, rule 1), when the arrow lands where such a row can
+  // be: the dashboard's Panes or Focus list, or a space. Not the dashboard's Changes tab, which lists
+  // workspaces, so the arrow slides there as it always did. Where the row is gone or off screen, the
+  // engine crossfades. The landing is the same resolution `nav.up` runs (`upTarget`).
+  const backArrow = () => {
+    const lands = upTarget(location.pathname, readFrom(location.state), homePath(scope), canStepBack());
+    const rowsThere = GLIDE_PAIRS.pane.origin(lands) && (lands !== "/" || dashView !== "changes");
+    if (rowsThere) glideBack("pane", panePath(paneId, scope), up);
+    else up();
+  };
+
+  // Paths the agent prints open in Files (ADR 0088): the chat, its tool cards and the mirror below
+  // all ask this one opener, which knows the pane's Changes root, its cwd and its machine's home.
+  const herd = useMemo(() => [...root.agents, ...root.shellPanes], [root.agents, root.shellPanes]);
+  const fileLinks = usePaneFileLinks({ paneId, scope, pane: agent, panes: herd, workspaces: root.workspaces });
 
   return (
-    <AgentChat
-      // Keyed by the pane's FULL address, not its id. The key exists to remount the composer on a
-      // pane switch so a draft never follows you into another terminal — and `w1:p1` is a different
-      // terminal in every session and on every machine. Keyed by the id alone, walking from
-      // `w1:p1` on one session to `w1:p1` on another kept the same mounted composer, draft and all.
-      // `paneScopeKey` is the same triple every per-pane cache is keyed by.
-      key={paneScopeKey(scope, paneId)}
-      paneId={paneId}
-      scope={scope}
-      agent={agent}
-      agents={root.agents}
-      shellPanes={root.shellPanes}
-      tabs={root.tabs}
-      tabLabel={tabLabel}
-      text={pane.text}
-      logicalText={pane.logicalText}
-      requestedLines={pane.requestedLines}
-      revision={pane.revision}
-      device={root.device}
-      bridge={root.bridge}
-      error={root.error}
-      stalled={stalled}
-      onBack={() => navigate(homePath(scope))}
-      onSelect={(id) =>
-        navigate(
-          panePath(
-            id,
-            paneScope(
-              scope,
-              findPane([...root.agents, ...root.shellPanes], id, scope, root.servers, root.sessions),
-              root.servers,
-              root.sessions,
+    <FileLinksProvider value={fileLinks}>
+      <AgentChat
+        // Keyed by the pane's FULL address, not its id. The key exists to remount the composer on a
+        // pane switch so a draft never follows you into another terminal — and `w1:p1` is a different
+        // terminal in every session and on every machine. Keyed by the id alone, walking from
+        // `w1:p1` on one session to `w1:p1` on another kept the same mounted composer, draft and all.
+        // `paneScopeKey` is the same triple every per-pane cache is keyed by.
+        key={paneScopeKey(scope, paneId)}
+        paneId={paneId}
+        scope={scope}
+        agent={agent}
+        agents={root.agents}
+        shellPanes={root.shellPanes}
+        tabs={root.tabs}
+        servers={root.servers}
+        text={pane.text}
+        logicalText={pane.logicalText}
+        requestedLines={pane.requestedLines}
+        revision={pane.revision}
+        device={root.device}
+        bridge={root.bridge}
+        error={root.error}
+        stalled={stalled}
+        // The saved copy (M46 spec 10): the pane view dates it, and nothing on it may act (spec 11).
+        stale={pane.stale === true}
+        lastSeenAt={pane.lastSeenAt}
+        // The pane's read got no answer and the phone keeps no text for it.
+        noSavedCopy={pane.error && pane.text === ""}
+        onBack={up}
+        onBackArrow={backArrow}
+        // Pane to pane is a sideways move: it replaces, and the pane's way up comes along.
+        onSelect={(id) =>
+          nav.side(
+            panePath(
+              id,
+              paneScope(
+                scope,
+                findPane([...root.agents, ...root.shellPanes], id, scope, root.servers, root.sessions),
+                root.servers,
+                root.sessions,
+              ),
             ),
-          ),
-        )
-      }
-    />
+          )
+        }
+      />
+    </FileLinksProvider>
   );
 }

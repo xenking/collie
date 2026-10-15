@@ -16,6 +16,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	changelogAnchor,
 	checkUnreleased,
+	creditedHandles,
 	parseSection,
 	parseUrgent,
 	renderBody,
@@ -138,7 +139,9 @@ describe("checkUnreleased", () => {
 			"## [Unreleased]\n",
 			"## [Unreleased]\n\n### Fixed\n\n- **A thing is fixed.** The detail follows here. (#1)\n",
 		);
-		expect(checkUnreleased(filled)).toEqual([{ name: "Fixed", leads: ["A thing is fixed."] }]);
+		expect(checkUnreleased(filled)).toEqual([
+			{ name: "Fixed", leads: ["A thing is fixed."], credits: [[]] },
+		]);
 	});
 
 	test("a bullet with no bold lead fails, and the message names the section", () => {
@@ -190,13 +193,11 @@ herdr plugin action invoke update --plugin herdr.collie    # Herdr plugin instal
 
 Check with \`collie version\` or \`herdr plugin action invoke version --plugin herdr.collie\`.
 
-**Coming from 0.x?** \`collie update\` will not cross a major. Follow [Upgrading from 0.x to 1.0](https://github.com/AltanS/collie/blob/v2.1.0/docs/upgrading.md#upgrading-from-0x-to-10).
-
 ## What changed
 
 **Added**
 
-- The crew levels itself.
+- The crew levels itself. Thanks @someone.
 
 **Changed**
 
@@ -256,6 +257,132 @@ HTTPS and the pinned github.com host carry that.
 		expect(body).not.toContain("**Fixed**");
 		expect(body).not.toContain("**Packaging**");
 		expect(body).not.toContain("**Docs**");
+	});
+});
+
+// ── Credits ─────────────────────────────────────────────────────────────────────────────────────
+// GitHub draws a release's Contributors avatars only for users the body @mentions, so the page line
+// keeps the credit its bullet carries.
+
+const CREDITS = `# Changelog
+
+## [3.0.0] - 2026-11-01
+
+### Added
+
+- **A.** Detail. Thanks @alice (#1, fixes #2). ([aaaaaaa](https://github.com/AltanS/collie/commit/aaaaaaa))
+- **B.** Detail. Reported by @bob (#3). ([bbbbbbb](https://github.com/AltanS/collie/commit/bbbbbbb))
+- **C.** Detail. Thanks to @carol and @dave-x, and suggested by @Alice. (#4)
+- **D.** Contributed by [@erin](https://github.com/erin) (#5).
+
+### Fixed
+
+- **E.** The \`@effort\` token, \`Thanks @mallory\`, the @types/node scope, mail me@example.com and the @word in prose.
+- **F.** Thanks @AltanS for the review, and thanks @frank.
+- **G.** Built by @AltanS alone.
+`;
+
+describe("credits", () => {
+	test("each bullet keeps its own credit, phrase as written", () => {
+		const section = parseSection(CREDITS, "3.0.0");
+		const added = section.groups.find((g) => g.name === "Added");
+		expect(added?.credits).toEqual([
+			[{ phrase: "Thanks", handles: ["alice"] }],
+			[{ phrase: "Reported by", handles: ["bob"] }],
+			[
+				{ phrase: "Thanks to", handles: ["carol", "dave-x"] },
+				{ phrase: "Suggested by", handles: ["Alice"] },
+			],
+			[{ phrase: "Contributed by", handles: ["erin"] }],
+		]);
+	});
+
+	test("code spans, scopes, e-mail, bare @words and the maintainer do not count", () => {
+		const fixed = parseSection(CREDITS, "3.0.0").groups.find((g) => g.name === "Fixed");
+		expect(fixed?.credits).toEqual([[], [{ phrase: "Thanks", handles: ["frank"] }], []]);
+	});
+
+	test("the section's handles are deduped, first spelling wins", () => {
+		expect(creditedHandles(parseSection(CREDITS, "3.0.0"))).toEqual([
+			"alice",
+			"bob",
+			"carol",
+			"dave-x",
+			"erin",
+			"frank",
+		]);
+	});
+
+	test("the page line ends with the credit, as a bare @mention", () => {
+		const body = renderBody(CREDITS, "3.0.0", REPO, "v3.0.0");
+		expect(body).toContain("- A. Thanks @alice.\n");
+		expect(body).toContain("- B. Reported by @bob.\n");
+		expect(body).toContain("- C. Thanks to @carol and @dave-x. Suggested by @Alice.\n");
+		expect(body).toContain("- D. Contributed by @erin.\n");
+		expect(body).toContain("- E.\n");
+		expect(body).toContain("- F. Thanks @frank.\n");
+		expect(body).toContain("- G.\n");
+		expect(body).not.toContain("@AltanS");
+	});
+});
+
+// ── Wrapped bullets ─────────────────────────────────────────────────────────────────────────────
+// A bullet may wrap at ~100 columns onto two-space continuation lines (1.15.0 does). The credit and
+// the end of the bold lead can sit on a later line, and a blank line or a heading ends the bullet.
+
+const WRAPPED = `# Changelog
+
+## [4.0.0] - 2026-12-01
+
+### Added
+
+- **A wrapped bullet keeps its credit.** The detail runs past the column limit and
+  wraps onto a second line, then a third. Thanks @gina (#1, #2).
+- **A lead that wraps across
+  two lines is read whole.** Detail. Reported by @hank (#3).
+- **A single line.** Detail. Thanks @ivy (#4).
+
+### Fixed
+
+- **A bullet before a blank line and a heading.** It has no credit of its own.
+
+### Docs
+
+- **The heading was not swallowed.** Detail
+  continues here. Thanks @jo.
+`;
+
+describe("wrapped bullets", () => {
+	const section = parseSection(WRAPPED, "4.0.0");
+	const group = (name: string) => section.groups.find((g) => g.name === name);
+
+	test("a credit on a continuation line is read", () => {
+		expect(group("Added")?.credits[0]).toEqual([{ phrase: "Thanks", handles: ["gina"] }]);
+	});
+
+	test("a bold lead that wraps across two lines is read whole", () => {
+		expect(group("Added")?.leads[1]).toBe("A lead that wraps across two lines is read whole.");
+		expect(group("Added")?.credits[1]).toEqual([{ phrase: "Reported by", handles: ["hank"] }]);
+	});
+
+	test("a single-line bullet beside wrapped ones reads as before", () => {
+		expect(group("Added")?.leads).toHaveLength(3);
+		expect(group("Added")?.leads[2]).toBe("A single line.");
+		expect(group("Added")?.credits[2]).toEqual([{ phrase: "Thanks", handles: ["ivy"] }]);
+	});
+
+	test("a bullet followed by a blank line and a heading does not swallow the heading", () => {
+		expect(group("Fixed")?.leads).toEqual(["A bullet before a blank line and a heading."]);
+		expect(group("Fixed")?.credits).toEqual([[]]);
+		expect(section.groups.map((g) => g.name)).toEqual(["Added", "Fixed", "Docs"]);
+		expect(group("Docs")?.credits[0]).toEqual([{ phrase: "Thanks", handles: ["jo"] }]);
+	});
+
+	test("the page line carries the credit from the continuation line", () => {
+		const body = renderBody(WRAPPED, "4.0.0", REPO, "v4.0.0");
+		expect(body).toContain("- A wrapped bullet keeps its credit. Thanks @gina.\n");
+		expect(body).toContain("- A lead that wraps across two lines is read whole. Reported by @hank.\n");
+		expect(creditedHandles(section)).toEqual(["gina", "hank", "ivy", "jo"]);
 	});
 });
 
@@ -364,6 +491,45 @@ describe("the repository's CHANGELOG.md", () => {
 		const section = parseSection(changelog, newest ?? "");
 		expect(section.groups.length).toBeGreaterThan(0);
 		for (const group of section.groups) expect(group.leads.length).toBeGreaterThan(0);
+	});
+
+	test("1.15.0 credits every contributor its wrapped bullets name", () => {
+		const handles = creditedHandles(parseSection(changelog, "1.15.0"));
+		expect(handles.map((h) => h.toLowerCase()).toSorted()).toEqual(
+			[
+				"AndiWandHerd",
+				"CorrectRoadH",
+				"cryptiklemur",
+				"dmstjd1024",
+				"Gaurav-Gosain",
+				"jaehyun2yo",
+				"jpcarranza94",
+				"jyothyswaroop",
+				"mavam",
+			]
+				.map((h) => h.toLowerCase())
+				.toSorted(),
+		);
+	});
+
+	test("1.12.1 credits the contributor its changelog names", () => {
+		expect(creditedHandles(parseSection(changelog, "1.12.1"))).toEqual(["enieuwy"]);
+	});
+
+	test("1.12.0 credits every contributor its changelog names", () => {
+		expect(creditedHandles(parseSection(changelog, "1.12.0"))).toEqual([
+			"edwinhu",
+			"CorrectRoadH",
+			"fonnesbeck",
+			"waynehoover",
+			"jyothyswaroop",
+			"bendrucker",
+			"lighcen",
+			"dantebarba",
+			"jpcarranza94",
+			"ubuntudroid",
+			"Femoon",
+		]);
 	});
 
 	test("every bullet under Unreleased is grouped and has a bold lead", () => {

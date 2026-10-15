@@ -37,7 +37,7 @@ type Capture = {
 };
 
 type VoiceMessage =
-  | { kind: "ready" }
+  | { kind: "ready"; replySpeech?: boolean }
   | { kind: "recording"; generation: number }
   | { kind: "voice-state"; generation: number; phase: VoicePhase; caption?: VoiceState["caption"] }
   | { kind: "clear"; generation: number }
@@ -60,7 +60,9 @@ function parseVoiceMessage(raw: unknown): VoiceMessage | null {
   const generation = "generation" in raw && typeof raw.generation === "number" ? raw.generation : null;
   switch (raw.kind) {
     case "ready":
-      return { kind: "ready" };
+      return "replySpeech" in raw && typeof raw.replySpeech === "boolean"
+        ? { kind: "ready", replySpeech: raw.replySpeech }
+        : { kind: "ready" };
     case "recording":
       return generation === null ? null : { kind: "recording", generation };
     case "clear":
@@ -233,6 +235,12 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
   const captureFailedRef = useRef(false);
   const disposedRef = useRef(false);
   const handedOffRef = useRef(false);
+  // The server's own answer on `ready`: whether this socket's relay hands replies to the laptop. The
+  // prop is read at mount, so a parked OMP pane that the media route woke still says false there.
+  const serverReplySpeechRef = useRef<boolean | null>(null);
+  // The newest generation whose phase went idle: the bridge reports a silent turn as `idle` and only
+  // then sends its empty `final`, so that final must still be recognised after idle cleared voiceRef.
+  const idleGenerationRef = useRef<number | null>(null);
   const handoffRef = useRef<Handoff | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -257,13 +265,14 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
     () => {
       disposedRef.current = false;
       const player = playerRef.current;
+      const cancelledGenerations = cancelledGenerationsRef.current;
       return () => {
         disposedRef.current = true;
         wantsRecordingRef.current = false;
         sttReadyRef.current = false;
         if (holdTimerRef.current !== null) window.clearTimeout(holdTimerRef.current);
         bufferedAudioRef.current = [];
-        cancelledGenerationsRef.current.clear();
+        cancelledGenerations.clear();
         cancelPendingRef.current = false;
         settleHandoff(false);
         releaseRemote();
@@ -412,6 +421,7 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
       if (!message) return;
       switch (message.kind) {
         case "ready":
+          if (message.replySpeech !== undefined) serverReplySpeechRef.current = message.replySpeech;
           if (heartbeatRef.current) clearInterval(heartbeatRef.current);
           heartbeatRef.current = setInterval(() => {
             if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ kind: "keepalive" }));
@@ -453,6 +463,7 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
           if (message.generation < (voiceRef.current?.generation ?? 0)) return;
           nextAudioRef.current = null;
           if (message.phase === "idle") {
+            idleGenerationRef.current = message.generation;
             publishVoice(null);
             if (!wantsRecordingRef.current) setState("idle");
           } else {
@@ -495,7 +506,11 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
             if (!disposedRef.current) setState("idle");
             return;
           }
-          if (message.generation === voiceRef.current?.generation) {
+          if (
+            message.generation === voiceRef.current?.generation ||
+            (message.text.trim() === "" && message.generation === idleGenerationRef.current)
+          ) {
+            idleGenerationRef.current = null;
             void submitFinal(socket, message.text, message.generation);
           }
           return;
@@ -596,7 +611,7 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
       return;
     }
     setState("sending");
-    if (!replySpeechSupported) {
+    if (!(serverReplySpeechRef.current ?? replySpeechSupported)) {
       try {
         await callbacksRef.current.onTranscript(transcript);
       } finally {
@@ -719,11 +734,11 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
       if (mode === "hold") suppressClickRef.current = true;
       return false;
     }
+    // A toggle press is a tap however long it lasted: the click that follows does the toggling.
+    if (mode !== "hold") return false;
     suppressClickRef.current = true;
-    if (mode === "hold") {
-      if (commit) stop();
-      else cancel();
-    }
+    if (commit) stop();
+    else cancel();
     return true;
   }
 
@@ -759,17 +774,14 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
     if (!finishGesture(true) && recordingMode !== "hold") handleClick();
   }
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      start: () => {
-        void start();
-      },
-      stop,
-      cancel,
-    }),
-    [disabled, recovery, state],
-  );
+  // No deps: start/stop/cancel close over the latest state, so the handle is rebuilt each render.
+  useImperativeHandle(ref, () => ({
+    start: () => {
+      void start();
+    },
+    stop,
+    cancel,
+  }));
 
   function toggle(): void {
     if (recovery === "failed") {

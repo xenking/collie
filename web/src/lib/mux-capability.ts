@@ -7,7 +7,7 @@ import {
   loadOperatorCommands,
   subscribeOperatorConfig,
 } from "@/lib/operator-config";
-import { mounted } from "@/lib/base-path";
+import { useAuthedUrl } from "@/lib/authed-url";
 import { normalizeHost, type Scope } from "@/lib/scope";
 import type { MuxCapability, MuxConfig, MuxTopologyLatency } from "@/lib/types";
 
@@ -46,10 +46,11 @@ import type { MuxCapability, MuxConfig, MuxTopologyLatency } from "@/lib/types";
 //    be a gate on nothing.
 //  • **Notifications.** Push/VAPID, a bridge capability that predates this one and rides the same
 //    config object. A multiplexer has no opinion on it.
-//  • **`paneGrid`.** It is what a pane view IS. A multiplexer that cannot hand over a rendered
-//    screen has no pane view to gate a control inside — the whole route is the control, and the
-//    read's own `unsupported` answer is what surfaces. Gating a button on it would explain the
-//    absence of a screen ON that screen.
+//  • **`paneGrid` AS A BUTTON'S GATE.** Not a control to grey out, and no explanation is drawn for
+//    it: a pane with no screen has no terminal to explain the absence of. It decides one thing, the
+//    BODY: when it is false Chat is the only view and every offer of the Terminal is withdrawn
+//    ({@link paneGridOf}, lib/chat-gate.ts). Withdrawn, not disabled, because a durable program's
+//    conversation never had a terminal to switch to.
 //  • **`pushTopologyEvents` / `pushPaneEvents`.** Not controls: an adapter without them keeps the
 //    same promise by polling (bridge/mux/types.ts `watch`), so nothing an operator can see changes.
 //    A future cadence tuner would read them here; a button never will.
@@ -104,6 +105,18 @@ export function keysSendable(keys: readonly string[], unsupported: readonly stri
     const base = parts.at(-1) === "" ? "+" : parts.at(-1)!;
     return !refused.has(base.toLowerCase());
   });
+}
+
+/**
+ * Whether the pane a scope names has a screen, read now and outside React (the pane loader asks it
+ * before it fetches a mirror there is none of). The same declaration the hooks read, with the same
+ * default: absent data reads as a screen, so a bridge that has not answered yet is asked for its
+ * mirror as it always was.
+ */
+export function paneGridOf(scope?: Scope): boolean {
+  const host = normalizeHost(scope?.host);
+  const member = host === undefined ? null : getHostMuxConfig(host);
+  return muxCapability(scopedMuxConfig(getMuxConfig(), member), "paneGrid").capable;
 }
 
 /** Subscribe to the one-shot `/api/config` read, kicking it on mount like the operator-row hooks. */
@@ -201,8 +214,11 @@ export function useMuxName(): string {
  * "this is what that multiplexer looks like", which would be false.
  */
 export function useMuxLogoUrl(): string {
-  // The bridge publishes a root-absolute path; the document may be mounted under one (ADR 0052).
-  return mounted(useMuxConfig()?.logoUrl ?? "");
+  // The bridge publishes a root-absolute path. Reads need the pairing token (ADR 0086) and an
+  // `<img src>` cannot send it, so the bytes are fetched with it and drawn from an object URL
+  // (lib/authed-url.ts); the fetch applies the mount (ADR 0052). Empty until they are here.
+  const path = useMuxConfig()?.logoUrl ?? "";
+  return useAuthedUrl(path === "" ? null : path).url ?? "";
 }
 
 /**
@@ -234,11 +250,6 @@ export function useMuxHasSpaces(): boolean {
  */
 export function muxTopologyLatency(cfg: MuxConfig | null): MuxTopologyLatency {
   return cfg?.topologyLatency ?? { kind: "push" };
-}
-
-/** {@link muxTopologyLatency}, as the hook a component subscribes through. */
-export function useTopologyLatency(): MuxTopologyLatency {
-  return muxTopologyLatency(useMuxConfig());
 }
 
 /** The neutral key spellings this multiplexer refuses. Empty until the bridge has answered. */

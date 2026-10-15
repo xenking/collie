@@ -52,6 +52,13 @@ describe("the peer applies its OWN write-level checks (§12)", () => {
       expect(crewGate("read", OFF, device)).toEqual({ ok: true });
     }
   });
+
+  test("a device-read (the Files view, ADR 0083) is the member's own device decision, as a write is", () => {
+    for (const device of [null, "phone-7", "someone-elses-phone", "unknown"]) {
+      expect(crewGate("device-read", ON, device)).toEqual(crewGate("write", ON, device));
+      expect(crewGate("device-read", OFF, device)).toEqual({ ok: true });
+    }
+  });
 });
 
 describe("the device identity comes off the LINK, not off the peer's own header", () => {
@@ -68,6 +75,14 @@ describe("the device identity comes off the LINK, not off the peer's own header"
     // Anything a fronting proxy injected is about a browser at the peer's own door, not about the
     // operator on the other side of a lead. Reading it here would be a second, unaudited basis.
     expect(crewDeviceOf(req({ "x-tailnet-device": "phone-7" }))).toBeNull();
+  });
+
+  test("an RFC 8187 value is decoded before the peer's allowlist sees it (#324)", () => {
+    expect(crewDeviceOf(req({ "x-crew-device": "UTF-8''%ED%8F%B0" }))).toBe("폰");
+    const gate: PeerGateConfig = { deviceHeader: "x-tailnet-device", deviceAllowlist: ["폰"] };
+    expect(crewGate("write", gate, crewDeviceOf(req({ "x-crew-device": "UTF-8''%ED%8F%B0" }))).ok).toBe(
+      true,
+    );
   });
 
   test("absent and blank are the same thing", () => {

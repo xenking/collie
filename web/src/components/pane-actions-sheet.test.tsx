@@ -1,10 +1,12 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 
 import { server } from "@/test/setup";
-import { clearStatus } from "@/lib/status";
-import type { AgentView, ServerSummary } from "@/lib/types";
+import { clearStatus, useStatus } from "@/lib/status";
+import { currentPins, pinMatcher, setPinned } from "@/lib/pins";
+import { __resetOperatorCommands } from "@/lib/operator-config";
+import type { AgentView, MuxConfig, ServerSummary } from "@/lib/types";
 import { CrewProvider } from "./crew-provider";
 import { PaneActionsSheet } from "./pane-actions-sheet";
 
@@ -264,6 +266,7 @@ describe("PaneActionsSheet — the read rows", () => {
     renderSheet();
     expect(screen.queryByRole("button", { name: "Find in output" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Conversation history" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy output" })).toBeNull();
   });
 
   it("shows only the row it was given a callback for", () => {
@@ -282,6 +285,25 @@ describe("PaneActionsSheet — the read rows", () => {
     // Order matters: the find bar takes over the header row, and the sheet must not still be over it.
     expect(vi.mocked(props.onClose).mock.invocationCallOrder[0]!).toBeLessThan(
       onFind.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("shows the Copy output row only when given onCopyOutput", () => {
+    const { rerender } = render(<PaneActionsSheet {...renderProps()} />);
+    expect(screen.queryByRole("button", { name: "Copy output" })).toBeNull();
+    rerender(<PaneActionsSheet {...renderProps({ onCopyOutput: vi.fn() })} />);
+    expect(screen.getByRole("button", { name: "Copy output" })).toBeInTheDocument();
+  });
+
+  it("closes the sheet BEFORE it copies, so the copy fires as the sheet unmounts", async () => {
+    const user = userEvent.setup();
+    const onCopyOutput = vi.fn();
+    const props = renderSheet({ onCopyOutput });
+    await user.click(screen.getByRole("button", { name: "Copy output" }));
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(onCopyOutput).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(props.onClose).mock.invocationCallOrder[0]!).toBeLessThan(
+      onCopyOutput.mock.invocationCallOrder[0]!,
     );
   });
 
@@ -314,8 +336,8 @@ describe("PaneActionsSheet — the read rows", () => {
   // slides up under the finger. Every row in here states the floor — `min-h-11` around a 20px
   // `text-sm` line, because `px-3 py-2.5` alone drew 40.
   it("gives every row a 44px hit box", () => {
-    renderSheet({ onFind: vi.fn(), onHistory: vi.fn() });
-    for (const name of ["Find in output", "Conversation history", "Rename", "Close pane"]) {
+    renderSheet({ onFind: vi.fn(), onHistory: vi.fn(), onCopyOutput: vi.fn() });
+    for (const name of ["Find in output", "Conversation history", "Copy output", "Rename", "Close pane"]) {
       expect(screen.getByRole("button", { name })).toHaveClass("min-h-11");
     }
   });
@@ -394,5 +416,247 @@ describe("PaneActionsSheet — title row names the machine", () => {
       "aria-labelledby",
       document.querySelector('[data-slot="sheet-title"]')!.id,
     );
+  });
+});
+
+// PIN TO TOP / UNPIN (ADR 0070): the last of the read rows, so it leads the two doors that pass no
+// reads (a dashboard row's hold, the pane pill's hold) and trails find/history/settings/zen on the ⋮.
+// A pin changes this device and types into no terminal, so it sits outside both write gates.
+describe("PaneActionsSheet — pin", () => {
+  const pinned = () => pinMatcher(currentPins())(agent);
+
+  it("leads the list on a door with no read rows, above Rename", () => {
+    renderSheet();
+    const pin = screen.getByRole("button", { name: "Pin to top" });
+    const rename = screen.getByRole("button", { name: "Rename" });
+    expect(pin.compareDocumentPosition(rename) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(pin).toHaveClass("min-h-11");
+  });
+
+  it("trails the read rows on the ⋮, so no row the operator knows moves", () => {
+    renderSheet({ onFind: vi.fn(), onHistory: vi.fn(), onSettings: vi.fn(), onZen: vi.fn() });
+    const zen = screen.getByRole("button", { name: "Zen mode" });
+    const pin = screen.getByRole("button", { name: "Pin to top" });
+    const rename = screen.getByRole("button", { name: "Rename" });
+    expect(zen.compareDocumentPosition(pin) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(pin.compareDocumentPosition(rename) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("pins, closes the sheet first, and hands the caller the new state", async () => {
+    const user = userEvent.setup();
+    const onPinChange = vi.fn();
+    const props = renderSheet({ onPinChange, herd: [agent] });
+    await user.click(screen.getByRole("button", { name: "Pin to top" }));
+    expect(pinned()).toBe(true);
+    expect(onPinChange).toHaveBeenCalledExactlyOnceWith(agent, true);
+    expect(vi.mocked(props.onClose).mock.invocationCallOrder[0]!).toBeLessThan(
+      onPinChange.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("reads Unpin on a pinned pane, and unpins it", async () => {
+    const user = userEvent.setup();
+    setPinned(agent, true, [agent]);
+    const onPinChange = vi.fn();
+    renderSheet({ onPinChange });
+    await user.click(screen.getByRole("button", { name: "Unpin" }));
+    expect(pinned()).toBe(false);
+    expect(onPinChange).toHaveBeenCalledExactlyOnceWith(agent, false);
+  });
+
+  it("says it in a toast when the caller shows no row (the pane view's two doors)", async () => {
+    const user = userEvent.setup();
+    const status = renderHook(() => useStatus());
+    renderSheet();
+    await user.click(screen.getByRole("button", { name: "Pin to top" }));
+    expect(status.result.current).toMatchObject({ text: "Pinned to the top", tone: "success" });
+    await user.click(screen.getByRole("button", { name: "Unpin" }));
+    expect(status.result.current).toMatchObject({ text: "Unpinned", tone: "success" });
+  });
+
+  it("survives read-only: a device that may not write can still pin", async () => {
+    const user = userEvent.setup();
+    renderSheet({ readOnly: true });
+    expect(screen.getByText(/read-only/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Pin to top" }));
+    expect(pinned()).toBe(true);
+  });
+
+  it("survives an unreachable machine: a pane on a quiet peer can still be pinned", async () => {
+    const user = userEvent.setup();
+    const roster: ServerSummary[] = [
+      { id: "bluefin", name: "bluefin", isLead: true, reachable: true, protocol: "ok", lastSeenAt: 9_000 },
+      { id: "workshop", name: "workshop", isLead: false, reachable: false, protocol: "ok", lastSeenAt: 1_000 },
+    ];
+    const quiet = { ...agent, host: "workshop" };
+    render(<PaneActionsSheet {...renderProps({ pane: quiet })} />, {
+      wrapper: ({ children }) => (
+        <CrewProvider servers={roster} ts={20_000} pollMs={1500}>
+          {children}
+        </CrewProvider>
+      ),
+    });
+    expect(screen.getByText(/workshop is unreachable/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Pin to top" }));
+    expect(pinMatcher(currentPins())(quiet)).toBe(true);
+  });
+
+  it("drops the pin when Close succeeds", async () => {
+    const user = userEvent.setup();
+    setPinned(agent, true, [agent]);
+    const props = renderSheet();
+    await user.click(screen.getByRole("button", { name: "Close pane" }));
+    await user.click(screen.getByRole("button", { name: "Tap again to close" }));
+    await waitFor(() => expect(props.onClosed).toHaveBeenCalledOnce());
+    expect(pinned()).toBe(false);
+  });
+
+  it("keeps the pin when Close fails: the pane is still there", async () => {
+    const user = userEvent.setup();
+    server.use(http.post(/\/api\/pane\/[^/]+\/close$/, () => HttpResponse.json({ ok: false, error: "nope" }, { status: 500 })));
+    setPinned(agent, true, [agent]);
+    const props = renderSheet();
+    await user.click(screen.getByRole("button", { name: "Close pane" }));
+    await user.click(screen.getByRole("button", { name: "Tap again to close" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Close pane" })).toBeEnabled());
+    expect(props.onClosed).not.toHaveBeenCalled();
+    expect(pinned()).toBe(true);
+  });
+});
+
+// ── THE BODY SWITCH (M41/11) ────────────────────────────────────────────────────────────────────
+//
+// The row is a ROW IN THIS SHEET, not the header and not the belt (ADR 0009: a generic menu is
+// where a pane's actions live, and Find and History are already here). It is gated by absence, the
+// way every read row here is, and it EXPLAINS rather than hides when the pane cannot honour it.
+describe("PaneActionsSheet — which body the pane draws", () => {
+  it("shows no switch when the caller passes no body", () => {
+    renderSheet();
+    expect(screen.queryByRole("button", { name: /view$/ })).toBeNull();
+  });
+
+  it("offers the chat while the standing body is the terminal", () => {
+    renderSheet({ paneView: "terminal", onPaneViewChange: vi.fn() });
+    expect(screen.getByRole("button", { name: "Chat view" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Terminal view" })).toBeNull();
+  });
+
+  it("offers the terminal while the standing body is the chat", () => {
+    renderSheet({ paneView: "chat", onPaneViewChange: vi.fn() });
+    expect(screen.getByRole("button", { name: "Terminal view" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Chat view" })).toBeNull();
+  });
+
+  it("writes the other body and closes, so the pane is the only thing on screen when it lands", async () => {
+    const user = userEvent.setup();
+    const onPaneViewChange = vi.fn();
+    const props = renderSheet({ paneView: "terminal", onPaneViewChange });
+    await user.click(screen.getByRole("button", { name: "Chat view" }));
+    expect(onPaneViewChange).toHaveBeenCalledWith("chat");
+    expect(props.onClose).toHaveBeenCalledOnce();
+  });
+
+  // A control that disappears on some panes and not others is how an operator concludes the app is
+  // broken, and it would be worst for exactly the person whose standing mode is Chat.
+  it("keeps the row and carries the reason on a pane that cannot draw a chat", () => {
+    renderSheet({
+      paneView: "chat",
+      onPaneViewChange: vi.fn(),
+      paneViewNote: "This pane keeps the terminal: no session.",
+    });
+    expect(screen.getByRole("button", { name: /Terminal view/ })).toBeInTheDocument();
+    expect(screen.getByText("This pane keeps the terminal: no session.")).toBeInTheDocument();
+  });
+});
+
+// "New agent in a worktree" (ADR 0089). Three gates: the caller passes `onBranchOff` (only for a pane
+// in a Git repo), the multiplexer declares `createWorktree`, and the scope is the lead.
+describe("PaneActionsSheet — New agent in a worktree", () => {
+  afterEach(() => __resetOperatorCommands());
+
+  /** Serve an `/api/config` whose mux block says `createWorktree` is `capable`. */
+  function worktreeCapable(capable: boolean) {
+    const mux: MuxConfig = { name: "reference", capabilities: { createWorktree: capable }, unsupportedKeys: [], notes: {} };
+    server.use(http.get("/api/config", () => HttpResponse.json({ push: false, vapidPublicKey: "", mux })));
+  }
+  const row = () => screen.queryByRole("button", { name: "New agent in a worktree" });
+
+  it("is offered on the lead when the multiplexer can create a worktree", async () => {
+    worktreeCapable(true);
+    renderSheet({ onBranchOff: vi.fn() });
+    expect(await screen.findByRole("button", { name: "New agent in a worktree" })).toBeInTheDocument();
+  });
+
+  it("is withdrawn when the multiplexer declares no worktrees (tmux, zellij)", async () => {
+    worktreeCapable(false);
+    renderSheet({ onBranchOff: vi.fn() });
+    await waitFor(() => expect(row()).toBeNull());
+    // The other writes are untouched by it.
+    expect(screen.getByRole("button", { name: "Rename" })).toBeInTheDocument();
+  });
+
+  it("is withdrawn on a crew member's pane: the route is lead-local", async () => {
+    worktreeCapable(true);
+    renderSheet({ onBranchOff: vi.fn(), scope: { host: "laptop" } });
+    await screen.findByRole("button", { name: "Rename" });
+    expect(row()).toBeNull();
+  });
+
+  it("is withdrawn when the caller passes nothing (a pane outside a repo)", async () => {
+    worktreeCapable(true);
+    renderSheet();
+    await screen.findByRole("button", { name: "Rename" });
+    expect(row()).toBeNull();
+  });
+
+  it("is withdrawn on a read-only device, like every write", async () => {
+    worktreeCapable(true);
+    renderSheet({ onBranchOff: vi.fn(), readOnly: true });
+    expect(row()).toBeNull();
+  });
+
+  it("closes the sheet first, then goes to the New page", async () => {
+    worktreeCapable(true);
+    const user = userEvent.setup();
+    const order: string[] = [];
+    renderSheet({ onClose: () => order.push("close"), onBranchOff: () => order.push("branchOff") });
+    await user.click(await screen.findByRole("button", { name: "New agent in a worktree" }));
+    expect(order).toEqual(["close", "branchOff"]);
+  });
+
+  it("sits above Close pane, so the destructive row stays last", async () => {
+    worktreeCapable(true);
+    renderSheet({ onBranchOff: vi.fn() });
+    const branch = await screen.findByRole("button", { name: "New agent in a worktree" });
+    const close = screen.getByRole("button", { name: "Close pane" });
+    expect(branch.compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe("PaneActionsSheet — a saved copy", () => {
+  it("replaces Rename, Focus, Close and the branch-off with a note, and keeps Pin", () => {
+    renderSheet({ savedCopy: true, onBranchOff: vi.fn() });
+    expect(screen.getByText("Saved copy. Reconnect to make changes.")).toBeInTheDocument();
+    for (const name of ["Rename", "Close pane"]) expect(screen.queryByRole("button", { name })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Focus|Show in|New agent in a worktree/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /Pin to top/ })).toBeInTheDocument();
+  });
+
+  it("sends no write", async () => {
+    const calls: string[] = [];
+    server.use(
+      http.post(/\/api\/pane\/.*/, ({ request }) => {
+        calls.push(request.url);
+        return HttpResponse.json({ ok: true });
+      }),
+      http.delete(/\/api\/pane\/.*/, ({ request }) => {
+        calls.push(request.url);
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+    renderSheet({ savedCopy: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toEqual([]);
   });
 });

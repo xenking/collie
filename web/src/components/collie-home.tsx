@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { CloudOff, WifiOff } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { savedAtLabel } from "@/lib/format";
 import { CollieMark } from "@/components/collie-mark";
 import { t } from "@/lib/i18n";
 import { useStatus } from "@/lib/status";
@@ -18,6 +20,15 @@ interface CollieHomeProps {
    *  the mark goes still again, muted — a mark that blooms forever reads as "still trying" when
    *  we've in fact given up; muted says "not connected" at a glance, matching the boot splash. */
   lost?: boolean;
+  /** `navigator.onLine`, read by the host (the mark never calls the hook). Only picks which icon the
+   *  lost badge wears, the same two the connection strip uses so the two agree: false is the phone's
+   *  own fact (WifiOff), anything else is a bridge that does not answer (CloudOff). */
+  online?: boolean;
+  /** When the data on screen was last read live, if anyone knows. Only ever SPOKEN, never drawn:
+   *  while `lost`, it puts the age of the copy into the button's name, which is what remains of the
+   *  strip's "Showing what was saved at <time>" once the operator has dismissed it. The strip under
+   *  the header carries the date for sighted readers; the bar itself stays free of it. */
+  lastSeenAt?: number;
   className?: string;
 }
 
@@ -30,8 +41,8 @@ interface CollieHomeProps {
 // picture. This mark rests by not animating at all, so nothing is ever swapped and nothing can
 // resize as the connection settles.
 // The mark is now the app's ONLY animal: the boot splash and the idle cover bloom this same mark, so
-// "Collie is fetching" looks the same wherever it appears. <DogGallop/> is untouched but no longer
-// mounted anywhere in the app (see components/dog-gallop.tsx).
+// "Collie is fetching" looks the same wherever it appears. The old gallop sprite and its component
+// were removed in 1.20.0.
 //
 // Tapping it returns to the dashboard, and the MARK IS THE WHOLE BUTTON. The brand word used to sit
 // inside it on the dashboard; it moved out when the header's identity became two stacked lines —
@@ -114,9 +125,17 @@ export function spinRate(elapsedMs: number, totalMs = ORBIT_TURN_MS): number {
   return (1 - Math.cos(2 * Math.PI * u)) * du;
 }
 
-export function CollieHome({ onHome, trouble, lost = false, className }: CollieHomeProps) {
+export function CollieHome({
+  onHome,
+  trouble,
+  lost = false,
+  online = true,
+  lastSeenAt,
+  className,
+}: CollieHomeProps) {
   useLocale();
   const bloom = trouble && !lost;
+  const LostIcon = online ? CloudOff : WifiOff;
 
   // ONE FULL ROUND OF THE ORBIT whenever the app publishes a status — a send landing, an agent
   // finishing somewhere in the herd, a refusal, the pane closing under you.
@@ -301,9 +320,11 @@ export function CollieHome({ onHome, trouble, lost = false, className }: CollieH
       aria-label={
         !trouble
           ? t("nav.home.aria.default")
-          : lost
-            ? t("nav.home.aria.lost")
-            : t("nav.home.aria.reconnecting")
+          : !lost
+            ? t("nav.home.aria.reconnecting")
+            : lastSeenAt === undefined
+              ? t("nav.home.aria.lost")
+              : t("nav.home.aria.lostAt", { time: savedAtLabel(lastSeenAt) })
       }
       className={cn(
         "-mx-1 flex items-center rounded px-1 transition-opacity active:opacity-70",
@@ -334,7 +355,11 @@ export function CollieHome({ onHome, trouble, lost = false, className }: CollieH
       {/* The ramp's scope, and the reason this wrapper carries a ref at all: `getAnimations` is
           collected from HERE and not from the button, so the button's own `transition-opacity` — and
           anything a caller's `className` animates — is never handed a playback rate. */}
-      <span ref={mark} className="grid size-11 shrink-0 place-items-center">
+      {/* `data-slot` is a HANDLE FOR MEASUREMENT, and it is here rather than on the mark because
+          collie-mark.tsx is generated upstream and copied in whole (a sha256 in its own first line
+          guards it against exactly that edit). The agent-start handoff flies a second mark out of
+          this one, so it needs this box on screen; it reads the `<svg>` inside for the true size. */}
+      <span ref={mark} data-slot="collie-mark" className="relative grid size-11 shrink-0 place-items-center">
         <CollieMark
           size={40}
           weight="header"
@@ -342,6 +367,22 @@ export function CollieHome({ onHome, trouble, lost = false, className }: CollieH
           paper="var(--background)"
           className={cn("transition-opacity", lost && "opacity-40 grayscale")}
         />
+        {/* THE LOST BADGE. The strip under the header says the connection is gone, and the operator can
+            hide it; this is what stays after that, so the state is never only a dimmed dog. It sits in
+            the corner of the 44px box (inside it, so the tap target does not grow) on the page colour
+            with the same `ring-2 ring-background` cut the status dot in agent-chat wears, which keeps
+            it legible over the orbit. The same two icons as the strip, picked by the host's `online`
+            flag. Decorative: the button's own label already says "not connected". `text-status-blocked`
+            is the danger token the red strip uses. It is outside the ramped subtree's animation set
+            (`getAnimations` filters on the mark's `cm-` names), so it never takes a playback rate. */}
+        {lost ? (
+          <LostIcon
+            data-slot="collie-lost-badge"
+            data-icon={online ? "cloud-off" : "wifi-off"}
+            aria-hidden
+            className="absolute bottom-0.5 right-0.5 size-3.5 rounded-full bg-background p-px text-status-blocked ring-2 ring-background"
+          />
+        ) : null}
       </span>
     </button>
   );

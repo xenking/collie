@@ -3,9 +3,15 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Push, topicIsSendable } from "./push.ts";
+import { machineAlertMessage } from "./machine-alerts.ts";
+import { machineTopic, Push, redactPushMessage, topicIsSendable } from "./push.ts";
+import { makeNotifySink, NotificationCoordinator, type NotifyClock } from "./notifications.ts";
+import { pushTitle } from "./push-titles.ts";
+import type { AgentStatus, AgentView } from "./types.ts";
 import type { PushSender, PushSubscription } from "./push.ts";
 import { loadConfig } from "./config.ts";
+import { HOST } from "./host.ts";
+import { ensureOwnerOnlyDir, isOwnerOnly, privateRoot } from "./owner-only.ts";
 
 // The broadcast prune-vs-log logic and the on-disk persistence are the untested-by-Bun.serve parts.
 // We inject a fake sender so the 404/410-prune path is exercised without the real web-push library,
@@ -239,14 +245,21 @@ describe("Push — eviction of persistently-failing subscriptions", () => {
 });
 
 describe("Push — persistence", () => {
+  // Windows: the bridge gives the state dir an owner-only access list at start (M43 spec 04), and the
+  // file the store writes inherits it. NTFS has no 0600, so the check reads that list instead.
   test("addSubscription persists with owner-only (0600) permissions", async () => {
     const cfg = await tempCfg();
+    if (process.platform === "win32") ensureOwnerOnlyDir(cfg.stateDir, HOST, { root: privateRoot("state"), repair: true });
     const push = new Push(cfg, () => Promise.resolve());
     enable(push, []);
 
     await push.addSubscription(sub("one"));
 
     expect(await fileEndpoints(cfg.stateDir)).toEqual(["one"]);
+    if (process.platform === "win32") {
+      expect(isOwnerOnly(join(cfg.stateDir, "push-subscriptions.json"), HOST)).toEqual({ state: "private" });
+      return;
+    }
     const mode = (await stat(join(cfg.stateDir, "push-subscriptions.json"))).mode & 0o777;
     expect(mode).toBe(0o600);
   });
@@ -360,9 +373,51 @@ describe("Push — per-message collapse topic (update must not share the herd sl
     await push.send({ type: "update", tag: "collie:update", title: "t", body: "b", target: "settings" });
     await push.send({ title: "claude needs you", body: "…", tag: "collie:herd", paneId: "w1:p1" });
     await push.send({ type: "clear", tag: "collie:herd" });
+    await push.send(machineAlertMessage({ id: "desk", name: "desk", metric: "cpu", rule: { above: 0.9, forMin: 10 }, value: 0.95 }));
+    await push.send({ type: "machine", tag: "collie:machine:desk:cpu", title: "t", body: "b", machine: "desk", target: "machine" });
 
-    expect(sends.length).toBe(3);
+    expect(sends.length).toBe(5);
     for (const { options } of sends) expect(topicIsSendable(options.topic)).toBe(true);
+  });
+
+  test("a load alert rides a topic per machine and metric, and its tap data names the machine, not a host (ADR 0084)", async () => {
+    const cfg = await tempCfg();
+    const { sender, sends } = capturing();
+    const push = new Push(cfg, sender);
+    enable(push, [sub("a")]);
+
+    const rule = { above: 0.9, forMin: 10 };
+    await push.send(machineAlertMessage({ id: "local", name: "desk", metric: "cpu", rule, value: 0.95 }));
+    await push.send(machineAlertMessage({ id: "local", name: "desk", metric: "mem", rule, value: 0.95 }));
+    await push.send(machineAlertMessage({ id: "laptop", name: "laptop", metric: "cpu", rule, value: 0.95 }));
+    // Its own collapse keys: a queued load alert must replace neither a queued herd summary nor
+    // another machine's or metric's alert.
+    const topics = sends.map((s) => s.options.topic);
+    expect(new Set(topics).size).toBe(3);
+    for (const topic of topics) {
+      expect(topic).toMatch(/^collie-machines-[A-Za-z0-9_-]{12}$/);
+      expect(topicIsSendable(topic)).toBe(true);
+    }
+    expect(topics[0]).toBe(machineTopic("local", "cpu"));
+    expect(machineTopic("local", "cpu")).toBe(machineTopic("local", "cpu"));
+    expect(sends[0]!.options).toEqual({ TTL: 3_600, topic: machineTopic("local", "cpu"), urgency: "high" });
+    // `machine`, never `host`: an old service worker reads `host` and would open `/?h=local`.
+    const payload = JSON.parse(sends[0]!.payload);
+    expect(payload.data).toEqual({ target: "machine", machine: "local" });
+    expect("host" in payload).toBe(false);
+    // The topic is the push service's, never the device's.
+    expect("topic" in payload).toBe(false);
+  });
+
+  test("a machine message with no topic, or one no push service accepts, falls back to collie-machines", async () => {
+    const cfg = await tempCfg();
+    const { sender, sends } = capturing();
+    const push = new Push(cfg, sender);
+    enable(push, [sub("a")]);
+
+    await push.send({ type: "machine", tag: "collie:machine:desk:cpu", title: "t", body: "b", machine: "desk", target: "machine" });
+    await push.send({ type: "machine", tag: "collie:machine:desk:cpu", title: "t", body: "b", machine: "desk", target: "machine", topic: "collie-update" });
+    expect(sends.map((s) => s.options.topic)).toEqual(["collie-machines", "collie-machines"]);
   });
 
   test("topicIsSendable rejects the lengths base64 cannot produce — the Apple trap", () => {
@@ -507,5 +562,119 @@ describe("Push — superseding, metadata and forget", () => {
     expect(await fileEndpoints(cfg.stateDir)).toEqual(["a"]);
     expect(await push.forget("*")).toBe(1);
     expect(await fileEndpoints(cfg.stateDir)).toEqual([]);
+  });
+});
+
+// ── M46: what a push carries is masked, and a pane is named by the operator, never by its program ──
+// A push crosses a third-party push service and shows on a lock screen. Placeholders only; the AWS
+// one is joined at runtime so a repo-wide secret scan finds nothing here.
+describe("Push — redact and the operator's label", () => {
+  const key = ["AKIA", "PLACEHOLDER00000"].join("");
+  const maskedKey = `AKIA${"•".repeat(16)}`;
+
+  function capturing() {
+    const payloads: string[] = [];
+    const sender: PushSender = (_s, payload) => {
+      payloads.push(payload);
+      return Promise.resolve();
+    };
+    return { sender, payloads };
+  }
+
+  /** Fire every armed timer at once — the debounce, without the wait. */
+  class InstantClock implements NotifyClock<number> {
+    private readonly timers = new Map<number, () => void>();
+    private next = 1;
+    schedule(fn: () => void): number {
+      this.timers.set(this.next, fn);
+      return this.next++;
+    }
+    cancel(handle: number): void {
+      this.timers.delete(handle);
+    }
+    fireAll(): void {
+      const fns = [...this.timers.values()];
+      this.timers.clear();
+      for (const fn of fns) fn();
+    }
+  }
+
+  function pane(paneId: string, status: AgentStatus, extra: Partial<AgentView> = {}): AgentView {
+    return {
+      paneId,
+      workspaceId: "w1",
+      workspaceLabel: "demo",
+      workspaceNumber: 1,
+      tabId: "w1:t1",
+      agent: "claude",
+      status,
+      cwd: "/home/you/demo",
+      focused: false,
+      kind: "agent",
+      ...extra,
+    };
+  }
+
+  /** The real chain a local session drives: coordinator → sink → Push → the push service. */
+  async function herd(cfgRedact: boolean) {
+    const cfg = { ...(await tempCfg()), redact: cfgRedact };
+    const { sender, payloads } = capturing();
+    const push = new Push(cfg, sender);
+    enable(push, [sub("a")]);
+    const clock = new InstantClock();
+    const sink = makeNotifySink(push, { isMuted: () => false }, "collie:herd");
+    const coord = new NotificationCoordinator(clock, sink, 0, (s) => s === "blocked" || s === "done");
+    return { coord, clock, payloads };
+  }
+
+  test("redact: a push body is masked before it leaves, and an untouched title keeps its code", async () => {
+    const cfg = await tempCfg();
+    const { sender, payloads } = capturing();
+    const push = new Push(cfg, sender);
+    enable(push, [sub("a")]);
+    await push.send({ ...pushTitle("agent.blocked", { agent: "claude" }), body: `demo · ${key}`, tag: "t" });
+    const sent = JSON.parse(payloads[0]!);
+    expect(sent.body).toBe(`demo · ${maskedKey}`);
+    expect(sent.title).toBe("claude needs you");
+    expect(sent.titleCode).toBe("agent.blocked");
+    expect(payloads[0]).not.toContain(key);
+  });
+
+  test("redact: a title the mask changed drops its code and detail, so no translation rebuilds it", () => {
+    const out = redactPushMessage({ ...pushTitle("machine.cpu", { machine: key }), body: "b" });
+    expect(out.title).toBe(`CPU stays high on ${maskedKey}`);
+    expect(out.titleCode).toBeUndefined();
+    expect(out.titleDetail).toBeUndefined();
+  });
+
+  test("redact off: COLLIE_REDACT=off sends the body as it is", async () => {
+    const cfg = { ...(await tempCfg()), redact: false };
+    const { sender, payloads } = capturing();
+    const push = new Push(cfg, sender);
+    enable(push, [sub("a")]);
+    await push.notify("hi", `body ${key}`);
+    expect(JSON.parse(payloads[0]!).body).toBe(`body ${key}`);
+  });
+
+  test("a program title with a path and a placeholder secret never appears in a push payload", async () => {
+    // Even with redaction OFF: the title is kept out by the name rule, not by the mask.
+    const { coord, clock, payloads } = await herd(false);
+    const title = `~/work/client/.env ${key}`;
+    coord.onTransition(pane("p1", "blocked", { terminalTitle: title }), "working", "blocked");
+    coord.onTransition(pane("p2", "blocked", { terminalTitle: title, workspaceLabel: "api" }), "working", "blocked");
+    clock.fireAll();
+    expect(payloads.length).toBeGreaterThan(0);
+    for (const payload of payloads) {
+      expect(payload).not.toContain("~/work");
+      expect(payload).not.toContain(key);
+    }
+  });
+
+  test("a pane with no label gets the neutral name, and a labelled one keeps the operator's", async () => {
+    const { coord, clock, payloads } = await herd(true);
+    coord.onTransition(pane("p1", "blocked", { terminalTitle: "vim notes.md" }), "working", "blocked");
+    coord.onTransition(pane("p2", "blocked", { agent: "codex", paneLabel: "backend" }), "working", "blocked");
+    clock.fireAll();
+    expect(JSON.parse(payloads.at(-1)!).body).toBe("claude, backend");
   });
 });

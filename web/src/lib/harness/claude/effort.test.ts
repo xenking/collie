@@ -6,7 +6,7 @@ import { parseAnsi } from "../../ansi";
 import { splitLines, type StyledLine } from "../../blocks";
 import { buildBlocks } from "../index";
 import { menusEqual, menusSameIdentity } from "../menu-model";
-import { detectEffort } from "./effort";
+import { detectEffort, detectEffortRegion } from "./effort";
 import { claudeBuildBlocks } from "./index";
 import { detectMenu } from "./menu";
 
@@ -57,6 +57,11 @@ const LOW_ULTRACODE_LIFTS: Array<{ name: string; label: string }> = [
   // reads that soft wrap as one block, so all three keys and the `←/→` phrase survive the join.
   { name: "claude--menu-effort-slider--w60-ultracode.txt", label: "ultracode" },
 ];
+// Claude Code 2.1.283 opens the slider under a `▔` modal edge that carries a label
+// (`▔▔▔…▔ ● high · /effort ▔`), with no `─` rule anywhere above the title. Before region-top.ts read
+// that edge, the scan found no top and the live screen fell to the unread-dialog card; every older
+// capture above passed because a plain `▔` row or a transcript rule sat inside the window.
+const EDGE_FIXTURE = "claude--v2283-slash-effort.txt";
 // The scale that screen printed, left to right.
 const SCALE = ["low", "medium", "high", "xhigh", "max", "ultracode"];
 // Every capture of this screen in the corpus.
@@ -67,7 +72,18 @@ const EFFORT_FIXTURES = [
   ...WRAPPED_FIXTURES,
   ...LOW_ULTRACODE_LIFTS.map((f) => f.name),
   "claude-lab--menu-effort-slider--w82.txt",
+  EDGE_FIXTURE,
 ];
+// Claude Code 2.1.291 (capture lab, 2026-10-06), at 82 and 132 columns. That build dropped the
+// `ultracode` level and its `xhigh + workflows` row, and draws a toggle BESIDE the track instead:
+// `Ultracode  off` right of the track on the marker row, `Tab to toggle` under it on the label row.
+// Kept out of `EFFORT_FIXTURES`, whose cases pin the six-level scale.
+const V2291_FIXTURES = [
+  "claude-lab--menu-effort-slider-v2291--w82.txt",
+  "claude-lab--menu-effort-slider--w132.txt",
+];
+// The scale those screens printed: five levels, and no word of the toggle's hint.
+const SCALE_2291 = ["low", "medium", "high", "xhigh", "max"];
 
 function lines(text: string): StyledLine[] {
   return splitLines(parseAnsi(text));
@@ -125,6 +141,77 @@ describe("detectEffort — the /effort slider", () => {
         expect(/\d/.test(key), key).toBe(false);
       }
     }
+  });
+});
+
+describe("detectEffort — the `▔` modal edge of Claude Code 2.1.283", () => {
+  it("lifts the slider whose only region top is a labelled `▔` edge", () => {
+    const region = detectEffortRegion(load(EDGE_FIXTURE));
+    expect(region).not.toBeNull();
+    expect(region!.model.title).toBe("Effort");
+    expect(region!.model.actions).toEqual(EXPECTED_ACTIONS);
+    expect(region!.model.nav).toEqual({
+      upDown: false,
+      leftRight: { verb: "adjust", label: "high", values: SCALE },
+    });
+    expect(textOf(load(EDGE_FIXTURE)[region!.startLine]!).startsWith("▔")).toBe(true);
+    expect(claudeBuildBlocks(load(EDGE_FIXTURE)).map((b) => b.kind)).toEqual(["menu"]);
+  });
+});
+
+describe("detectEffort — the side panel of Claude Code 2.1.291", () => {
+  it.each(V2291_FIXTURES)("reads %s as five levels, with the toggle's hint left out", (name) => {
+    const model = detectEffort(load(name));
+    expect(model).not.toBeNull();
+    expect(model!.title).toBe("Effort");
+    expect(model!.actions).toEqual(EXPECTED_ACTIONS);
+    expect(model!.nav).toEqual({
+      upDown: false,
+      leftRight: { verb: "adjust", label: "medium", values: SCALE_2291 },
+    });
+    // The side panel stays on screen, inside the signature: a toggle flip is a changed render.
+    expect(model!.signature).toContain("Ultracode");
+    expect(model!.signature).toContain("Tab to toggle");
+  });
+
+  it.each(V2291_FIXTURES)("is the Effort arm that produces %s's block", (name) => {
+    const paneLines = load(name);
+    const blocks = claudeBuildBlocks(paneLines);
+    expect(blocks.map((b) => b.kind)).toEqual(["raw", "menu"]);
+    const block = blocks[1]!;
+    if (block.kind !== "menu") throw new Error("expected a menu block");
+    expect(block.menu).toEqual(detectEffort(paneLines)!);
+  });
+
+  // A hand-built slider: the track runs from column 3 to 33, and the side panel opens at column 39.
+  const sideScreen = (labelRow: string): StyledLine[] =>
+    lines(
+      [
+        "▔".repeat(70),
+        "  Effort",
+        "",
+        `   ${"─".repeat(10)}▲${"─".repeat(19)}      Ultracode  off`,
+        labelRow,
+        "",
+        "  ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel",
+      ].join("\n"),
+    );
+
+  it("cuts the label row at the column the marker row's side panel opens in", () => {
+    const row = "   low    medium    high    xhigh  max Tab to toggle";
+    expect(row.indexOf("Tab")).toBe(39);
+    const model = detectEffort(sideScreen(row));
+    expect(model).not.toBeNull();
+    expect(model!.nav.leftRight).toEqual({ verb: "adjust", label: "medium", values: SCALE_2291 });
+  });
+
+  it("declines when a label runs across the side panel's column", () => {
+    // A level that straddles the cut is not a layout anybody captured. Trimming it would invent a
+    // word, so the Effort arm declines and the generic menu keeps the screen.
+    const row = "   low    medium    high    xhigh  maximum  Tab";
+    expect(row.indexOf("maximum")).toBeLessThan(39);
+    expect(row.indexOf("maximum") + "maximum".length).toBeGreaterThan(39);
+    expect(detectEffort(sideScreen(row))).toBeNull();
   });
 });
 
@@ -441,7 +528,7 @@ describe("detectEffort — what it declines", () => {
       .filter((n) => n.endsWith(".txt"))
       .filter((n) => detectEffort(load(n)) !== null)
       .toSorted();
-    expect(claimed).toEqual(EFFORT_FIXTURES.toSorted());
+    expect(claimed).toEqual([...EFFORT_FIXTURES, ...V2291_FIXTURES].toSorted());
   });
 });
 

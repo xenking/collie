@@ -17,16 +17,20 @@
 // lands in `docs/` without a line below. The root contributor specifications are deliberately not
 // here: the largest of them is 194 KB on its own, and an agent that needs them has the checkout.
 
+import changes from "../docs/changes.md" with { type: "text" };
+import claudeCodeOnYourPhone from "../docs/claude-code-on-your-phone.md" with { type: "text" };
 import commands from "../docs/commands.md" with { type: "text" };
 import crew from "../docs/crew.md" with { type: "text" };
 import configure from "../docs/configure.md" with { type: "text" };
 import deployment from "../docs/deployment.md" with { type: "text" };
+import fiveMinuteInstall from "../docs/five-minute-install.md" with { type: "text" };
 import install from "../docs/install.md" with { type: "text" };
 import multiplexers from "../docs/multiplexers.md" with { type: "text" };
 import security from "../docs/security.md" with { type: "text" };
 import troubleshooting from "../docs/troubleshooting.md" with { type: "text" };
 import upgrading from "../docs/upgrading.md" with { type: "text" };
 import voiceAndPush from "../docs/voice-and-push.md" with { type: "text" };
+import windows from "../docs/windows.md" with { type: "text" };
 
 // The agent-facing brief, which is not one of the pages: it is hand-written, it carries two
 // placeholder tokens `cli/docs.ts` fills at print time, and `collie skill` prints it alone.
@@ -44,14 +48,34 @@ export interface DocPage {
 }
 
 /**
- * The ten pages in an OPERATOR'S READING ORDER — install first, troubleshooting last — and never
- * alphabetically. `collie docs` lists them in this order and `collie docs --all` prints them in it.
+ * The fourteen pages in an OPERATOR'S READING ORDER — the five-minute guide first, troubleshooting
+ * last — and never alphabetically. `collie docs` lists them in this order and `collie docs --all` prints them in it.
  */
 export const DOC_PAGES: readonly DocPage[] = [
+  {
+    name: "five-minute-install",
+    purpose: "The recommended setup end to end: Tailscale, Herdr, Collie, and a paired phone",
+    text: fiveMinuteInstall,
+  },
   {
     name: "install",
     purpose: "Requirements, the two routes in, first run, and opening it on your phone",
     text: install,
+  },
+  {
+    name: "windows",
+    purpose: "Windows 11 with Herdr: what is supported, the unsigned binary, updating, and the limits",
+    text: windows,
+  },
+  {
+    name: "claude-code-on-your-phone",
+    purpose: "One path end to end: Claude Code in a pane, answered from your phone",
+    text: claudeCodeOnYourPhone,
+  },
+  {
+    name: "changes",
+    purpose: "What an agent changed: the changed files, their diffs and the last commit, read-only",
+    text: changes,
   },
   {
     name: "configure",
@@ -75,7 +99,7 @@ export const DOC_PAGES: readonly DocPage[] = [
   },
   {
     name: "multiplexers",
-    purpose: "Pointing Collie at Herdr, tmux or zellij, and what each backend can answer",
+    purpose: "Pointing Collie at Herdr, tern, tmux, zellij or tuios, and what each backend can answer",
     text: multiplexers,
   },
   {

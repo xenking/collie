@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import type { CSSProperties } from "react";
 import { asJsonBoolean, asJsonNumber, asJsonString, parseJsonObject } from "@/lib/json";
+import { dropChatTails, isKeepChat, KEEP_CHAT_DEFAULT, type KeepChat } from "@/lib/chat-tail";
 
 // Terminal mirror display preferences, persisted in localStorage.
 // Safe to call in SSR contexts (localStorage guarded throughout).
@@ -34,6 +35,19 @@ export interface DisplayPrefs {
    * a stored preference, and the clamp at the call site is what the browser sees.
    */
   draftFontSize: number;
+  /**
+   * Font size in px for the CHAT stream's prose (default: 14, range: 12-20).
+   *
+   * A third number and not the mirror's, for the same reason the draft has its own: the mirror is a
+   * grid of monospace cells you scan, and 10px is right for it; the stream is a page of prose you
+   * READ, and 10px prose is not text, it is a rumour. Sharing one knob would make every choice a
+   * compromise between a terminal and a paragraph.
+   *
+   * 14 is `text-sm`, exactly what the stream rendered before this setting existed, so an install
+   * that never opens it sees no change. The range runs UP further than the mirror's, because the
+   * reason to touch this one is eyesight rather than density.
+   */
+  chatFontSize: number;
   /** Terminal mirror font family, as a key into FONT_STACKS (default: "system" — the app's own
    *  `--font-mono`, i.e. exactly what every install rendered before this setting existed). */
   fontFamily: FontFamily;
@@ -67,6 +81,41 @@ export interface DisplayPrefs {
    * is why it is a pref at all rather than unconditional.
    */
   expandClippedReply: boolean;
+  /**
+   * How long this phone keeps the Chat tail of each pane, to read with the bridge out of reach:
+   * `off`, `1d` (the default) or `7d` (M46 spec 09, lib/chat-tail.ts). Read at each write, so a change
+   * applies from the next write on. Choosing `off` also deletes every tail already kept.
+   *
+   * Optional in the TYPE only, so the many literal prefs in the component tests stay valid: every
+   * read goes through {@link keepChatOf}, and `loadPrefs` always fills it.
+   */
+  keepChat?: KeepChat;
+  /**
+   * Which thumb the pane screen is laid out for: `right` (the default) or `left`. Read by the pane
+   * (components/agent-chat.tsx), which hands it to the composer; `left` turns the belt round, with
+   * the Switch at its left end above Send, and puts Send and Attach left of the reply field
+   * (components/actions-row.tsx, composer.tsx).
+   *
+   * Optional, and absent until the operator picks one: every read goes through {@link handOf}, which
+   * answers `right` for an absent value, so the literal prefs in the component tests stay valid and
+   * a payload written before the setting existed reads the right hand.
+   */
+  hand?: Hand;
+}
+
+/** The two hands the pane screen can be laid out for. */
+export const HANDS = ["right", "left"] as const;
+export type Hand = (typeof HANDS)[number];
+export const HAND_DEFAULT: Hand = "right";
+
+/** Narrow a string of unknown provenance (a stored pref, a segmented value) to a Hand. */
+export function isHand(value: string | undefined): value is Hand {
+  return HANDS.some((hand) => hand === value);
+}
+
+/** The hand of a prefs value, with the default where a literal left it out. */
+export function handOf(prefs: DisplayPrefs): Hand {
+  return prefs.hand ?? HAND_DEFAULT;
 }
 
 /** The terminal font families offered in Settings. A closed list, not a free-text box: an
@@ -182,18 +231,40 @@ export const FONT_MAX = 16;
  *  than the mirror's at both ends. */
 export const DRAFT_FONT_MIN = 13;
 export const DRAFT_FONT_MAX = 16;
+/** The chat stream's own range — see `chatFontSize` on {@link DisplayPrefs} for why it is its own. */
+export const CHAT_FONT_MIN = 12;
+export const CHAT_FONT_MAX = 20;
 const DEFAULTS: DisplayPrefs = {
   wrap: true,
   fontSize: 10,
   draftFontSize: 14,
+  chatFontSize: 14,
   fontFamily: "system",
   rawTerminal: false,
   tapToFocus: true,
   expandClippedReply: true,
+  keepChat: KEEP_CHAT_DEFAULT,
 };
 
 function readFontFamily(value: string | undefined): FontFamily {
   return value !== undefined && isFontFamily(value) ? value : DEFAULTS.fontFamily;
+}
+
+function readHand(value: string | undefined): Hand | undefined {
+  return isHand(value) ? value : undefined;
+}
+
+function readKeepChat(value: string | undefined): KeepChat {
+  return isKeepChat(value) ? value : KEEP_CHAT_DEFAULT;
+}
+
+/** The Chat tail setting of a prefs value, with the default where a literal left it out. */
+export function keepChatOf(prefs: DisplayPrefs): KeepChat {
+  return prefs.keepChat ?? KEEP_CHAT_DEFAULT;
+}
+
+function clampChatFont(n: number): number {
+  return Math.max(CHAT_FONT_MIN, Math.min(CHAT_FONT_MAX, Math.round(n)));
 }
 
 function clampFont(n: number): number {
@@ -258,6 +329,15 @@ export function applyDraftFontSize(pref: number, zoomsOnSmallInput: boolean): nu
   return zoomsOnSmallInput ? Math.max(size, IOS_NO_ZOOM_FONT_PX) : size;
 }
 
+/**
+ * The stored display preferences, read now. For a module that needs one value at the moment it acts
+ * rather than a subscription: the Chat tail's write-through (hooks/use-chat-window.ts) reads
+ * `keepChat` here on each write, so a change made in Settings applies to the very next write.
+ */
+export function loadDisplayPrefs(): DisplayPrefs {
+  return loadPrefs();
+}
+
 function loadPrefs(): DisplayPrefs {
   try {
     const raw = typeof localStorage !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
@@ -266,6 +346,7 @@ function loadPrefs(): DisplayPrefs {
     if (!p) return DEFAULTS;
     const fontSize = asJsonNumber(p.fontSize);
     const draftFontSize = asJsonNumber(p.draftFontSize);
+    const chatFontSize = asJsonNumber(p.chatFontSize);
     return {
       wrap: asJsonBoolean(p.wrap) ?? DEFAULTS.wrap,
       fontSize: fontSize === undefined ? DEFAULTS.fontSize : clampFont(fontSize),
@@ -273,12 +354,20 @@ function loadPrefs(): DisplayPrefs {
       // had its own size reads 14, which is the change this shipped. Nobody's mirror size moves.
       draftFontSize:
         draftFontSize === undefined ? DEFAULTS.draftFontSize : clampDraftFont(draftFontSize),
+      // And the same rule again: a payload written before Chat existed reads 14, which is the size
+      // the stream already had.
+      chatFontSize: chatFontSize === undefined ? DEFAULTS.chatFontSize : clampChatFont(chatFontSize),
       // Same independent-default rule as the fields above it, so a payload written before the
       // family existed reads "system" — an existing install sees no change at all.
       fontFamily: readFontFamily(asJsonString(p.fontFamily)),
       rawTerminal: asJsonBoolean(p.rawTerminal) ?? DEFAULTS.rawTerminal,
       tapToFocus: asJsonBoolean(p.tapToFocus) ?? DEFAULTS.tapToFocus,
       expandClippedReply: asJsonBoolean(p.expandClippedReply) ?? DEFAULTS.expandClippedReply,
+      // The same independent default: a payload written before the setting existed reads 1 day.
+      keepChat: readKeepChat(asJsonString(p.keepChat)),
+      // Absent until the operator picks one, so a payload written before the setting existed (and
+      // one that picked the default) reads the right hand through {@link handOf}.
+      hand: readHand(asJsonString(p.hand)),
     };
   } catch {
     return DEFAULTS;
@@ -307,12 +396,18 @@ export interface UseDisplayPrefsReturn {
   stepFontSize: (delta: number) => void;
   /** Step the draft field's size by delta (positive = larger), clamped to 13–16. */
   stepDraftFontSize: (delta: number) => void;
+  /** Step the chat stream's size by delta (positive = larger), clamped to 12–20. */
+  stepChatFontSize: (delta: number) => void;
   /** Toggle or explicitly set the raw-terminal escape hatch. */
   setRawTerminal: (raw: boolean) => void;
   /** Toggle or explicitly set whether a mirror tap focuses the composer. */
   setTapToFocus: (tapToFocus: boolean) => void;
   /** Toggle or explicitly set whether a clipped reply is re-shown in full above the mirror. */
   setExpandClippedReply: (expandClippedReply: boolean) => void;
+  /** How long this phone keeps the Chat tail. `off` also deletes every tail already kept. */
+  setKeepChat: (keepChat: KeepChat) => void;
+  /** Which thumb the pane screen is laid out for. */
+  setHand: (hand: Hand) => void;
 }
 
 export function useDisplayPrefs(): UseDisplayPrefsReturn {
@@ -358,6 +453,14 @@ export function useDisplayPrefs(): UseDisplayPrefsReturn {
     });
   }, []);
 
+  const stepChatFontSize = useCallback((delta: number) => {
+    setPrefs((p) => {
+      const next: DisplayPrefs = { ...p, chatFontSize: clampChatFont(p.chatFontSize + delta) };
+      savePrefs(next);
+      return next;
+    });
+  }, []);
+
   const setRawTerminal = useCallback((rawTerminal: boolean) => {
     setPrefs((p) => {
       const next: DisplayPrefs = { ...p, rawTerminal };
@@ -382,6 +485,25 @@ export function useDisplayPrefs(): UseDisplayPrefsReturn {
     });
   }, []);
 
+  const setKeepChat = useCallback((keepChat: KeepChat) => {
+    setPrefs((p) => {
+      const next: DisplayPrefs = { ...p, keepChat };
+      savePrefs(next);
+      return next;
+    });
+    // Outside the updater, which React may run twice: the delete is a side effect, and "off" means
+    // nothing is kept from this moment, not from the next write.
+    if (keepChat === "off") void dropChatTails();
+  }, []);
+
+  const setHand = useCallback((hand: Hand) => {
+    setPrefs((p) => {
+      const next: DisplayPrefs = { ...p, hand };
+      savePrefs(next);
+      return next;
+    });
+  }, []);
+
   return {
     prefs,
     setWrap,
@@ -389,8 +511,11 @@ export function useDisplayPrefs(): UseDisplayPrefsReturn {
     setFontFamily,
     stepFontSize,
     stepDraftFontSize,
+    stepChatFontSize,
     setRawTerminal,
     setTapToFocus,
     setExpandClippedReply,
+    setKeepChat,
+    setHand,
   };
 }

@@ -20,7 +20,7 @@ class FakeSonioxSocket extends EventTarget {
   readonly sent: unknown[] = [];
   readonly sentOnce = Promise.withResolvers<void>();
 
-  constructor(readonly url: string) {
+  constructor(readonly url: string, readonly options?: { headers?: Record<string, string> }) {
     super();
     FakeSonioxSocket.connections.push(this);
     queueMicrotask(() => this.dispatchEvent(new Event("open")));
@@ -105,16 +105,14 @@ describe("Soniox proxy contracts", () => {
   });
 
   test("pins Russian mono STT and 1.5% faster Russian PCM TTS", () => {
-    expect(sttConfig("key", vocabulary)).toMatchObject({
-      api_key: "key",
+    expect(sttConfig(vocabulary)).toMatchObject({
       model: "stt-rt-v5",
       audio_format: "pcm_s16le",
       sample_rate: 16_000,
       num_channels: 1,
       language_hints: ["ru"],
     });
-    expect(ttsConfig("key", "Adrian", "stream")).toMatchObject({
-      api_key: "key",
+    expect(ttsConfig("Adrian", "stream")).toMatchObject({
       language: "ru",
       voice: "Adrian",
       audio_format: "pcm_s16le",
@@ -174,6 +172,9 @@ describe("Soniox proxy contracts", () => {
       await controller.start();
       const stt = FakeSonioxSocket.connections[0];
       expect(stt?.url).toContain("transcribe-websocket");
+      // Soniox authenticates the connection itself; the key never rides a config message.
+      expect(stt?.options?.headers?.Authorization).toBe(`Bearer ${turnConfig.sonioxApiKey}`);
+      expect(stt?.sent.every((m) => !String(m).includes("api_key"))).toBe(true);
       controller.end();
       expect(stt?.sent).toContain(JSON.stringify({ type: "finalize" }));
       stt?.message({ tokens: [{ text: "Привет", is_final: true }, { text: "<fin>", is_final: true }] });
@@ -183,8 +184,10 @@ describe("Soniox proxy contracts", () => {
       expect(controller.speak("Ответ")).toBe(true);
       const tts = FakeSonioxSocket.connections[1];
       expect(tts?.url).toContain("tts-websocket");
+      expect(tts?.options?.headers?.Authorization).toBe(`Bearer ${turnConfig.sonioxApiKey}`);
       if (!tts) throw new Error("missing TTS socket");
       await tts.sentOnce.promise;
+      expect(tts.sent.every((m) => !String(m).includes("api_key"))).toBe(true);
       const id = streamId(tts);
       tts.message({ stream_id: id, audio: Buffer.from([1, 0]).toString("base64") });
       expect(browser.binary).toHaveLength(1);
@@ -331,6 +334,7 @@ describe("VoiceBroker remote lease", () => {
       } as Config, { record() {} } as never);
 
       await broker.open(firstBrowser as never);
+      expect(firstBrowser.messages).toContain(JSON.stringify({ kind: "ready", replySpeech: true }));
       await broker.message(firstBrowser as never, JSON.stringify({ kind: "start" }));
       const stt = FakeSonioxSocket.connections[0];
       await broker.message(firstBrowser as never, JSON.stringify({ kind: "end" }));
@@ -392,6 +396,8 @@ describe("VoiceBroker remote lease", () => {
 
       await broker.open(browser as never);
       expect(remoteEvents).toEqual([]);
+      // The socket says what the SERVER decided; the browser's own view of the pane may be stale.
+      expect(browser.messages).toContain(JSON.stringify({ kind: "ready", replySpeech: false }));
       await broker.message(browser as never, JSON.stringify({ kind: "start" }));
       const stt = FakeSonioxSocket.connections[0];
       await broker.message(browser as never, JSON.stringify({ kind: "end" }));

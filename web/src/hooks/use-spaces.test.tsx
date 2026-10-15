@@ -4,17 +4,30 @@ import { createMemoryRouter, Outlet, RouterProvider } from "react-router";
 
 import { ROOT_ROUTE_ID, type HomeData } from "@/lib/loaders";
 import { resetPollIntent, topologyBursting } from "@/lib/poll-intent";
-import { useSpaceActions } from "./use-spaces";
+import type { Scope } from "@/lib/scope";
+import { clearStatus, setStatus, useStatus } from "@/lib/status";
+import { tabCreateKey, useSpaceActions } from "./use-spaces";
 
 // Stub the bridge's create endpoints at the api seam — same idiom launch-strip.test.tsx uses for
 // api.launch. Only the calls this tree can make are declared.
-const { mockCreateTab, mockCreateWorkspace } = vi.hoisted(() => ({
-  mockCreateTab: vi.fn(),
-  mockCreateWorkspace: vi.fn(),
-}));
+const { mockCreateTab, mockCreateWorkspace, mockCreateWorktreeAt, mockStartLaunch, mockStartRun, mockLaunch, mockOutcomeUnknown } =
+  vi.hoisted(() => ({
+    mockCreateTab: vi.fn(),
+    mockCreateWorkspace: vi.fn(),
+    mockCreateWorktreeAt: vi.fn(),
+    mockStartLaunch: vi.fn(),
+    mockStartRun: vi.fn(),
+    mockLaunch: vi.fn(),
+    mockOutcomeUnknown: vi.fn(),
+  }));
 vi.mock("@/lib/api", () => ({
   createTab: mockCreateTab,
   createWorkspace: mockCreateWorkspace,
+  createWorktreeAt: mockCreateWorktreeAt,
+  startLaunch: mockStartLaunch,
+  startRun: mockStartRun,
+  launch: mockLaunch,
+  outcomeUnknown: mockOutcomeUnknown,
 }));
 
 function homeData(): HomeData {
@@ -60,22 +73,39 @@ function Harness({ w1 = "w1", w2 = "w2" }: { w1?: string; w2?: string }) {
       <button onClick={() => void newTab(w1)}>new-tab-{w1}</button>
       <button onClick={() => void newTab(w2)}>new-tab-{w2}</button>
       <button onClick={() => void newSpace({})}>new-space</button>
-      <span data-testid="creating-w1">{String(creatingTab.has(w1))}</span>
-      <span data-testid="creating-w2">{String(creatingTab.has(w2))}</span>
+      <span data-testid="creating-w1">{String(creatingTab.has(tabCreateKey(w1, undefined)))}</span>
+      <span data-testid="creating-w2">{String(creatingTab.has(tabCreateKey(w2, undefined)))}</span>
       <span data-testid="creating-space">{String(creatingSpace)}</span>
     </div>
   );
 }
 
-function makeRouter() {
+/** A crew member's space, addressed the way a dashboard heading addresses it (M40/03). */
+const PEER: Scope = { host: "workshop" };
+
+// The dashboard's shape: one list across every machine, so two headings can both name `w1` — the
+// lead's (ambient, no `at`) and a peer's (its own `at`). Each "+" hands its own scope in.
+function AddressedHarness() {
+  const { newTab, creatingTab } = useSpaceActions();
+  return (
+    <div>
+      <button onClick={() => void newTab("w1", PEER)}>new-tab-peer-w1</button>
+      <button onClick={() => void newTab("w1")}>new-tab-lead-w1</button>
+      <span data-testid="creating-peer-w1">{String(creatingTab.has(tabCreateKey("w1", PEER)))}</span>
+      <span data-testid="creating-lead-w1">{String(creatingTab.has(tabCreateKey("w1", undefined)))}</span>
+    </div>
+  );
+}
+
+function makeRouter(harness = <Harness />, root: Partial<HomeData> = {}) {
   return createMemoryRouter(
     [
       {
         id: ROOT_ROUTE_ID,
         path: "/",
-        loader: () => homeData(),
+        loader: () => ({ ...homeData(), ...root }),
         element: <Outlet />,
-        children: [{ index: true, element: <Harness /> }],
+        children: [{ index: true, element: harness }],
       },
       { path: "/pane/:paneId", element: <div>pane</div> },
     ],
@@ -159,5 +189,262 @@ describe("useSpaceActions — creating busy state", () => {
     await waitFor(() => expect(screen.getByTestId("creating-space")).toHaveTextContent("false"));
 
     expect(mockCreateWorkspace).toHaveBeenCalledTimes(1);
+  });
+});
+
+// M40/03: a workspace heading on the dashboard names its own machine, and the dashboard is one list
+// across a crew. The create must go to THAT machine and the step down must land there, never on the
+// machine the URL happens to address; and a peer's `w1` is not the lead's `w1`.
+describe("useSpaceActions — newTab addressed to a scope", () => {
+  beforeEach(() => {
+    mockCreateTab.mockReset();
+    resetPollIntent();
+  });
+
+  it("an addressed newTab creates on that machine and opens the new pane there", async () => {
+    mockCreateTab.mockResolvedValueOnce(pane("w1"));
+    const user = userEvent.setup();
+    const router = makeRouter(<AddressedHarness />);
+    render(<RouterProvider router={router} />);
+
+    await user.click(await screen.findByRole("button", { name: "new-tab-peer-w1" }));
+
+    expect(mockCreateTab).toHaveBeenCalledTimes(1);
+    expect(mockCreateTab).toHaveBeenCalledWith("w1", {}, PEER);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/pane/w1%3Ap1"));
+    expect(new URLSearchParams(router.state.location.search).get("h")).toBe("workshop");
+  });
+
+  it("an addressed newTab keeps a peer's w1 apart from the lead's w1", async () => {
+    let release = (): void => {};
+    mockCreateTab.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(refused());
+        }),
+    );
+    mockCreateTab.mockResolvedValueOnce(refused());
+    const user = userEvent.setup();
+    render(<RouterProvider router={makeRouter(<AddressedHarness />)} />);
+
+    await user.click(await screen.findByRole("button", { name: "new-tab-peer-w1" }));
+    await waitFor(() => expect(screen.getByTestId("creating-peer-w1")).toHaveTextContent("true"));
+    // The lead's `w1` shares the peer's number and nothing else: its "+" is not busy, and a tap on it
+    // is sent, to the lead.
+    expect(screen.getByTestId("creating-lead-w1")).toHaveTextContent("false");
+    await user.click(screen.getByRole("button", { name: "new-tab-lead-w1" }));
+    expect(mockCreateTab).toHaveBeenCalledTimes(2);
+    expect(mockCreateTab).toHaveBeenLastCalledWith("w1", {}, {});
+    release();
+    await waitFor(() => expect(screen.getByTestId("creating-peer-w1")).toHaveTextContent("false"));
+  });
+});
+
+// THE NEW SHEET'S START (M48, ADR 0091, ADR 0093): one call for every kind, with the sheet's request
+// id. It answers what became of it, and an outcome nobody can confirm is the sheet's to say, so the
+// status line stays quiet then and nothing is re-sent.
+describe("useSpaceActions — start", () => {
+  const REQUEST_ID = "0b9e6a1c-3f2d-4c5e-8a7b-1d2e3f4a5b6c";
+
+  beforeEach(() => {
+    for (const mock of [mockCreateWorktreeAt, mockStartLaunch, mockStartRun, mockCreateWorkspace, mockOutcomeUnknown]) mock.mockReset();
+    delete document.body.dataset.outcome;
+    clearStatus();
+    resetPollIntent();
+  });
+
+  /** The status line, outside the router, so it outlives the step into the new pane. */
+  function StatusProbe() {
+    return <span data-testid="status-probe">{useStatus()?.text ?? ""}</span>;
+  }
+
+  function StartHarness({ ask }: { ask: Parameters<ReturnType<typeof useSpaceActions>["start"]>[0] }) {
+    const { start } = useSpaceActions();
+    return (
+      <button
+        onClick={() => {
+          void (async () => {
+            const out = await start(ask);
+            document.body.dataset.outcome = out.kind;
+            document.body.dataset.message = out.kind === "refused" ? out.message : "";
+          })();
+        }}
+      >
+        start
+      </button>
+    );
+  }
+
+  async function press(ask: Parameters<typeof StartHarness>[0]["ask"]) {
+    const user = userEvent.setup();
+    const router = makeRouter(<StartHarness ask={ask} />);
+    render(
+      <>
+        <RouterProvider router={router} />
+        <StatusProbe />
+      </>,
+    );
+    await user.click(await screen.findByRole("button", { name: "start" }));
+    await waitFor(() => expect(document.body.dataset.outcome).toBeDefined());
+    return router;
+  }
+
+  it("an agent by id goes to /api/launch with its folder and the request id, and lands on the pane", async () => {
+    mockStartLaunch.mockResolvedValueOnce(pane("w7"));
+    const router = await press({ what: { kind: "harness", id: "claude" }, cwd: "~/src/app", requestId: REQUEST_ID });
+    expect(mockStartLaunch).toHaveBeenCalledWith({ kind: "harness", id: "claude" }, { cwd: "~/src/app", requestId: REQUEST_ID }, {});
+    expect(document.body.dataset.outcome).toBe("done");
+    expect(router.state.location.pathname).toBe("/pane/w7%3Ap1");
+  });
+
+  it("a one-off line goes to startRun with its folder and the request id, and lands on the pane", async () => {
+    mockStartRun.mockResolvedValueOnce(pane("w7"));
+    const router = await press({ what: { kind: "run", line: "htop -d 5" }, cwd: "~/src", requestId: REQUEST_ID });
+    expect(mockStartRun).toHaveBeenCalledWith("htop -d 5", { cwd: "~/src", requestId: REQUEST_ID }, {});
+    expect(mockStartLaunch).not.toHaveBeenCalled();
+    expect(document.body.dataset.outcome).toBe("done");
+    expect(router.state.location.pathname).toBe("/pane/w7%3Ap1");
+  });
+
+  it("a one-off line never starts on a branch: refused with the bridge's own words, nothing sent", async () => {
+    await press({
+      what: { kind: "run", line: "htop" },
+      requestId: REQUEST_ID,
+      branch: { cwd: "~/src/app", name: "x", base: { kind: "default" }, folder: { kind: "default" } },
+    });
+    expect(document.body.dataset.outcome).toBe("refused");
+    expect(document.body.dataset.message).toBe("A one-off command cannot start on a new branch.");
+    expect(mockStartRun).not.toHaveBeenCalled();
+    expect(mockCreateWorktreeAt).not.toHaveBeenCalled();
+  });
+
+  it("a one-off line with no answer is unknown: nothing is said and nothing is re-sent", async () => {
+    mockStartRun.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    mockOutcomeUnknown.mockReturnValueOnce(true);
+    await press({ what: { kind: "run", line: "htop" }, requestId: REQUEST_ID });
+    expect(document.body.dataset.outcome).toBe("unknown");
+    expect(mockStartRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("a refused one-off line comes back as the bridge's words", async () => {
+    mockStartRun.mockResolvedValueOnce({ ok: false, error: "x", code: "launch.run_off" });
+    await press({ what: { kind: "run", line: "htop" }, requestId: REQUEST_ID });
+    expect(document.body.dataset.outcome).toBe("refused");
+    expect(document.body.dataset.message).toBe("Running a one-off command from a phone is turned off on this machine.");
+  });
+
+  it("a shell on an older machine goes through its plain space create", async () => {
+    mockCreateWorkspace.mockResolvedValueOnce(pane("w7"));
+    await press({ what: { kind: "shell" }, cwd: "/srv", requestId: REQUEST_ID, legacyShell: true });
+    expect(mockCreateWorkspace).toHaveBeenCalledWith({ cwd: "/srv" }, {});
+    expect(mockStartLaunch).not.toHaveBeenCalled();
+  });
+
+  it("a branch start sends the folder, base and agent, and a launcher that did not start says so", async () => {
+    mockCreateWorktreeAt.mockResolvedValueOnce({ ...pane("w7"), alreadyOpen: false, launcherStarted: false, launcherError: "gone" });
+    await press({
+      what: { kind: "harness", id: "codex" },
+      requestId: REQUEST_ID,
+      branch: { cwd: "~/src/app", name: "fix-tabs", base: { kind: "default" }, folder: { kind: "parent", parent: "~/trees" } },
+    });
+    expect(mockCreateWorktreeAt).toHaveBeenCalledWith(
+      {
+        cwd: "~/src/app",
+        branch: "fix-tabs",
+        base: { kind: "default" },
+        folder: { kind: "parent", parent: "~/trees" },
+        requestId: REQUEST_ID,
+        what: { kind: "harness", id: "codex" },
+      },
+      {},
+    );
+    expect(document.body.dataset.outcome).toBe("done");
+    expect(screen.getByTestId("status-probe")).toHaveTextContent(
+      "The worktree is ready, but the agent did not start. Start it in the new shell.",
+    );
+  });
+
+  it("no answer is unknown: nothing is said and nothing is re-sent", async () => {
+    mockStartLaunch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    mockOutcomeUnknown.mockReturnValueOnce(true);
+    await press({ what: { kind: "shell" }, requestId: REQUEST_ID });
+    expect(document.body.dataset.outcome).toBe("unknown");
+    expect(mockStartLaunch).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("status-probe")).toHaveTextContent("");
+  });
+
+  it("a refusal is refused, the words come back to the page, and no status line is published", async () => {
+    mockStartLaunch.mockResolvedValueOnce({ ok: false, error: "unknown agent: x", code: "launch.unknown_harness", detail: { harness: "x" } });
+    await press({ what: { kind: "harness", id: "x" }, requestId: REQUEST_ID });
+    expect(document.body.dataset.outcome).toBe("refused");
+    expect(document.body.dataset.message).toBe("This machine does not start x.");
+    expect(screen.getByTestId("status-probe")).toHaveTextContent("");
+  });
+});
+
+// NOTHING SAVED CAN ACT (M46, ADR 0087 rule 8). A cold open draws the saved herd before the bridge
+// answers; every create here is a write at ids read from that snapshot. Each entry point refuses and
+// sends nothing, whether the herd is the saved copy (the dashboard) or the caller's own liveness says
+// no (the pane view).
+describe("useSpaceActions — a saved copy refuses every structural write", () => {
+  const ALL = ["new-tab", "new-space", "start", "launch"] as const;
+
+  beforeEach(() => {
+    for (const mock of [mockCreateTab, mockCreateWorkspace, mockCreateWorktreeAt, mockStartLaunch, mockLaunch]) mock.mockReset();
+    clearStatus();
+    resetPollIntent();
+  });
+
+  function WritesHarness({ canWrite }: { canWrite?: () => boolean }) {
+    const actions = useSpaceActions(canWrite);
+    const status = useStatus();
+    const run = {
+      "new-tab": () => void actions.newTab("w1"),
+      "new-space": () => void actions.newSpace({}),
+      // The page shows a refused Start itself; the harness stands in for it with the status line.
+      start: () =>
+        void (async () => {
+          const out = await actions.start({ what: { kind: "shell" }, requestId: "r1" });
+          if (out.kind === "refused") setStatus(out.message, "error");
+        })(),
+      launch: () => void actions.launch("claude"),
+    } satisfies Record<(typeof ALL)[number], () => void>;
+    return (
+      <div>
+        {ALL.map((name) => (
+          <button key={name} onClick={() => run[name]()}>
+            {name}
+          </button>
+        ))}
+        <span data-testid="status">{status?.text ?? ""}</span>
+      </div>
+    );
+  }
+
+  const REFUSAL = "Saved copy. Reconnect to make changes.";
+  const writes = () => [mockCreateTab, mockCreateWorkspace, mockCreateWorktreeAt, mockStartLaunch, mockLaunch];
+
+  it.each(ALL)("%s sends nothing while the herd on screen is the saved copy", async (name) => {
+    const user = userEvent.setup();
+    render(<RouterProvider router={makeRouter(<WritesHarness />, { stale: true })} />);
+    await user.click(await screen.findByRole("button", { name }));
+    expect(screen.getByTestId("status")).toHaveTextContent(REFUSAL);
+    for (const mock of writes()) expect(mock).not.toHaveBeenCalled();
+  });
+
+  it.each(ALL)("%s sends nothing while the caller's own read is not live", async (name) => {
+    const user = userEvent.setup();
+    render(<RouterProvider router={makeRouter(<WritesHarness canWrite={() => false} />)} />);
+    await user.click(await screen.findByRole("button", { name }));
+    expect(screen.getByTestId("status")).toHaveTextContent(REFUSAL);
+    for (const mock of writes()) expect(mock).not.toHaveBeenCalled();
+  });
+
+  it("a live herd and a live caller still create", async () => {
+    mockCreateTab.mockResolvedValueOnce(refused());
+    const user = userEvent.setup();
+    render(<RouterProvider router={makeRouter(<WritesHarness canWrite={() => true} />)} />);
+    await user.click(await screen.findByRole("button", { name: "new-tab" }));
+    await waitFor(() => expect(mockCreateTab).toHaveBeenCalledTimes(1));
   });
 });

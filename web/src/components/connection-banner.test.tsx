@@ -4,6 +4,11 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 
 import { COLLAPSE_MS } from "@/components/ui/collapse";
 import { StripHost } from "@/components/ui/strip-host";
+import { CrewProvider } from "@/components/crew-provider";
+import * as api from "@/lib/api";
+import type { ServerSummary } from "@/lib/types";
+import { fixtureServers } from "@/test/handlers";
+import { markNotPaired } from "@/lib/pairing";
 import { ConnectionBanner, GREEN_MS } from "./connection-banner";
 
 // THE BAR IS A STRIP, and this file mounts the band it appears in. `ConnectionBanner` registers a
@@ -46,24 +51,34 @@ function setOnline(value: boolean) {
 // A harness whose own state forces the banner to re-render (creating a fresh element so the mocked
 // hooks are re-read) — RouterProvider re-rendered with the same static route element would bail out.
 let rerenderBanner: () => void = () => {};
+// The saved-copy flag, mutable so a case can let the live answer clear it and re-render.
+let liveStale = false;
 
 function renderBanner(
   props: {
     bridge?: "connected" | "disconnected";
+    muxFault?: "token-refused";
+    host?: string;
+    servers?: ServerSummary[];
     error?: boolean;
     authError?: boolean;
     lastSeenAt?: number;
+    stale?: boolean;
   } = {},
 ) {
+  liveStale = props.stale ?? false;
   function Harness() {
     const [, setN] = useState(0);
     rerenderBanner = () => setN((n) => n + 1);
     return (
       <ConnectionBanner
         bridge={props.bridge ?? "disconnected"}
+        muxFault={props.muxFault}
+        host={props.host}
         error={props.error ?? false}
         authError={props.authError ?? false}
         lastSeenAt={props.lastSeenAt}
+        stale={liveStale}
       />
     );
   }
@@ -71,9 +86,11 @@ function renderBanner(
     {
       path: "/",
       element: (
-        <StripHost>
-          <Harness />
-        </StripHost>
+        <CrewProvider servers={props.servers ?? (props.host === undefined ? undefined : fixtureServers)}>
+          <StripHost>
+            <Harness />
+          </StripHost>
+        </CrewProvider>
       ),
     },
   ]);
@@ -145,7 +162,7 @@ describe("ConnectionBanner — the single connection surface", () => {
     expect(screen.queryByRole("button", { name: /retry/i })).toBeNull(); // ambient → no actions
   });
 
-  it("escalates to a red alert with Retry + Reload once lost, naming Herdr when the bridge answers", async () => {
+  it("escalates to a red alert with Retry and a dismiss, no Reload, naming Herdr when the bridge answers", async () => {
     h.trouble = true;
     h.lost = true;
     cfg.reachable = true; // the config probe succeeds → the bridge is up, so Herdr is the outage
@@ -154,7 +171,133 @@ describe("ConnectionBanner — the single connection surface", () => {
     expect(row()?.className).toMatch(/bg-status-blocked/); // red = failed
     expect(announced("alert")).toHaveTextContent("Herdr is down on the host");
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /reload/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reload/i })).toBeNull();
+    expect(screen.getByRole("button", { name: "Hide this notice" })).toBeInTheDocument();
+  });
+
+  // M50 spec 14: a durable program that refused this peer's token. Waiting does not cure it, so the
+  // amber bar names it at once instead of "Reconnecting…", and red keeps the same sentence.
+  it("names a refused token in amber and in red, and never says Reconnecting or Herdr for it", async () => {
+    const TOKEN = "The program refused the token. Check COLLIE_DURABLE_TOKEN on this peer.";
+    h.trouble = true;
+    renderBanner({ muxFault: "token-refused" });
+    expect(announced("status")).toHaveTextContent(TOKEN);
+    expect(row()?.className).toMatch(/bg-status-working/);
+    h.lost = true;
+    cfg.reachable = true;
+    act(() => rerenderBanner());
+    await act(async () => {});
+    expect(announced("alert")).toHaveTextContent(TOKEN);
+    expect(announced("alert")).not.toHaveTextContent("Herdr is down");
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("keeps the token sentence off a member view, where the lead's own mux status says nothing", async () => {
+    h.lost = true;
+    renderBanner({ host: "workshop", bridge: "disconnected", muxFault: "token-refused" });
+    await act(async () => {});
+    expect(announced("alert")).not.toHaveTextContent("refused the token");
+  });
+
+  it("does not infer mux failure from a successful config probe after a failed snapshot", async () => {
+    h.lost = true;
+    renderBanner({ bridge: "connected", error: true });
+    await act(async () => {});
+    expect(announced("alert")).toHaveTextContent("Can't reach Collie");
+  });
+
+  it("does not reuse a cached disconnected mux as evidence during a snapshot failure", async () => {
+    h.lost = true;
+    renderBanner({ bridge: "disconnected", error: true });
+    await act(async () => {});
+    expect(announced("alert")).toHaveTextContent("Can't reach Collie");
+  });
+
+  it("does not attribute a member outage to the lead's disconnected mux", async () => {
+    h.lost = true;
+    renderBanner({ host: "workshop", bridge: "disconnected" });
+    await act(async () => {});
+    expect(announced("alert")).toHaveTextContent("Can't reach Collie");
+  });
+
+  it("keeps the lead's mux failure and updates the cause on host switches", async () => {
+    h.lost = true;
+    const props = { host: "bluefin", bridge: "disconnected" as const };
+    renderBanner(props);
+    await act(async () => {});
+    expect(announced("alert")).toHaveTextContent("Herdr is down on the host");
+    props.host = "workshop";
+    act(() => rerenderBanner());
+    expect(announced("alert")).toHaveTextContent("Can't reach Collie");
+    props.host = "bluefin";
+    act(() => rerenderBanner());
+    expect(announced("alert")).toHaveTextContent("Herdr is down on the host");
+  });
+
+  // THE PROBE STAYS UNSCOPED. `/api/config?host=` is answered by the lead from its cache, so a scoped
+  // probe would pass for a member that is down and prove nothing; the unscoped one tests the lead.
+  it("probes the lead with no host argument, on a member view too", async () => {
+    h.lost = true;
+    renderBanner({ host: "workshop", bridge: "disconnected" });
+    await act(async () => {});
+    expect(api.fetchConfig).toHaveBeenCalled();
+    expect(vi.mocked(api.fetchConfig).mock.calls.every((call) => call.length === 0)).toBe(true);
+  });
+
+  // The lead answers and a member is the fault: the banner names it with the sentences the pane
+  // notice and a refused write already use, and only when the lead's own roster says it is down.
+  describe("a member the lead reports down", () => {
+    const down = (id: string): ServerSummary[] =>
+      fixtureServers.map((s) => (s.id === id ? Object.assign({}, s, { reachable: false }) : s));
+
+    it("names an unreachable member, with its own last seen and no second one", async () => {
+      h.lost = true;
+      renderBanner({ host: "workshop", servers: down("workshop"), bridge: "connected", error: true, lastSeenAt: 5_000 });
+      await act(async () => {});
+      expect(announced("alert")).toHaveTextContent(/^workshop is unreachable · /);
+      expect(announced("alert")).not.toHaveTextContent("Can't reach Collie");
+      expect(announced("alert")).not.toHaveTextContent("Herdr is down");
+      expect(announced("alert")).not.toHaveTextContent(/last seen \d/);
+    });
+
+    it("names an incompatible member, with the lead's protocol detail", async () => {
+      h.lost = true;
+      renderBanner({ host: "attic", bridge: "connected", error: true });
+      await act(async () => {});
+      expect(announced("alert")).toHaveTextContent("attic is running an incompatible Collie");
+      expect(announced("alert")).toHaveTextContent("crew protocol 2");
+    });
+
+    it("keeps the plain copy for a member the lead reports healthy", async () => {
+      h.lost = true;
+      renderBanner({ host: "workshop", bridge: "connected", error: true });
+      await act(async () => {});
+      expect(announced("alert")).toHaveTextContent("Can't reach Collie");
+      expect(announced("alert")).not.toHaveTextContent("is unreachable");
+    });
+
+    it("says nothing about a member when the lead itself does not answer", async () => {
+      h.lost = true;
+      cfg.reachable = false;
+      renderBanner({ host: "workshop", servers: down("workshop"), bridge: "connected", error: true });
+      await act(async () => {});
+      expect(announced("alert")).toHaveTextContent("Can't reach Collie");
+      expect(announced("alert")).not.toHaveTextContent("workshop");
+    });
+
+    it("never applies to the lead: a down mux there is still the mux", async () => {
+      h.lost = true;
+      renderBanner({ host: "bluefin", servers: down("workshop"), bridge: "disconnected" });
+      await act(async () => {});
+      expect(announced("alert")).toHaveTextContent("Herdr is down on the host");
+    });
+
+    it("never applies to a solo install", async () => {
+      h.lost = true;
+      renderBanner({ bridge: "connected", error: true });
+      await act(async () => {});
+      expect(announced("alert")).toHaveTextContent("Can't reach Collie");
+    });
   });
 
   it("says 'Offline' in red when the probe fails AND the browser reports offline", async () => {
@@ -217,15 +360,16 @@ describe("ConnectionBanner — the single connection surface", () => {
     expect(row()?.querySelector("span.truncate.flex-1")).not.toBeNull();
   });
 
-  it("reserves no safe-area inset of its own — the band above the header does", () => {
+  it("reserves no safe-area inset — the band sits under the header, which owns it", () => {
     // The reported iOS bug, at one of its three sources. This row set the inset for itself, as did
     // the update ribbon and as did the header, each written when it might have been the first thing
-    // on the screen — so any two of them together paid for the notch twice. One owner now, and it is
-    // the band, because clearing the notch is a fact about the row's position in the viewport.
+    // on the screen — so any two of them together paid for the notch twice. The band paints under
+    // the header since 2026-10-07, so the header is the one owner and nothing in the band reserves.
     h.trouble = true;
     const { container } = renderBanner();
+    expect(row()).not.toBeNull();
     expect(row()?.className).not.toMatch(/safe-area/);
-    expect(container.querySelectorAll("[class*='safe-area-inset-top']")).toHaveLength(1);
+    expect(container.querySelectorAll("[class*='safe-area-inset-top']")).toHaveLength(0);
   });
 
   it("flashes green 'Connected' only after a visible bar recovers, then the band closes over it", () => {
@@ -257,5 +401,205 @@ describe("ConnectionBanner — the single connection surface", () => {
     act(() => vi.advanceTimersByTime(GREEN_MS + COLLAPSE_MS + 16));
     expect(screen.queryByText("Connected")).toBeNull();
     expect(row()).toBeNull();
+  });
+});
+
+// ── M46 spec 10: three offline states, told apart in this one banner ─────────────
+describe("ConnectionBanner — offline states", () => {
+  const SAVED_AT = new Date(2026, 0, 2, 14, 32).getTime();
+
+  it("offline states: the phone is offline, says so at once with the saved time, no escalation wait", () => {
+    setOnline(false);
+    renderBanner({ error: true, stale: true, lastSeenAt: SAVED_AT });
+    expect(row()).toHaveTextContent(/^You are offline\. Showing what was saved at .+\./);
+    expect(row()).toHaveTextContent(/14.32|2:32/);
+    // Quiet: a saved copy is not an error, so it is announced politely.
+    expect(announced("alert")).toBeNull();
+    expect(announced("status")).not.toBeNull();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  // M46 pass 3: a VPN keeps `navigator.onLine` true in airplane mode, so "online" is not a fact here.
+  // One sentence that guesses no cause, and the places to look on a smaller second line.
+  it("offline states: online but the bridge does not answer, says so without guessing a cause", () => {
+    setOnline(true);
+    renderBanner({ error: true, stale: true, lastSeenAt: SAVED_AT });
+    expect(row()).toHaveTextContent(/^No connection to the bridge\. Showing what was saved at .+\./);
+    expect(row()).not.toHaveTextContent(/Is Tailscale connected/);
+    const hint = row()?.querySelector('[data-slot="connection-hint"]');
+    expect(hint).toHaveTextContent("Check your connection or Tailscale.");
+    // Smaller and quieter than the sentence above it: advice, not the state.
+    expect(hint).toHaveClass("text-[11px]", "text-muted-foreground", "block");
+  });
+
+  it("offline states: the phone's own offline sentence carries no hint line", () => {
+    setOnline(false);
+    renderBanner({ error: true, stale: true, lastSeenAt: SAVED_AT });
+    expect(row()?.querySelector('[data-slot="connection-hint"]')).toBeNull();
+  });
+
+  // The band is an overlay since 2026-10-07 (`ui/strip-host.tsx`), so a sentence change moves
+  // nothing below it and red no longer reserves a height. It is as tall as its words, and Retry
+  // still never wraps.
+  it.each([
+    ["offline, saved", { online: false, stale: true, lastSeenAt: SAVED_AT }],
+    ["no bridge, saved", { online: true, stale: true, lastSeenAt: SAVED_AT }],
+    ["no bridge, nothing saved", { online: true, stale: false, lastSeenAt: undefined }],
+  ])("offline states: no red variant reserves a height (%s)", async (_name, state) => {
+    h.lost = true;
+    cfg.reachable = false;
+    setOnline(state.online);
+    renderBanner({ error: true, stale: state.stale, lastSeenAt: state.lastSeenAt });
+    await act(async () => {});
+    expect(row()).not.toHaveClass("min-h-[72px]");
+    expect(row()?.className).not.toMatch(/min-h-\[(?!33px\])/);
+    expect(screen.getByRole("button", { name: /retry/i })).toHaveClass("whitespace-nowrap");
+  });
+
+  it("offline states: amber keeps the thin strip", () => {
+    h.trouble = true;
+    renderBanner();
+    expect(row()).not.toHaveClass("min-h-[72px]");
+  });
+
+  it.each([
+    [false, "You are offline. Showing what was saved at"],
+    [true, "No connection to the bridge. Showing what was saved at"],
+  ])("offline states: the saved-copy sentence reads whole, wrapping instead of truncating (online %s)", (online, lead) => {
+    setOnline(online);
+    renderBanner({ error: true, stale: true, lastSeenAt: SAVED_AT });
+    const sentence = screen.getByText((text) => text.startsWith(lead));
+    expect(sentence.textContent).toMatch(/at .+\.$/);
+    expect(sentence).not.toHaveClass("truncate");
+    // Retry stays beside it, as the compact action at the right.
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("offline states: a device refused for want of pairing shows no connection strip and no saved copy", () => {
+    markNotPaired();
+    renderBanner({ error: true, stale: true, lastSeenAt: SAVED_AT });
+    expect(row()).toBeNull();
+    expect(screen.queryByText(/Showing what was saved/)).toBeNull();
+  });
+
+  it("offline states: a probe that finds the bridge answering falls back to the named cause", async () => {
+    h.lost = true;
+    cfg.reachable = true;
+    renderBanner({ error: true, stale: true, lastSeenAt: SAVED_AT });
+    await act(async () => {});
+    expect(row()).not.toHaveTextContent(/No connection to the bridge/);
+    expect(row()).toHaveTextContent(/Can't reach Collie — last seen/);
+  });
+
+  it("the stale marks clear when the bridge answers: a green flash, then nothing", () => {
+    renderBanner({ error: true, stale: true, lastSeenAt: SAVED_AT });
+    expect(row()).toHaveTextContent(/Showing what was saved/);
+    liveStale = false;
+    act(() => rerenderBanner());
+    expect(announced("status")).toHaveTextContent("Connected");
+    act(() => vi.advanceTimersByTime(GREEN_MS));
+    act(() => vi.advanceTimersByTime(COLLAPSE_MS + 16));
+    expect(row()).toBeNull();
+  });
+});
+
+// ── The red strip is dismissable, and has one action ──────────────────────────────
+// Phone in airplane mode: two buttons and no way to hide the strip. The strip now carries Retry and a
+// ✕, the ✕ hides it for the rest of THIS outage, and the mark's badge (collie-home.tsx) keeps the
+// state visible after that.
+describe("ConnectionBanner — dismissing the red strip", () => {
+  const SAVED_AT = new Date(2026, 0, 2, 14, 32).getTime();
+  const dismiss = () => screen.getByRole("button", { name: "Hide this notice" });
+
+  it("has exactly two buttons in red, Retry and the dismiss, and no Reload", async () => {
+    h.lost = true;
+    renderBanner();
+    await act(async () => {});
+    const buttons = Array.from(row()?.querySelectorAll("button") ?? []).map(
+      (b) => b.getAttribute("aria-label") ?? b.textContent?.trim(),
+    );
+    expect(buttons).toEqual(["Retry", "Hide this notice"]);
+  });
+
+  it("gives amber no dismiss and no action: it is ambient", () => {
+    h.trouble = true;
+    renderBanner();
+    expect(row()?.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("keeps the auth strip's Sign in and Reload untouched", () => {
+    renderBanner({ authError: true });
+    expect(screen.getByRole("button", { name: /reload/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Hide this notice" })).toBeNull();
+  });
+
+  it("hides the strip on dismiss, and the band closes over it", async () => {
+    h.lost = true;
+    renderBanner();
+    await act(async () => {});
+    expect(row()).not.toBeNull();
+    act(() => void fireEvent.click(dismiss()));
+    act(() => vi.advanceTimersByTime(COLLAPSE_MS + 16));
+    expect(row()).toBeNull();
+  });
+
+  it("stays hidden for the rest of the outage, across re-renders and a change of sentence", async () => {
+    h.lost = true;
+    renderBanner({ error: true, stale: true, lastSeenAt: SAVED_AT });
+    await act(async () => {});
+    act(() => void fireEvent.click(dismiss()));
+    act(() => vi.advanceTimersByTime(COLLAPSE_MS + 16));
+    act(() => rerenderBanner());
+    cfg.reachable = false;
+    act(() => rerenderBanner());
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(row()).toBeNull();
+  });
+
+  it("recovers quietly after a dismiss: no green Connected flash", async () => {
+    h.lost = true;
+    renderBanner({ error: true, stale: true, lastSeenAt: SAVED_AT });
+    await act(async () => {});
+    act(() => void fireEvent.click(dismiss()));
+    act(() => vi.advanceTimersByTime(COLLAPSE_MS + 16));
+
+    h.lost = false;
+    liveStale = false;
+    act(() => rerenderBanner());
+    expect(screen.queryByText("Connected")).toBeNull();
+    act(() => vi.advanceTimersByTime(GREEN_MS + COLLAPSE_MS + 16));
+    expect(screen.queryByText("Connected")).toBeNull();
+    expect(row()).toBeNull();
+  });
+
+  it("shows the strip again on a new outage", async () => {
+    h.lost = true;
+    renderBanner({ error: true, stale: true, lastSeenAt: SAVED_AT });
+    await act(async () => {});
+    act(() => void fireEvent.click(dismiss()));
+    act(() => vi.advanceTimersByTime(COLLAPSE_MS + 16));
+
+    h.lost = false;
+    liveStale = false;
+    act(() => rerenderBanner());
+    act(() => vi.advanceTimersByTime(GREEN_MS + COLLAPSE_MS + 16));
+    expect(row()).toBeNull();
+
+    h.lost = true;
+    liveStale = true;
+    act(() => rerenderBanner());
+    await act(async () => {});
+    expect(row()).not.toBeNull();
+    expect(announced("alert") ?? row()).toHaveTextContent(/saved|Can't reach|Offline/i);
+    expect(dismiss()).toBeInTheDocument();
+  });
+
+  it("still flashes green after a recovery that was never dismissed", async () => {
+    h.lost = true;
+    renderBanner();
+    await act(async () => {});
+    h.lost = false;
+    act(() => rerenderBanner());
+    expect(announced("status")).toHaveTextContent("Connected");
   });
 });

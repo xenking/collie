@@ -21,7 +21,7 @@ const fixtureLines = (name: string): StyledLine[] =>
   linesOf(readFileSync(join(PANES_DIR, name), "utf8"));
 
 /** Every registered agent string. agy and antigravity are two registrations of one adapter. */
-const AGENTS = ["claude", "codex", "grok", "omp", "agy", "antigravity", "muse"] as const;
+const AGENTS = ["claude", "codex", "grok", "omp", "agy", "antigravity", "muse", "opencode"] as const;
 
 /** What the post-pass answers for `agent` on `lines` — the exact composition the three call sites
  *  use (harness/index.ts buildBlocks, agent-chat's dialogPresent, dialog-guard's dialogDetector). */
@@ -41,17 +41,19 @@ describe("the cancel key each adapter declares", () => {
     ["muse", "Escape"],
     ["agy", "Escape"],
     ["antigravity", "Escape"],
+    ["opencode", "Escape"],
+    ["omp", "Escape"],
     ["grok", "ctrl+c"],
   ])("%s declares %s", (agent, key) => {
     expect(adapterFor(agent)!.cancelKey).toBe(key);
   });
 
-  it("omp declares nothing, so it can never be offered a card", () => {
-    // Not an oversight: omp's modals DO print `Esc close`. Its composer scanner has a total,
-    // permanent false-negative mode (omp/chrome.ts) — one ZWJ emoji in a statusline template and
-    // `composerReady` is false forever on a healthy pane — and a card gated on that would paint
-    // itself over a live composer.
-    expect(adapterFor("omp")!.cancelKey).toBeUndefined();
+  it("omp declares its key only together with positive modal evidence (.adr/0076)", () => {
+    // omp declined a cancelKey in ADR 0053: its composer scanner has a total, permanent false-negative
+    // mode (omp/chrome.ts), so `composerReady` is false forever on a pane with one ZWJ emoji in its
+    // statusline template, and a card gated on that alone would paint itself over a live composer.
+    // The declaration is therefore only safe with `modalOnScreen`, and the two travel together.
+    expect(adapterFor("omp")!.modalOnScreen).toBeTypeOf("function");
   });
 });
 
@@ -64,6 +66,15 @@ describe("a real unread modal gets the card", () => {
     ["codex", "codex--ask-notes-focused.txt", "Escape"],
     ["grok", "grok--ask-multi.txt", "ctrl+c"],
     ["muse", "muse--ask-color-notes-open.txt", "Escape"],
+    ["opencode", "oc--agents-picker.txt", "Escape"],
+    // The Ask tool's multi-select, which no grammar lifts (.adr/0077); its single-select twin is a card
+    // of its own now.
+    ["omp", "omp--select-multi.txt", "Escape"],
+    ["omp", "omp--v18-4-ask-multi.txt", "Escape"],
+    ["omp", "omp--v18-4-menu-model.txt", "Escape"],
+    // The compact model picker in a state its grammar declines (.adr/0079): task mode, whose footer
+    // ends one segment past the way out.
+    ["omp", "omp--v18-4-switch-task.txt", "Escape"],
   ])("%s gets the card on %s", (agent, fixture, key) => {
     const lines = fixtureLines(fixture);
     const blocks = pass(agent, lines);
@@ -117,13 +128,31 @@ describe("a screen that does not get the card", () => {
     expect(cardOf(pass("claude", lines))).toBeNull();
   });
 
-  it("does not get the card on omp's own modal: no declaration, no card", () => {
-    const lines = fixtureLines("omp--select-menu.txt");
-    const omp = adapterFor("omp")!;
-    // Both of the other conditions hold — this is exactly the screen a declaration would light up.
-    expect(omp.buildBlocks(lines).every((b) => b.kind === "raw")).toBe(true);
-    expect(omp.composerReady!(lines)).toBe(false);
-    expect(cardOf(pass("omp", lines))).toBeNull();
+  it("does not get the card on omp's `/tree` or a clipped model picker, which print no way out", () => {
+    // Both of the other conditions hold: the screen is raw and `composerReady` says false. What is
+    // missing is omp's positive modal evidence, because neither tree capture names a key that closes
+    // it (omp/modal.ts), and on a 74-column pane omp clips the model picker's footer before its `⎋
+    // close`. No evidence, no card, and the raw mirror is what the operator already had.
+    for (const name of ["omp--tree.txt", "omp--v18-4-tree.txt", "omp--v18-4-switch-clipped.txt"]) {
+      const lines = fixtureLines(name);
+      const omp = adapterFor("omp")!;
+      expect(omp.buildBlocks(lines).every((b) => b.kind === "raw"), name).toBe(true);
+      expect(omp.composerReady!(lines), name).toBe(false);
+      expect(cardOf(pass("omp", lines)), name).toBeNull();
+    }
+  });
+
+  it("does not get the card on a live omp composer even when composerReady cannot find it", () => {
+    // The failure ADR 0053 declined omp for: a scanner that answers a definite false on a healthy
+    // pane. Forced here with an adapter whose `composerReady` is always false. The composer screens
+    // print no footer naming a way out, so `modalOnScreen` is what keeps the card off every one.
+    const blind = { ...adapterFor("omp")!, composerReady: () => false };
+    for (const name of FIXTURES.filter(
+      (f) => f.startsWith("omp--") && adapterFor("omp")!.composerReady!(fixtureLines(f)),
+    )) {
+      const lines = fixtureLines(name);
+      expect(cardOf(withUnreadDialog(blind, lines, blind.buildBlocks(lines))), name).toBeNull();
+    }
   });
 
   it("does not get the card when the block list already holds a non-raw block", () => {
@@ -186,12 +215,9 @@ const CARD_FIXTURES = {
       "claude-lab--agents-screen--w82.txt",
       // corpus: `/status` screen, `Esc to cancel` footer — the M34 reference capture
       "claude-lab--menu-status-screen--w82.txt",
-      // corpus: WebFetch permission dialog, no separate footer row
-      "claude-lab--permission-webfetch--w82.txt",
-      // corpus: plan approval, three numbered options, path footer
-      "claude-lab--plan-approval--w82--h30.txt",
-      "claude-lab--plan-approval--w82.txt",
-      "claude-lab--plan-approval-feedback-typed--w82.txt",
+      // README: a multiSelect with the pointer on its "Type something" field. Declined on purpose,
+      // since every toggle digit would be typed into the field, so the card is the honest answer.
+      "claude--v2283-multiselect-type-something-focused.txt",
       // corpus: `/tasks` panel, `Esc to close` footer; raw only at 40 columns, where its
       // footer wraps and the menu grammar declines. The w82 capture lifts `menu`, so no card.
       "claude-lab--tasks-panel--w40.txt",
@@ -199,15 +225,12 @@ const CARD_FIXTURES = {
       // the marker would sit leftmost (Claude marks `low` by colour only), so the Effort grammar and
       // the generic menu both decline and the card is the honest answer.
       "claude--menu-effort-slider--w40-low.txt",
+      // README: the `/plugin` "Add Marketplace" source field, opened from the Marketplaces tab. A text
+      // field no grammar reads; the Marketplaces grammar does not claim it (no `Manage marketplaces`
+      // title), so the card and its Escape are the way back to the tab.
+      "claude--v2283-plugin-marketplaces-add-form--w82.txt",
     ],
     notModals: [
-      // corpus knownStall: a wrapped draft holding an interior rule, which stops walkFrame's up-scan
-      // before the real prompt row. Declined in M34 spec 06: the only discriminator is the two
-      // borders' widths, and that is false on three real labelled-border captures. The box is LIVE
-      // and holds the operator's own multi-line draft.
-      "claude-lab--draft-adversarial--w120.txt",
-      "claude-lab--draft-adversarial--w40.txt",
-      "claude-lab--draft-adversarial--w82.txt",
       // corpus, DELIBERATE: a statusline printing numbered rows is refused by ADR 0048 step 4
       // because it cannot be told from a live menu. Box live.
       "claude-lab--statusline-numbered-rows--w82.txt",
@@ -221,10 +244,10 @@ const CARD_FIXTURES = {
   grok: {
     // README: checkbox ask (`[ ]`), digit submits — a real dialog, and `blocked` on the reply path
     modals: ["grok--ask-multi.txt", "grok--ask-multi-checked.txt"],
-    // README: a STRUCTURE fixture, "torn frame: square bubble, no composer". Not a live pane state:
-    // it exists to pin that `locateComposer` returns null on a torn buffer. Kept visible here
-    // because ctrl+c is grok's declared key and a torn frame is not a modal.
-    notModals: ["grok--user-bubble.txt"],
+    // grok--user-bubble.txt, the README's torn-frame STRUCTURE fixture, sat here until grok declared
+    // `modalOnScreen` (2026-10-12): a torn frame prints no key-hint footer, so it no longer gets the
+    // card, which would have offered ctrl+c over it.
+    notModals: [],
   },
   muse: {
     // README: the per-question note input, open and typed — real dialogs
@@ -239,11 +262,57 @@ const CARD_FIXTURES = {
   // its own prompt-select grammar reads. An entry appearing here is news either way.
   agy: { modals: [], notModals: [] },
   antigravity: { modals: [], notModals: [] },
+  // Every opencode picker: composerReady refuses it (the picker shape) and no grammar reads it, so
+  // Escape, which closes a picker (probed on 1.18.32), is its way out. The permission steps and every
+  // question dialog the grammars lift (single select, multi select, a many-question call, the Confirm
+  // tab: question.ts and question-tabs.ts, issue 329) lift their buttons and get no card. What stays
+  // raw is a real modal with `esc dismiss` in its footer, so it gets the card (ADR 0053): a
+  // multi-select whose free-text input is open (a digit would be typed as text) and a list too long
+  // for a digit (fourteen options).
+  opencode: {
+    modals: [
+      "oc--agents-picker.txt",
+      "oc--command-palette.txt",
+      "oc--question--multi--free-text.txt",
+      "oc--question--tall14.txt",
+    ],
+    notModals: [],
+  },
+  // Every omp modal that prints its own way out (omp/modal.ts) and that no grammar lifts: the Ask
+  // tool's multi-select screens in both versions and its review screen, the `/model` and `/settings`
+  // pickers in both versions, the `/resume` picker with no session to list, and the compact model
+  // picker in every state its grammar declines: task mode, the `@` quick roles, a search with no match
+  // and the Nerd Font preset (.adr/0079). The `/resume` pickers that DO list a session, the Ask tool's
+  // one-question single-select dialogs, every captured tool-approval dialog (.adr/0078) and the model
+  // picker's session state lift as a prompt-select and get no card, `/tree` and the 74-column model
+  // picker print no way out, and the note editor is an input, so none of those is here.
+  omp: {
+    modals: [
+      "omp--menu-model-moved.txt",
+      "omp--menu-model.txt",
+      "omp--menu-settings-moved.txt",
+      "omp--menu-settings.txt",
+      "omp--select-multi-checked.txt",
+      "omp--select-multi-review.txt",
+      "omp--select-multi.txt",
+      "omp--v18-4-ask-multi-checked.txt",
+      "omp--v18-4-ask-multi.txt",
+      "omp--v18-4-menu-model.txt",
+      "omp--v18-4-menu-settings.txt",
+      "omp--v18-4-resume-nomatch.txt",
+      "omp--v18-4-switch-nerd.txt",
+      "omp--v18-4-switch-nomatch.txt",
+      "omp--v18-4-switch-quick-roles.txt",
+      "omp--v18-4-switch-task.txt",
+    ],
+    notModals: [],
+  },
 } satisfies Record<string, { modals: string[]; notModals: string[] }>;
 
-/** This adapter's own captures, by file prefix. `claude-lab--` is Claude's capture lab. */
+/** This adapter's own captures, by file prefix. `claude-lab--` is Claude's capture lab, and
+ *  opencode's corpus is filed as `oc--`. */
 function ownFixtures(agent: string): string[] {
-  const prefix = agent === "antigravity" ? "agy" : agent;
+  const prefix = agent === "antigravity" ? "agy" : agent === "opencode" ? "oc" : agent;
   return FIXTURES.filter(
     (f) => f.split("--")[0] === prefix || (prefix === "claude" && f.startsWith("claude-lab--")),
   );
@@ -282,6 +351,14 @@ describe("the declaration tracks the harness", () => {
     ["agy", "agy--permission-bash.txt", "esc to cancel"],
     ["antigravity", "agy--permission-bash.txt", "esc to cancel"],
     ["grok", "grok--permission-rm.txt", "Ctrl+c:cancel"],
+    // omp prints the key in text keycaps up to 18.1 and in glyph keycaps from 18.4.
+    ["omp", "omp--select-menu.txt", "Esc cancel"],
+    ["omp", "omp--v18-4-menu-model.txt", "⎋ close"],
+    ["omp", "omp--v18-4-switch-task.txt", "⎋ close · Alt+P session model"],
+    // opencode's pickers print the key as a bare `esc` at the end of the title row.
+    ["opencode", "oc--agents-picker.txt", "Select agent                                     esc"],
+    // ...and its question dialog prints it as `esc dismiss` at the end of the footer.
+    ["opencode", "oc--question--tall14.txt", "esc dismiss"],
   ])("%s: a real dialog's footer names the declared key", (agent, fixture, spelling) => {
     const screen = fixtureLines(fixture).map(lineText).join("\n");
     expect(screen).toContain(spelling);
@@ -291,7 +368,7 @@ describe("the declaration tracks the harness", () => {
 });
 
 describe("the card is built outside the adapter", () => {
-  // Seven adapters over the whole corpus: the slowest assertion in the file, and the one that has to
+  // Eight adapters over the whole corpus: the slowest assertion in the file, and the one that has to
   // stay exhaustive, so it gets its own budget rather than a sample.
   it("no adapter's own buildBlocks emits the kind, on any fixture", { timeout: 30_000 }, () => {
     for (const agent of AGENTS) {
@@ -324,7 +401,9 @@ describe("the signature", () => {
     if (first.kind !== "unread-dialog" || second.kind !== "unread-dialog") return;
     expect(second.cancel.signature).toBe(first.cancel.signature);
 
-    const moved = [...base.slice(0, -1), ...linesOf("something else entirely")];
+    // A row added under the footer, which stays within the last rows: Claude's `modalOnScreen`
+    // needs a key hint there (ADR 0053 addendum 2026-09-26), so replacing the footer would drop the card.
+    const moved = [...base, ...linesOf("something else entirely")];
     const third = cardOf(pass("claude", moved))!;
     if (third.kind !== "unread-dialog") return;
     expect(third.cancel.signature).not.toBe(first.cancel.signature);
@@ -335,13 +414,13 @@ describe("the signature", () => {
 });
 
 describe("known live-box gaps the card inherits", () => {
-  // This is the #261 stall wearing the card: locateTail walks up from the bottom rule over
-  // continuation rows and stops at the first blank row, so a draft holding a blank row (a
-  // two-paragraph message) yields prompt: null. composerReady is then a definite false, and the
-  // M34 post-pass draws the unread-dialog card over a LIVE box holding the operator's own draft.
-  // When locateTail tolerates a bounded blank run inside the draft, this test must be INVERTED
-  // (card null, composerReady true), not deleted.
-  it("muse: a draft with a blank row inside it still gets the card (#261)", () => {
+  // INVERTED per the note this replaces (#274 supersedes the #261 bargain): locateTail now steps
+  // over the blank rows a paragraph break leaves inside the draft, so a two-paragraph message
+  // binds its prompt, composerReady answers true, and no card draws over the live box. The old
+  // bargain (card + two-tap escape hatch) proved actively harmful live: the hatch types without
+  // the pre-clear sweep, so each tap appended a full duplicate and verify — reading null forever
+  // — withheld every submit.
+  it("muse: a draft with a blank row inside it no longer gets the card (#274)", () => {
     const base = fixtureLines("muse--draft-single.txt");
     const texts = base.map(lineText);
     let boxRow = -1;
@@ -359,7 +438,28 @@ describe("known live-box gaps the card inherits", () => {
       ...base.slice(boxRow + 1),
     ];
 
-    expect(museAdapter.composerReady!(lines)).toBe(false);
-    expect(cardOf(pass("muse", lines))).not.toBeNull();
+    expect(museAdapter.composerReady!(lines)).toBe(true);
+    expect(cardOf(pass("muse", lines))).toBeNull();
+  });
+});
+
+// Harness canary 2026-10-12 (Codex 0.159.3, Grok Build 1.0.50, Muse 1.4.6): with no positive gate,
+// the card flashed over the shell each agent leaves behind on exit and over the frames it paints
+// before its composer, and on grok it offered ctrl+c to that shell. The text below is what those
+// captures show, with the session ids and the shell prompt replaced.
+describe("the card stays off the shell an agent exits to, and off its first frames", () => {
+  const screen = (...rows: string[]) => splitLines(parseAnsi(rows.join("\n")));
+  const SHELL = "host:project user$ ";
+
+  it.each([
+    ["codex", screen("Token usage: total=245,954 input=245,944 output=10", "To continue this session, run:", "  codex resume 0000-session", SHELL)],
+    ["codex", screen("  >_ OpenAI Codex (v0.159.3)", "", "› Ask Codex to do anything", "", "  ? for shortcuts")],
+    ["grok", screen("Finishing session…", "Resume this session with:", "  grok --resume 0000-session", SHELL)],
+    ["muse", screen("  Muse Code 1.4.6", "❯ Reply with only OK.", "◆ OK", "To continue this session, run muse resume 0000-session", SHELL)],
+    ["muse", screen("  Muse Code 1.4.6")],
+  ])("%s: no card on %#", (agent, lines) => {
+    expect(adapterFor(agent)!.composerReady!(lines)).toBe(false);
+    expect(adapterFor(agent)!.modalOnScreen!(lines)).toBe(false);
+    expect(cardOf(pass(agent, lines))).toBeNull();
   });
 });

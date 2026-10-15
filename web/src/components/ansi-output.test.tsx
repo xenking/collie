@@ -1,12 +1,119 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render } from "@testing-library/react";
+import { fireEvent, render, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
+import { MemoryRouter } from "react-router";
 
+import { http, HttpResponse } from "msw";
 import { AnsiOutput } from "./ansi-output";
+import { FileLinksProvider } from "./file-links";
+import { paneLinkHandlers, PaneFileLinks, testFileOpener } from "@/test/file-links";
+import { server } from "@/test/setup";
 import { codexPaddingScreen } from "@/test/codex-padding";
 
 const ESC = "\x1b";
 const MUTED_RULE_COLOUR = "var(--terminal-muted-fg, #a1a1a1)"; // dark half as the fallback
+
+// The mirror is shared by every harness. What it does per harness comes through the adapter registry
+// (`adapterFor(agent)?.prepareDisplay`), so it must not import a harness module of its own.
+describe("ansi-output's harness boundary", () => {
+  it("imports nothing from a lib/harness/<name>/ module", () => {
+    const source = readFileSync(join(import.meta.dirname, "ansi-output.tsx"), "utf8");
+    const imports = [...source.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
+    expect(imports.filter((spec) => /lib\/harness\/[^"]+/.test(spec))).toEqual([]);
+  });
+});
+
+describe("Grok's phone display", () => {
+  const captured = readFileSync(
+    join(import.meta.dirname, "..", "fixtures", "panes", "grok--output-scrollbar.txt"),
+    "utf8",
+  );
+
+  it("shows the reply without terminal padding or the scrollbar's empty viewport rows", () => {
+    const { container } = render(
+      <AnsiOutput text={captured} agent="grok" query="GB_BROWSER_RENDER_END" currentMatch={0} />,
+    );
+    const pre = container.querySelector("pre")!;
+    expect(pre.textContent).toContain("GB_BROWSER_RENDER_BEGIN");
+    expect(pre.textContent).toContain("GB_BROWSER_RENDER_END");
+    expect(pre.textContent).not.toContain("█");
+    expect(pre.textContent).not.toMatch(/\n(?: *\n){3}/);
+    expect(pre.textContent).not.toMatch(/ {10,}(?:\n|$)/);
+    expect(pre.querySelector('[data-find-match="current"]')!.textContent).toBe("GB_BROWSER_RENDER_END");
+    expect([...pre.querySelectorAll("span")].some(
+      (s) => s.style.backgroundColor === "rgb(28, 28, 28)" && s.textContent!.trim() !== "",
+    )).toBe(true);
+  });
+
+  it("applies screen-row hiding before compacting Grok's display", () => {
+    const { container } = render(<AnsiOutput text={captured} agent="grok" hideLeadingLines={20} />);
+    const pre = container.querySelector("pre")!;
+    expect(pre.textContent).toContain("Help improve Grok");
+    expect(pre.textContent).not.toContain("const message");
+    expect(pre.textContent).not.toMatch(/ {10,}(?:\n|$)/);
+  });
+
+  it("keeps a typed block and its meaningful background while dropping only right padding", () => {
+    const text = [
+      `${ESC}[48;2;36;36;36m literal ${ESC}[38;2;225;225;225m█${ESC}[0m          `,
+      "  ╭────────────────────────────────────────╮",
+      "  │ ❯                                      │",
+      "  ╰──────────────────── Grok 4.7 (high) ─╯",
+      "",
+      "  Shift+Tab:mode  │  Ctrl+.:shortcuts",
+    ].join("\n");
+    const { container } = render(<AnsiOutput text={text} agent="grok" />);
+    const pre = container.querySelector("pre")!;
+    expect(pre.textContent).toBe(" literal █");
+    expect([...pre.querySelectorAll("span")].some(
+      (s) => s.style.backgroundColor === "rgb(36, 36, 36)",
+    )).toBe(true);
+  });
+
+  // A run of coloured blanks after text is a swatch, not padding: no text on the row wears that
+  // colour, so it is the content. Only blanks on the canvas, or in a colour the row's own text sits
+  // on (a code block's fill), are padding.
+  it("keeps trailing blanks in a colour no text on the row uses", () => {
+    const text = [
+      `${ESC}[48;2;20;20;20mswatch:${ESC}[48;2;200;30;30m   ${ESC}[48;2;20;20;20m          ${ESC}[0m`,
+      "  ╭────────────────────────────────────────╮",
+      "  │ ❯                                      │",
+      "  ╰──────────────────── Grok 4.7 (high) ─╯",
+      "",
+      "  Shift+Tab:mode  │  Ctrl+.:shortcuts",
+    ].join("\n");
+    const { container } = render(<AnsiOutput text={text} agent="grok" />);
+    const pre = container.querySelector("pre")!;
+    expect(pre.textContent).toBe("swatch:   ");
+    expect([...pre.querySelectorAll("span")].some(
+      (s) => s.style.backgroundColor === "rgb(200, 30, 30)" && s.textContent === "   ",
+    )).toBe(true);
+  });
+
+  it("keeps a painted dark block when it belongs to colored message text, not canvas padding", () => {
+    const text = [
+      `${ESC}[48;2;20;20;20m${ESC}[38;2;225;225;225m literal   ${ESC}[38;2;25;25;25m${ESC}[48;2;25;25;25m█${ESC}[0m`,
+      "  ╭────────────────────────────────────────╮",
+      "  │ ❯                                      │",
+      "  ╰──────────────────── Grok 4.7 (high) ─╯",
+      "",
+      "  Shift+Tab:mode  │  Ctrl+.:shortcuts",
+    ].join("\n");
+    const { container } = render(<AnsiOutput text={text} agent="grok" />);
+    expect(container.querySelector("pre")!.textContent).toBe(" literal   █");
+  });
+
+  it.each([
+    { agent: "grok", grammars: false, wrap: true },
+    { agent: "grok", grammars: true, wrap: false },
+    { agent: undefined, grammars: true, wrap: true },
+  ])("keeps column-faithful output outside Grok's wrapped normal view ($agent, $grammars, $wrap)", (props) => {
+    const { container } = render(<AnsiOutput text={captured} {...props} />);
+    expect(container.querySelector("pre")!.textContent).toContain("█");
+  });
+});
 
 // The mirror renders in DARK space under every theme, and the light theme inverts it wholesale
 // (.adr/0002). These guard the two ways that arrangement silently breaks.
@@ -65,6 +172,20 @@ describe("terminal mirror colour space", () => {
     const pre = mirror(`${ESC}[31mred${ESC}[0m`);
     const span = [...pre.querySelectorAll("span")].find((s) => s.textContent === "red");
     expect(span!.style.color).toBe("var(--ansi-1)");
+  });
+});
+
+// The mirror must stay selectable on the phone. An installed iOS PWA (display:standalone) suppresses
+// long-press selection app-wide unless an element opts back in with -webkit-user-select:text — so
+// without these the operator can't select-and-copy the terminal text on the phone at all (the pane
+// menu's "Copy output" is the one-tap alternative). Pinned as the classes that PRODUCE the behaviour,
+// the way the colour-space tests above are, since jsdom runs no selection.
+describe("terminal mirror text selection (mobile copy)", () => {
+  it("opts the <pre> back into text selection, both spellings", () => {
+    const { container } = render(<AnsiOutput text="hello" />);
+    const pre = container.querySelector("pre")!;
+    expect(pre.className).toContain("select-text");
+    expect(pre.className).toContain("[-webkit-user-select:text]");
   });
 });
 
@@ -188,6 +309,13 @@ describe("mirror line wrapping", () => {
     expect(cls).toContain("whitespace-pre");
     expect(cls).toContain("overflow-x-auto");
     expect(cls).not.toContain("whitespace-pre-wrap");
+  });
+
+  it("rebalances rewrapped lines against orphans while wrapping", () => {
+    const cls = preFor({}).className;
+    expect(cls).toContain("text-pretty");
+    // ...and off the panning path: a column-faithful pan breaks nothing at all.
+    expect(preFor({ wrap: false }).className).not.toContain("text-pretty");
   });
 
   it("keeps a live-shaped ANSI labelled rule clipped while muting only its rule runs", () => {
@@ -369,6 +497,22 @@ describe("a table pans while the mirror around it wraps", () => {
 
   it("does not nest a scroller inside the wrap-off pan, which is already column-faithful", () => {
     expect(mirror({ wrap: false }).querySelector("span.overflow-x-auto")).toBeNull();
+  });
+
+  it("holds each double-width character of a run to two columns, so a CJK table's walls line up", () => {
+    // The mirror's monospace stack has no CJK face, so an ideograph falls back to a font whose
+    // advance is not two ASCII cells, and every wall after it drifts. Each one in a run sits in a
+    // box exactly 2ch wide instead; prose outside the run keeps its free wrapping.
+    const table = ["┌──────────┬────────┐", "│ 用水位置 │ 建議   │", "├──────────┼────────┤", "│ 廚房     │ 淨水   │", "└──────────┴────────┘"].join("\n");
+    const text = `中文說明\n\n${table}\n`;
+    const { container } = render(<AnsiOutput text={text} />);
+    const pre = container.querySelector("pre")!;
+    const run = pre.querySelector("span.overflow-x-auto")!;
+    const cells = [...run.querySelectorAll('[class~="w-[2ch]"]')];
+
+    expect(cells.map((c) => c.textContent).join("")).toBe("用水位置建議廚房淨水");
+    expect(pre.querySelectorAll('[class~="w-[2ch]"]')).toHaveLength(cells.length);
+    expect(pre.textContent).toBe(text);
   });
 
   it("leaves the border clip alone: a rule beside a table stays clipped and outside the run", () => {
@@ -598,18 +742,27 @@ describe("terminal mirror image placeholders", () => {
     expect(container.textContent).toContain("[Image]");
   });
 
-  it("renders an inline image when images are provided", () => {
+  // Reads need the pairing token (ADR 0086), so the card's bytes are fetched with it and drawn from
+  // an object URL. The card appears once they are here.
+  const firstImg = (container: HTMLElement) =>
+    vi.waitFor(() => {
+      const img = container.querySelector("img");
+      if (img === null) throw new Error("no picture yet");
+      return img;
+    });
+
+  it("renders an inline image when images are provided", async () => {
     const { container } = render(
       <AnsiOutput text={`header\n${KITTY_PLACEHOLDER}\nfooter`} images={[BLOB]} />,
     );
-    const img = container.querySelector("img");
-    expect(img).not.toBeNull();
-    expect(img?.getAttribute("src")).toBe(BLOB);
+    const img = await firstImg(container);
+    expect(img.getAttribute("src")).toMatch(/^blob:/);
   });
 
-  it("is ONE card for one image, however many cells it covers", () => {
+  it("is ONE card for one image, however many cells it covers", async () => {
     const rows = `${KITTY_PLACEHOLDER}\n${KITTY_PLACEHOLDER}\n${KITTY_PLACEHOLDER}`;
     const { container } = render(<AnsiOutput text={`header\n${rows}\nfooter`} images={[BLOB]} />);
+    await firstImg(container);
     expect(container.querySelectorAll("img")).toHaveLength(1);
   });
 
@@ -623,18 +776,20 @@ describe("terminal mirror image placeholders", () => {
     expect(onImageClusterCount).toHaveBeenLastCalledWith(0);
   });
 
-  it("shows a badge for the cluster the ordering could not match, never a repeated image", () => {
+  it("shows a badge for the cluster the ordering could not match, never a repeated image", async () => {
     // Aligned from the END: the one image belongs to the LAST cluster, and the first gets the badge.
     const two = `${KITTY_PLACEHOLDER}\nbetween\n${KITTY_PLACEHOLDER}`;
     const { container } = render(<AnsiOutput text={two} images={[BLOB]} />);
+    await firstImg(container);
     expect(container.querySelectorAll("img")).toHaveLength(1);
     expect(container.textContent).toContain("[Image]");
   });
 
-  it("keeps the text on a row that holds both a placeholder and real text", () => {
+  it("keeps the text on a row that holds both a placeholder and real text", async () => {
     const { container } = render(
       <AnsiOutput text={`Screenshot: ${KITTY_PLACEHOLDER}\nafter`} images={[BLOB]} />,
     );
+    await firstImg(container);
     // The sentence survives, the card renders beside it, and the placeholder glyphs are gone.
     expect(container.textContent).toContain("Screenshot:");
     expect(container.querySelectorAll("img")).toHaveLength(1);
@@ -661,11 +816,12 @@ describe("terminal mirror image placeholders", () => {
     expect(link.getAttribute("href")).toBe(url);
   });
 
-  it("says on the card that the picture was matched by order", () => {
+  it("says on the card that the picture was matched by order", async () => {
     // The match is an approximation, so a matched card must read as a guess and point at History.
     const { container } = render(
       <AnsiOutput text={`header\n${KITTY_PLACEHOLDER}\nfooter`} images={[BLOB]} />,
     );
+    await firstImg(container);
     expect(container.textContent).toContain("matched by order, open History to check");
     expect(container.querySelector("a[title]")?.getAttribute("title")).toBe(
       "matched by order, open History to check",
@@ -679,14 +835,146 @@ describe("terminal mirror image placeholders", () => {
     expect(container.textContent).not.toContain("matched by order");
   });
 
-  it("falls back to the badge when the image fails to load", () => {
+  it("falls back to the badge when the image fails to load", async () => {
     // A peer on an older build has no `blobs/<hash>` route and answers 404 (CREW_PROTOCOL §9.1),
     // and a blob can also be gone. Either way: the badge, never a broken-image glyph.
     const { container } = render(
       <AnsiOutput text={`header\n${KITTY_PLACEHOLDER}\nfooter`} images={[BLOB]} />,
     );
-    fireEvent.error(container.querySelector("img")!);
+    fireEvent.error(await firstImg(container));
     expect(container.querySelector("img")).toBeNull();
     expect(container.textContent).toContain("[Image]");
+  });
+
+  it("falls back to the badge when the bridge refuses the bytes", async () => {
+    // The fetch now carries the token, so a refusal (404 from an old peer, 403 before pairing)
+    // arrives as an answer, not as an `<img>` error. Same outcome: the badge.
+    server.use(http.get("/api/blobs/:hash", () => new HttpResponse("not found", { status: 404 })));
+    const { container } = render(
+      <AnsiOutput text={`header\n${KITTY_PLACEHOLDER}\nfooter`} images={[BLOB]} />,
+    );
+    await vi.waitFor(() => expect(container.textContent).toContain("[Image]"));
+    expect(container.querySelector("img")).toBeNull();
+  });
+});
+
+// A segment's background paints its content box and a glyph paints its EM BOX, so at the mirror's
+// 1.25 leading every character whose job is to fill its cell is a quarter of a row short and the
+// pill or bar it belongs to steps at the join (lib/cell-glyphs.ts). These guard the three things
+// painting it instead must not cost: the text, the offsets, and the paint's own colour source.
+describe("cell-filling glyphs", () => {
+  const LEFT_CAP = "\ue0b6";
+  const RIGHT_CAP = "\ue0b4";
+  const FULL_BLOCK = "\u2588";
+
+  function mirror(text: string, props?: Partial<ComponentProps<typeof AnsiOutput>>) {
+    const { container } = render(<AnsiOutput text={text} {...props} />);
+    return container;
+  }
+
+  it("paints a Powerline cap as a cell-sized box and leaves the text intact", () => {
+    const container = mirror(`${LEFT_CAP}CX${RIGHT_CAP} 7d`);
+    const caps = container.querySelectorAll(".cell-glyph");
+    expect(caps).toHaveLength(2);
+    expect(caps[0]!.getAttribute("data-cell")).toBe("round-left");
+    expect(caps[1]!.getAttribute("data-cell")).toBe("round-right");
+    // The character is still a text node inside the box. It is invisible because its ink and the
+    // fill behind it are both currentColor — not because it was replaced.
+    expect(caps[0]!.textContent).toBe(LEFT_CAP);
+    expect(container.querySelector("pre")!.textContent).toBe(`${LEFT_CAP}CX${RIGHT_CAP} 7d`);
+  });
+
+  it("adds no element to a line with nothing to paint", () => {
+    expect(mirror("ordinary output").querySelectorAll(".cell-glyph")).toHaveLength(0);
+  });
+
+  // The paint is a fixed rule per shape in index.css, keyed on `data-cell`. The polling path
+  // builds no style object for it, and a pane byte never reaches a style attribute.
+  it("names its shape and carries no inline style", () => {
+    const cap = mirror(`${LEFT_CAP}CX${RIGHT_CAP}`).querySelector(".cell-glyph")!;
+    expect(cap.getAttribute("data-cell")).toBe("round-left");
+    expect(cap.hasAttribute("style")).toBe(false);
+  });
+
+  // Find splits a segment by OFFSET into the visible text. Painting happens inside each piece, so
+  // a match that sits beyond a painted character must still land on the right characters.
+  it("keeps find offsets correct across a painted character", () => {
+    const container = mirror(`${FULL_BLOCK}${FULL_BLOCK} needle`, {
+      query: "needle",
+      currentMatch: 0,
+    });
+    expect(container.querySelector('[data-find-match="current"]')!.textContent).toBe("needle");
+    expect(container.querySelectorAll(".cell-glyph")).toHaveLength(2);
+  });
+
+  // Links split the same coordinate space as find, and an autolink's offsets are taken over the
+  // same visible text. A URL after a painted character must still be anchored over its own
+  // characters, with nothing of the bar inside the anchor.
+  it("keeps link offsets correct across a painted character", () => {
+    const url = "https://herdr.dev/docs";
+    const container = mirror(`${FULL_BLOCK}${FULL_BLOCK} ${url}`);
+    const anchor = container.querySelector("a")!;
+    expect(anchor.textContent).toBe(url);
+    expect(anchor.getAttribute("href")).toBe(url);
+    expect(container.querySelectorAll(".cell-glyph")).toHaveLength(2);
+  });
+
+  // A block character INSIDE the match: the highlight span owns the run, so the painting has to
+  // happen within it or a highlighted bar loses its cells.
+  it("paints inside a find match too", () => {
+    const container = mirror(`bar ${FULL_BLOCK}${FULL_BLOCK}`, { query: `r ${FULL_BLOCK}` });
+    const match = container.querySelector("[data-find-match]")!;
+    expect(match.textContent).toBe(`r ${FULL_BLOCK}`);
+    expect(match.querySelectorAll(".cell-glyph")).toHaveLength(1);
+  });
+});
+
+// The pane's own mirror links a path the agent printed beside the URLs it already links (ADR 0088).
+describe("terminal mirror file paths", () => {
+  const mirror = (text: string, opened: string[]) =>
+    render(
+      <FileLinksProvider value={testFileOpener(opened)}>
+        <AnsiOutput text={text} />
+      </FileLinksProvider>,
+    );
+
+  it("a path under the root opens Files in the app, a URL still opens a new tab", () => {
+    const opened: string[] = [];
+    const { container } = mirror("wrote docs/guide.md:3 see https://example.com/a.md", opened);
+    const [file, url] = [...container.querySelectorAll("a")];
+    expect(file!.textContent).toBe("docs/guide.md:3");
+    expect(file!.getAttribute("target")).toBeNull();
+    expect(url!.getAttribute("href")).toBe("https://example.com/a.md");
+    expect(url!.getAttribute("target")).toBe("_blank");
+    fireEvent.click(file!);
+    expect(opened).toEqual(["/pane/w1%3Ap1/changes/files?path=docs%2Fguide.md&line=3"]);
+  });
+
+  it("finds paths per row and keeps the find offsets of the rows below", () => {
+    const { container } = mirror("one src/a.ts\ntwo /etc/hosts\nthree lib/b.ts", []);
+    expect([...container.querySelectorAll("a")].map((a) => a.textContent)).toEqual(["src/a.ts", "lib/b.ts"]);
+  });
+
+  it("with no opener only URLs are links", () => {
+    const { container } = render(<AnsiOutput text="wrote docs/guide.md" />);
+    expect(container.querySelector("a")).toBeNull();
+  });
+
+  it("through the pane's real opener, only a path the bridge said exists becomes a link", async () => {
+    const asked: string[][] = [];
+    server.use(...paneLinkHandlers(["src/a.ts"], asked));
+    const { container } = render(
+      <MemoryRouter>
+        <PaneFileLinks>
+          <AnsiOutput text={"one src/a.ts\ntwo ../shared/routes.ts\nthree lib/gone.ts see https://example.com/x"} />
+        </PaneFileLinks>
+      </MemoryRouter>,
+    );
+    // Before the answer only the URL is a link.
+    expect([...container.querySelectorAll("a")].map((a) => a.textContent)).toEqual(["https://example.com/x"]);
+    await waitFor(() => expect(container.querySelectorAll("a")).toHaveLength(2));
+    expect([...container.querySelectorAll("a")].map((a) => a.textContent)).toEqual(["src/a.ts", "https://example.com/x"]);
+    // `../shared/routes.ts` climbs out of the root, so it is never asked about.
+    expect(asked).toEqual([["src/a.ts", "lib/gone.ts"]]);
   });
 });

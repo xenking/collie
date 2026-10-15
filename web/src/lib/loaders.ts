@@ -17,18 +17,22 @@ import {
   fetchDevices,
   fetchHistory,
   fetchCrew,
+  fetchMachines,
   fetchPane,
   fetchSnapshot,
   isApiErrorStatus,
+  isPairingRefusal,
+  readFailureKind,
 } from "@/lib/api";
 import { parseAnsi } from "@/lib/ansi";
 import { noteUpdateRun } from "./self-update";
 import { splitLines } from "@/lib/blocks";
 import { type CacheHold, holdCacheReadings } from "@/lib/cache-hold";
-import { isLostLatched } from "@/lib/connection-health";
-import { ambientSpaces } from "@/lib/hosts";
+import { isLostLatched, type ReadFailureKind, wakeStrikeHolds } from "@/lib/connection-health";
+import { markLive as markPaneLive, markSavedCopy } from "@/lib/liveness";
+import { paneGridOf } from "@/lib/mux-capability";
+import { ambientSpaces, findPane } from "@/lib/hosts";
 import {
-  dropLastPaneText,
   loadLastPaneText,
   loadLastSnapshot,
   saveLastPaneText,
@@ -36,7 +40,10 @@ import {
 } from "@/lib/last-seen";
 import { detectNoEchoPrompt } from "@/lib/no-echo";
 import { markPollResult } from "@/lib/poll-intent";
-import { clearNotPaired, markNotPaired } from "@/lib/pairing";
+import { shareEqual } from "@/lib/share-equal";
+import { prefetchPane, takePanePrefetch } from "@/lib/pane-prefetch";
+import { clearNotPaired, isNotPaired, markNotPaired, rememberPairingExpiry } from "@/lib/pairing";
+import { pairingRefused, wipeDevice } from "@/lib/wipe";
 import {
   internScope,
   paneScopeKey,
@@ -49,8 +56,10 @@ import {
 import type {
   AgentView,
   BridgeStatus,
+  MuxFault,
   DeviceAuth,
   CrewStatusResponse,
+  MachinesResponse,
   PairedDeviceWire,
   PaneHistoryResponse,
   PaneReadResponse,
@@ -66,7 +75,7 @@ import type {
 // A superseded revalidation is aborted via the loader's request.signal; that surfaces as an
 // AbortError we must RETHROW so React Router discards the stale run — swallowing it into the
 // stale-data/error-banner path would flash a spurious "reconnecting…" on every fast poll.
-function isAbortError<TThrown>(e: TThrown): boolean {
+export function isAbortError<TThrown>(e: TThrown): boolean {
   // `fetch` rejects an aborted request with a DOMException, which is an Error subclass in every
   // engine Collie runs in (and in jsdom) — so an `instanceof Error` test reaches it without having
   // to inspect the shape of an arbitrary thrown value.
@@ -99,6 +108,8 @@ function scopeFromRequest(request?: Request): Scope {
 
 export interface HomeData {
   bridge: BridgeStatus | undefined;
+  /** Why the mux is down, when the bridge named it (a refused token). Absent otherwise. */
+  muxFault?: MuxFault;
   /** Per-device authorisation; undefined when the feature is off or not yet known. */
   device: DeviceAuth | undefined;
   agents: AgentView[];
@@ -142,11 +153,29 @@ export interface HomeData {
   /** True when the failed refresh was rejected with HTTP 401 or 403. */
   authError: boolean;
   /**
+   * What THIS run's own herd read said when it failed (lib/api.ts `readFailureKind`). Absent on a
+   * live render, and on a stale one that made no read of its own: the latched navigation fast path,
+   * or a cold open that drew the saved copy while its read was still in flight. The poll cadence
+   * reads it (hooks/use-polling.ts): only a read that got no answer at all is retried early.
+   */
+  failure?: ReadFailureKind;
+  /**
    * When this herd was actually fetched — set ONLY on a stale render, and only when the write-through
    * cache can date it (lib/last-seen.ts). It is what lets the UI say "last seen 14:32" instead of
    * showing an undated old screen; absent means live data, or stale data we cannot date.
    */
   lastSeenAt?: number;
+  /**
+   * THE SAVED COPY IS ON SCREEN (M46 spec 10): this herd was drawn from what the phone kept, dated
+   * by {@link lastSeenAt}, because the bridge did not answer. True on a cold open before any live
+   * answer this page session, and on any failed run once the shared connection clock has latched
+   * the outage. A blip between two good polls is NOT this: it keeps the in-session herd undimmed
+   * and leaves the connection strip its own escalation. The dashboard dims every row and speaks
+   * their status in the past tense while it is set; the next live answer clears it.
+   *
+   * Optional in the TYPE only, so hand-built fixtures stay valid; every loader return sets it.
+   */
+  stale?: boolean;
 }
 
 export interface PaneData {
@@ -172,11 +201,80 @@ export interface PaneData {
   authError: boolean;
   /** When this mirror was actually fetched — set only on a datable stale render, as on HomeData. */
   lastSeenAt?: number;
+  /**
+   * The pane's text is the saved copy, under the same rule as {@link HomeData.stale}. The pane view
+   * draws the saved-copy notice from it, and nothing on a stale pane may act (M46 spec 11): it is
+   * handed down to the pane view for exactly that reading.
+   */
+  stale?: boolean;
+  /**
+   * The pane's own row from a herd this phone kept, set only when the pane's read failed. The pane
+   * page names the pane from it when the herd it was handed does not hold the pane, which happens
+   * with the bridge away: a pane URL never carries the breadth (`?all=1`), and a pane opened from
+   * another view's rows has its own address, so the root loader re-runs at an address it may hold no
+   * herd for. A missing row is then "not known", never "gone" (see {@link savedPaneRow}).
+   */
+  savedPane?: AgentView;
+}
+
+// ── THE COLD OPEN (M46 spec 10) ───────────────────────────────────────────────
+//
+// A phone kills the PWA all the time, so a cold open is the normal case. Before this, the first
+// loader run waited for its fetch, and over a dead tunnel that is the whole 10s GET timeout spent on
+// the boot splash before the saved herd could draw. Now a NAVIGATION on a page that has not had one
+// live answer yet gives its fetch {@link COLD_OPEN_WAIT_MS}: if the bridge has not answered by then
+// and the phone kept a copy, the copy draws at once, marked stale, and the poll that already runs
+// swaps the live answer in when it comes. With no copy kept, the run waits for its fetch as before.
+// Only a navigation, and only before the first live answer: a poll that answered early would start
+// its next fetch on top of the one still hanging.
+
+/** How long a cold navigation waits for the bridge before it draws the saved copy instead. */
+export const COLD_OPEN_WAIT_MS = 1_500;
+
+let coldOpenWaitMs = COLD_OPEN_WAIT_MS;
+
+/** Whether a live answer (a snapshot or a pane read) has come back on this page. */
+let answeredLive = false;
+
+/** Note a live answer. Returns true so it can close a promise chain. */
+function markAnsweredLive(): true {
+  answeredLive = true;
+  return true;
+}
+
+const COLD = Symbol("cold-open");
+
+/** The fetch, or {@link COLD} when it has not answered within the cold-open wait. */
+function raceColdOpen<T>(work: Promise<T>): Promise<T | typeof COLD> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const wait = new Promise<typeof COLD>((resolve) => {
+    timer = setTimeout(() => resolve(COLD), coldOpenWaitMs);
+  });
+  return Promise.race([work, wait]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Whether a datable cached render IS the saved copy (see {@link HomeData.stale}): before the first
+ * live answer of this page, once the outage is latched, or when the read that failed got no answer at
+ * all (`outage`, a network failure or the poll deadline; lib/api.ts `readFailureKind`). The last one
+ * is the pane's own reading: its read and the herd read fail in the same poll, and whichever lands
+ * second must not wait one more poll to say what the first already proved.
+ */
+function drawnFromSave(lastSeenAt: number | undefined, outage = false): boolean {
+  return lastSeenAt !== undefined && (!answeredLive || outage || isLostLatched());
+}
+
+/** Test seam: shorten the cold-open wait. */
+export function __setColdOpenWait(ms: number): void {
+  coldOpenWaitMs = ms;
 }
 
 // Keep-previous-data cache is PER-SCOPE: switching host or session must not show the other one's
 // herd flagged as stale. Keyed by the NUL-joined (host, session) pair via lib/scope.
 const lastSnapshot = new Map<string, SnapshotResponse>();
+// When each of those was fetched, so a herd drawn from MEMORY is dated by its own answer (M46 pass 3:
+// "as of {time}" on the dashboard, "Showing what was saved at {time}" in the strip).
+const lastSnapshotAt = new Map<string, number>();
 
 // A latched navigation skips the network, so retain whether the last real outcome for each scope was
 // an auth rejection. Store only rejected scopes; every other real outcome removes the marker.
@@ -192,7 +290,11 @@ function hasAuthError(scope: Scope): boolean {
   return authErrorScopes.has(scopeKey(scope));
 }
 
+// A fronting proxy's refusal, which the Sign-in strip answers. The bridge's own pairing refusal is a
+// 403 too, but its remedy is the pair screen, not the proxy (ADR 0086): reads need the token, so a cold
+// open on an unpaired phone refuses the FIRST snapshot, and that must read as "pair this device".
 function isAuthError<TThrown>(error: TThrown): boolean {
+  if (isPairingRefusal(error)) return false;
   return isApiErrorStatus(error, 401) || isApiErrorStatus(error, 403);
 }
 
@@ -242,8 +344,9 @@ function toHomeData(
   const agents = holdCacheReadings(holdIn, snap.agents);
   const shells = holdCacheReadings(holdIn, snap.shellPanes ?? []);
   paneCacheHold = new Map([...agents.held, ...shells.held]);
-  return {
+  const home: HomeData = {
     lastSeenAt,
+    stale: error && drawnFromSave(lastSeenAt),
     bridge: snap.bridge,
     device: snap.device,
     agents: agents.panes,
@@ -264,6 +367,9 @@ function toHomeData(
     error,
     authError: error && hasAuthError(scope),
   };
+  // Only while the bridge names why its mux is down (a refused token): every other home has no such key.
+  if (snap.muxFault !== undefined) home.muxFault = snap.muxFault;
+  return home;
 }
 
 // Last-known home for a scope, flagged stale — the cached snapshot if we have one, else an empty
@@ -272,22 +378,32 @@ function toHomeData(
 // offline" — both are "stale-but-present, flagged").
 //
 // Two tiers, in this order: the module cache (this page's own last good fetch), then the write-through
-// sessionStorage cache (lib/last-seen.ts). The second tier is what a COLD boot reads — a discarded and
-// restored PWA has an empty module cache and a failing first fetch, and without it the operator gets an
-// empty herd instead of the screen they left. A restored snapshot is promoted into the module cache so
+// on-device store (lib/last-seen.ts over lib/store.ts). The second tier is what a COLD boot reads — a
+// killed or discarded PWA has an empty module cache and a failing first fetch, and without it the
+// operator gets an empty herd instead of the screen they left. A restored snapshot is promoted into the module cache so
 // the rest of this page session behaves exactly as if we had fetched it.
-function staleHome(scope: Scope, viewAll: boolean): HomeData {
-  const restored = loadLastSnapshot(scope, viewAll);
-  const cached = lastSnapshot.get(snapshotKey(scope, viewAll)) ?? restored?.value;
-  if (cached) {
-    lastSnapshot.set(snapshotKey(scope, viewAll), cached);
-    return toHomeData(cached, scope, viewAll, true, restored?.at);
+async function staleHome(scope: Scope, viewAll: boolean): Promise<HomeData> {
+  // A device the bridge refused for want of pairing draws NOTHING it kept (M46 spec 10, the third
+  // state): the wipe has already deleted the store, and the module cache is this page's memory of a
+  // herd the phone is no longer entitled to. The pair screen is the whole answer.
+  const refused = isNotPaired();
+  const key = snapshotKey(scope, viewAll);
+  // MEMORY FIRST (M46 pass 3). A herd this page already holds stays exactly as it is, dated by its own
+  // answer; the store is read only when memory is empty, which is a cold open or a scope not yet seen.
+  const inMemory = refused ? undefined : lastSnapshot.get(key);
+  if (inMemory) return toHomeData(inMemory, scope, viewAll, true, lastSnapshotAt.get(key));
+  const restored = refused ? null : await loadLastSnapshot(scope, viewAll);
+  if (restored) {
+    lastSnapshot.set(key, restored.value);
+    lastSnapshotAt.set(key, restored.at);
+    return toHomeData(restored.value, scope, viewAll, true, restored.at);
   }
   // Nothing cached at all — an outage on a tab that never saw a good snapshot. `error: true` is what
   // keeps this apart from a genuinely empty herd downstream: the empty state is only allowed to say
   // "No agents running" when the bridge really answered (components/agent-list.tsx).
   return {
     lastSeenAt: undefined,
+    stale: false,
     bridge: undefined,
     device: undefined,
     agents: [],
@@ -327,8 +443,25 @@ export async function rootLoader({ request }: { request?: Request } = {}): Promi
   if (isNavigation && isLostLatched()) return staleHome(scope, viewAll);
 
   try {
-    const snap = await fetchSnapshot(scope, request?.signal, viewAll);
+    const fetching = fetchSnapshot(scope, request?.signal, viewAll);
+    let snap: SnapshotResponse;
+    if (isNavigation && !answeredLive) {
+      // The cold open (see COLD_OPEN_WAIT_MS). A fetch that answers after the copy drew still marks
+      // the page live, so the next poll's failure is an in-session blip and not a saved copy.
+      void fetching.then(
+        () => markAnsweredLive(),
+        () => false,
+      );
+      const outcome = await raceColdOpen(fetching);
+      if (outcome === COLD) {
+        const saved = await staleHome(scope, viewAll);
+        if (saved.stale === true) return saved;
+        snap = await fetching;
+      } else snap = outcome;
+    } else snap = await fetching;
+    answeredLive = true;
     lastSnapshot.set(snapshotKey(scope, viewAll), snap);
+    lastSnapshotAt.set(snapshotKey(scope, viewAll), Date.now());
     // Write-through: the same body, dated, in a store that outlives this page (lib/last-seen.ts).
     saveLastSnapshot(scope, snap, undefined, viewAll);
     rememberAuthError(scope, false);
@@ -337,7 +470,7 @@ export async function rootLoader({ request }: { request?: Request } = {}): Promi
     if (isAbortError(e)) throw e; // superseded revalidation — let React Router drop it
     rememberAuthError(scope, isAuthError(e));
     // Keep the last good herd on screen, flagged so the ConnectionBanner can say "reconnecting…".
-    return staleHome(scope, viewAll);
+    return { ...(await staleHome(scope, viewAll)), failure: readFailureKind(e) };
   }
 }
 
@@ -349,16 +482,23 @@ function paneKey(paneId: string, scope?: Scope): string {
 }
 
 const lastPaneText = new Map<string, string>();
+// When each of those was fetched, so a mirror drawn from MEMORY is dated by its own answer. Evicted
+// with the text it dates.
+const lastPaneTextAt = new Map<string, number>();
 // Cap the per-pane stale-text cache so it can't grow without bound over a long session of opening
 // many panes. Evict the oldest (insertion-order) entry beyond the cap — dumb FIFO is plenty for a
 // phone that views one pane at a time.
 const PANE_TEXT_MAX = 20;
 
-function rememberPaneText(key: string, text: string): void {
+function rememberPaneText(key: string, text: string, at: number = Date.now()): void {
   lastPaneText.set(key, text);
+  lastPaneTextAt.set(key, at);
   if (lastPaneText.size > PANE_TEXT_MAX) {
     const oldest = lastPaneText.keys().next().value;
-    if (oldest !== undefined) lastPaneText.delete(oldest);
+    if (oldest !== undefined) {
+      lastPaneText.delete(oldest);
+      lastPaneTextAt.delete(oldest);
+    }
   }
 }
 
@@ -408,17 +548,75 @@ export function resetRequestedLines(paneId?: string, scope?: Scope): void {
   else requestedLines.delete(paneKey(paneId, scope));
 }
 
+/**
+ * The pane's row from a herd this phone kept: memory first, then the on-device store.
+ *
+ * Read only for the pane page, and never folded into the herd a view draws: the widened and the
+ * narrow body stay apart (a narrow view must not draw a widened herd). What this answers is one
+ * question about one pane, "what was it?", from any kept herd that can address it:
+ *
+ * 1. the herd at the pane's own address, whose rows name neither dimension;
+ * 2. the widened herd of the pane's machine, and of its own address, whose rows name their session;
+ * 3. on a crew, for a pane on a member's primary session, the lead's merged herd, whose rows name
+ *    their machine.
+ *
+ * A row from a herd at another address counts only when it names the dimension that differs, so a
+ * `w1:p1` of one session is never taken for the `w1:p1` of another. `findPane` then matches within
+ * the pane's address, as the live lookup does.
+ */
+async function savedPaneRow(paneId: string, scope: Scope): Promise<AgentView | undefined> {
+  const homeHost = internScope({ host: scope.host });
+  const lead = internScope({});
+  const sources: { scope: Scope; all: boolean; needsSession: boolean; needsHost: boolean }[] = [
+    { scope, all: false, needsSession: false, needsHost: false },
+    { scope: homeHost, all: true, needsSession: scope.session !== undefined, needsHost: false },
+  ];
+  if (scope.session !== undefined) sources.push({ scope, all: true, needsSession: true, needsHost: false });
+  if (scope.host !== undefined) {
+    if (scope.session === undefined) sources.push({ scope: lead, all: false, needsSession: false, needsHost: true });
+    sources.push({ scope: lead, all: true, needsSession: scope.session !== undefined, needsHost: true });
+  }
+  const pick = (snap: SnapshotResponse, source: (typeof sources)[number]): AgentView | undefined => {
+    const panes = [...snap.agents, ...(snap.shellPanes ?? [])].filter(
+      (p) => (!source.needsSession || p.session !== undefined) && (!source.needsHost || p.host !== undefined),
+    );
+    return findPane(panes, paneId, scope, snap.servers, snap.sessions);
+  };
+  for (const source of sources) {
+    const held = lastSnapshot.get(snapshotKey(source.scope, source.all));
+    const row = held === undefined ? undefined : pick(held, source);
+    if (row !== undefined) return row;
+  }
+  for (const source of sources) {
+    const kept = await loadLastSnapshot(source.scope, source.all);
+    const row = kept === null ? undefined : pick(kept.value, source);
+    if (row !== undefined) return row;
+  }
+  return undefined;
+}
+
 // Last-known pane payload, flagged degraded — stale text (empty if this pane was never fetched),
 // truncated cleared, revision 0 (the prompt-select guard rejects a 0-revision mismatch anyway). Shared
 // by the failed-refresh catch and the offline navigation fast path, so both return the same shape.
 //
-// Same two tiers as staleHome: the module cache, then the write-through sessionStorage mirror that
+// Same two tiers as staleHome: the module cache, then the write-through on-device mirror that
 // survives the page being discarded. A restored mirror is promoted into the module cache.
-function stalePane(paneId: string, scope: Scope, lines: number): PaneData {
+async function stalePane(paneId: string, scope: Scope, lines: number, outage = false): Promise<PaneData> {
   const key = paneKey(paneId, scope);
-  const restored = loadLastPaneText(scope, paneId);
-  const text = lastPaneText.get(key) ?? restored?.value ?? "";
-  if (text) rememberPaneText(key, text);
+  // Refused for want of pairing: no kept text, for the reason staleHome gives.
+  const refused = isNotPaired();
+  // Memory first, as in staleHome: the store is read only when this page holds no text for the pane.
+  const held = refused ? undefined : lastPaneText.get(key);
+  const restored = refused || held !== undefined ? null : await loadLastPaneText(scope, paneId);
+  const text = refused ? "" : (held ?? restored?.value ?? "");
+  const at = held !== undefined ? lastPaneTextAt.get(key) : restored?.at;
+  if (text && held === undefined && at !== undefined) rememberPaneText(key, text, at);
+  const lastSeenAt = text ? at : undefined;
+  const stale = drawnFromSave(lastSeenAt, outage);
+  // A saved copy on screen is not a live pane: its dialog buttons and Send go off at once
+  // (lib/liveness.ts, M46 spec 11), with no debounce.
+  if (stale) markSavedCopy(paneId, scope);
+  const savedPane = refused ? undefined : await savedPaneRow(paneId, scope);
   return {
     paneId,
     scope,
@@ -428,7 +626,9 @@ function stalePane(paneId: string, scope: Scope, lines: number): PaneData {
     revision: 0,
     error: true,
     authError: hasAuthError(scope),
-    lastSeenAt: text ? restored?.at : undefined,
+    lastSeenAt,
+    stale,
+    savedPane,
   };
 }
 
@@ -450,6 +650,17 @@ const NO_ECHO_TAIL_LINES = 40;
 function holdsNoEchoPrompt(text: string): boolean {
   const tail = text.split("\n").slice(-NO_ECHO_TAIL_LINES).join("\n");
   return detectNoEchoPrompt(splitLines(parseAnsi(tail))) !== null;
+}
+
+/**
+ * Start the read `paneLoader` will need for this pane, from a row's `pointerdown`, so the answer is
+ * usually in by the tap's `click` (lib/pane-prefetch.ts). Returns a promise that settles when it is,
+ * and never rejects. Nothing starts during a known outage, where the loader answers from its cache
+ * without a read.
+ */
+export function prefetchPaneData(paneId: string, scope: Scope | undefined): Promise<void> {
+  if (isLostLatched()) return Promise.resolve();
+  return prefetchPane(paneId, scope, getRequestedLines(paneId, scope));
 }
 
 export async function paneLoader({
@@ -477,11 +688,59 @@ export async function paneLoader({
   // empty degraded pane if never visited) INSTANTLY — never a 10s hang on a fetch that can't land.
   if (isNavigation && isLostLatched()) return stalePane(paneId, scope, lines);
 
+  // A PANE WITH NO SCREEN HAS NO MIRROR TO READ (ADR 0099 point 9). Its machine answers a mirror read
+  // with a refusal, which this loader would turn into a degraded pane on every poll: the connection
+  // bar flickering, the composer locked for want of text, the saved-copy rules reading an empty
+  // screen as an outage. So no read is made. What the pane IS comes from the snapshot, and its
+  // conversation from the Chat read, so this answers an empty, healthy mirror. The pane counts as live
+  // while the bridge is not known to be lost (lib/liveness.ts), which is what its Chat reads and its
+  // controls ask. Decided by the machine's own declaration, so a bridge that has not said no is read.
+  if (!paneGridOf(scope)) {
+    markPaneLive(paneId, Date.now(), scope);
+    markPollResult(false);
+    return {
+      paneId,
+      scope,
+      text: "",
+      truncated: false,
+      requestedLines: lines,
+      revision: 0,
+      error: false,
+      authError: false,
+      stale: false,
+    };
+  }
+
   try {
     // On a 304 fetchPane returns the cached body, so `read.text` is populated either way; the
     // `?? lastPaneText` is just belt-and-suspenders. Both paths are a success (not the error
     // branch) so the connection bar doesn't flicker on an unchanged poll.
-    const read: PaneReadResponse = await fetchPane(paneId, lines, scope, request?.signal);
+    // A navigation takes the read the row's `pointerdown` already started, when one is fresh
+    // (lib/pane-prefetch.ts). That read left the pane's unseen mark alone, so the seen read follows
+    // it, once it is in: by then the ETag cache holds its body and the bridge answers a 304. Nothing
+    // waits on it. A poll never takes a prefetched read.
+    const prefetched = isNavigation ? takePanePrefetch(paneId, scope, lines) : undefined;
+    if (prefetched) {
+      const markSeen = () => fetchPane(paneId, lines, scope).catch(() => {});
+      void prefetched.then(markSeen, markSeen);
+    }
+    const reading = prefetched ?? fetchPane(paneId, lines, scope, request?.signal);
+    let read: PaneReadResponse;
+    if (isNavigation && !answeredLive) {
+      // The cold open, as in rootLoader: a pane opened straight from a killed PWA draws its saved
+      // text at once when the bridge is slow to answer.
+      void reading.then(
+        () => markAnsweredLive(),
+        () => false,
+      );
+      const outcome = await raceColdOpen(reading);
+      if (outcome === COLD) {
+        const saved = await stalePane(paneId, scope, lines);
+        if (saved.stale === true) return saved;
+        read = await reading;
+      } else read = outcome;
+    } else read = await reading;
+    answeredLive = true;
     const text = read.text || lastPaneText.get(key) || "";
     // THE "IS THE SCREEN STILL MOVING" SIGNAL, taken at the one place that can honestly answer it.
     //
@@ -495,7 +754,9 @@ export async function paneLoader({
     markPollResult(read.notModified !== true && text !== lastPaneText.get(key));
     rememberPaneText(key, text);
     // Write-through, EXCEPT while the pane is asking for a secret — see holdsNoEchoPrompt (ADR 0017).
-    if (holdsNoEchoPrompt(text)) dropLastPaneText(scope, paneId);
+    // The drop is the wipe's session-text subset for this one pane (lib/wipe.ts, M46 spec 02): its
+    // stored mirror and its draft, never the token.
+    if (holdsNoEchoPrompt(text)) void wipeDevice("password", { scope, paneId });
     else saveLastPaneText(scope, paneId, text);
     rememberAuthError(scope, false);
     return {
@@ -508,12 +769,16 @@ export async function paneLoader({
       revision: read.revision,
       error: false,
       authError: false,
+      stale: false,
     };
   } catch (e) {
     if (isAbortError(e)) throw e; // superseded revalidation — let React Router drop it
     rememberAuthError(scope, isAuthError(e));
-    // Genuine network / server failure: show stale text flagged as degraded.
-    return stalePane(paneId, scope, lines);
+    // Genuine network / server failure: show stale text flagged as degraded. A read that got no
+    // answer at all is the saved copy at once (see drawnFromSave), unless the wake's one strike
+    // covers it: the herd read of the same poll did not latch either, and the retry decides.
+    const outage = readFailureKind(e) === "network" && !wakeStrikeHolds();
+    return stalePane(paneId, scope, lines, outage);
   }
 }
 
@@ -535,18 +800,36 @@ export interface DevicesData {
   error: boolean;
 }
 
+/**
+ * What a route renders when the loader did not run or threw. Exported because two callers need the
+ * same fallback: the Settings System page's `useLoaderData()` default, and its tests.
+ */
+export const EMPTY_DEVICES: DevicesData = { enforced: false, current: null, devices: [], error: false };
+
 export async function devicesLoader({ request }: { request?: Request } = {}): Promise<DevicesData> {
   try {
     const res = await fetchDevices(request?.signal);
     // This read is the ONLY thing that can positively clear (or set) the refusal latch without a
     // write: it is the one endpoint that reports back who our token authenticated as. Enforcement
     // off means there is nothing to be unpaired from.
+    // An expired token ends the pairing here as a 403 would, so it goes through the wipe. A token
+    // that authenticates as nobody only latches: the wipe waits for the bridge's exact 403 body.
     if (!res.enforced || res.current !== null) clearNotPaired();
+    else if (res.currentExpired === true) pairingRefused("expired");
     else markNotPaired();
+    // This pairing's own expiry caps what the store keeps under it (lib/store.ts). Only an answer
+    // that names this device says anything about its lifetime.
+    if (res.current !== null) {
+      rememberPairingExpiry(res.devices.find((device) => device.current)?.expiresAt ?? null);
+    }
     return { enforced: res.enforced, current: res.current, devices: res.devices, error: false };
   } catch (e) {
     if (isAbortError(e)) throw e; // superseded revalidation — let React Router drop it
-    // A failed read says nothing about pairing, so the latch is left exactly as it was.
+    // Reads need the token (ADR 0086), so an unpaired device is refused this very read. That is an
+    // answer, not a failure: pairing is on and this device is not in it, and the card then offers the
+    // pair form. The latch was already set where the refusal was read (lib/api.ts).
+    if (isPairingRefusal(e)) return { enforced: true, current: null, devices: [], error: false };
+    // Any other failed read says nothing about pairing, so the latch is left exactly as it was.
     return { enforced: false, current: null, devices: [], error: true };
   }
 }
@@ -579,6 +862,61 @@ export async function crewLoader({ request }: { request?: Request } = {}): Promi
     // Solo or peer: there is no crew to report, and that is a complete answer.
     if (isApiErrorStatus(e, 404)) return { status: null, error: false };
     return { status: null, error: true };
+  }
+}
+
+// ── The machines census (the /machines pages) ────────────────────────────────
+//
+// `crewLoader`'s shape for the same reasons: it rides the poll loop (a firing alert and a quiet
+// machine should show without a reload), and a failure degrades instead of throwing. A 404 is an
+// answer, not a failure: only a lead or a solo collie serves `/api/machines`, so a peer opened
+// directly says "there is nothing to show here" in one card.
+//
+// `/machines/:id` reads this same loader for its row. Its history is NOT loaded here: 1440 points
+// every poll tick would be the waste History opts out of, so the detail page fetches it on open
+// and then once a minute while visible (routes/machine.tsx).
+
+export interface MachinesData {
+  /** The census, or `null` when this collie serves none (404) or the fetch failed. */
+  census: MachinesResponse | null;
+  /** True only for a fetch that FAILED. A 404 is an answer, not an error. */
+  error: boolean;
+}
+
+/** How many complete minutes the list's small charts show: the Crew tab's half hour. */
+export const MACHINE_SPARK_MINUTES = 30;
+
+/**
+ * The last census read, so the next one can keep the identity of every row that did not change
+ * (`shareEqual`). A poll tick that brings the same numbers then re-renders no card and no chart.
+ */
+let lastCensus: MachinesResponse | null = null;
+
+/** `fresh`, with every row equal to the last census's row swapped for that row's own object. */
+export function keepCensusIdentity(fresh: MachinesResponse): MachinesResponse {
+  const kept = lastCensus === null ? fresh : shareEqual(lastCensus, fresh);
+  lastCensus = kept;
+  return kept;
+}
+
+/** One machine's page: the census without the small charts, which the page does not draw. */
+export async function machinesLoader({ request }: { request?: Request } = {}): Promise<MachinesData> {
+  return machinesRead(request?.signal, undefined);
+}
+
+/** The Machines list: the census with each card's last half hour of CPU and memory. */
+export async function machinesListLoader({ request }: { request?: Request } = {}): Promise<MachinesData> {
+  return machinesRead(request?.signal, MACHINE_SPARK_MINUTES);
+}
+
+async function machinesRead(signal: AbortSignal | undefined, spark: number | undefined): Promise<MachinesData> {
+  try {
+    const census = await fetchMachines(signal, spark === undefined ? {} : { spark });
+    return { census: keepCensusIdentity(census), error: false };
+  } catch (e) {
+    if (isAbortError(e)) throw e; // superseded revalidation, let React Router drop it
+    if (isApiErrorStatus(e, 404)) return { census: null, error: false };
+    return { census: null, error: true };
   }
 }
 

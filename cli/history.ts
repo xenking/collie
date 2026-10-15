@@ -1,5 +1,12 @@
-import { KNOWN_HARNESS_NAMES } from "../bridge/journal/registry.ts";
+import {
+  AGENT_ALIASES,
+  DISCOVERS_OWN_SESSIONS,
+  KNOWN_HARNESS_NAMES,
+  REPORTS_SESSION_ON_FIRST_PROMPT,
+} from "../bridge/journal/registry.ts";
 import { resolveJournalRoots } from "../bridge/config.ts";
+import { HOST, type Host } from "../bridge/host.ts";
+import { compareSemver } from "../bridge/update.ts";
 import type { CliContext } from "./context.ts";
 import { bad, ok, skipped, warn, type Finding } from "./finding.ts";
 import type { Exec, Files } from "./sys.ts";
@@ -7,8 +14,9 @@ import type { Exec, Files } from "./sys.ts";
 // ── Why the History link is not there (issue #137) ───────────────────────────
 //
 // "Show entire history" and the pane's history icon key on ONE boolean the browser is handed:
-// `hasSession`. The bridge sets it (`bridge/types.ts` § `toPaneWire`) only when BOTH hold — the pane
-// record carries a session ref, and the agent has a journal adapter (`bridge/journal/registry.ts`).
+// `hasSession`. The bridge sets it (`bridge/types.ts` § `toPaneWire`) when the agent has a journal
+// adapter and a session is addressable — reported on the pane record, or found by an adapter that
+// discovers its own (`DISCOVERS_OWN_SESSIONS`).
 //
 // The session ref reaches Herdr from ONE place: the agent-side hook `herdr integration install
 // <agent>` writes. That hook exits silently when its environment is not what it expects, and it
@@ -16,6 +24,10 @@ import type { Exec, Files } from "./sys.ts";
 // that agent is restarted. Miss any of it and the pane looks perfectly normal while both affordances
 // simply are not drawn, with nothing anywhere saying why. `/api/pane/:id/history` is not consulted
 // for the hide, so its own `no-log` / `disabled` reasons never get a chance to explain themselves.
+//
+// One agent's session start is late on purpose: Codex fires the hook only on its first prompt
+// (issue #294, `REPORTS_SESSION_ON_FIRST_PROMPT`), so its pane with no session is explained here and
+// never counted as a fault on its own.
 //
 // This section walks that chain in order — versions, the integration per agent, the interpreter the
 // hook needs, what the running bridge actually reports per pane, and where a journal would be read
@@ -25,8 +37,16 @@ import type { Exec, Files } from "./sys.ts";
 // status`, one `which`, one GET of this bridge's own `/api/snapshot`, and `exists`/`list` on the
 // journal roots. It installs nothing and restarts nothing.
 
-/** Which agents this section reports on: the ones this build could actually read a journal for. */
+/** The agents this build has a journal ADAPTER for. Each owns a root list, so `readJournalRoots` walks these. */
 export const JOURNAL_AGENTS: readonly string[] = KNOWN_HARNESS_NAMES;
+
+/**
+ * Which agents this section reports on per pane and per hook: every name the bridge resolves to a
+ * journal, so an alias counts. Oh My Pi reports itself as `omp` and reads through pi's adapter
+ * (`AGENT_ALIASES`), and its hook is its own (`herdr integration install omp`). Left out, an `omp`
+ * pane with no session was invisible here while the bridge hid its History and Chat with no word.
+ */
+export const JOURNAL_AGENT_NAMES: readonly string[] = [...JOURNAL_AGENTS, ...Object.keys(AGENT_ALIASES)];
 
 // ── `herdr integration status` ───────────────────────────────────────────────
 
@@ -126,7 +146,7 @@ export function parseSnapshotPanes(text: string): SnapshotPane[] | null {
 /** Pair each pane with whether this build could read a journal for its agent. */
 export function paneVerdicts(
   panes: readonly SnapshotPane[],
-  journalAgents: readonly string[] = JOURNAL_AGENTS,
+  journalAgents: readonly string[] = JOURNAL_AGENT_NAMES,
 ): PaneVerdict[] {
   const known = new Set(journalAgents);
   return panes.map((pane) => ({ pane, journalled: known.has(pane.agent) }));
@@ -135,6 +155,26 @@ export function paneVerdicts(
 /** The panes that would hide their History link silently: a journalled agent with no session ref. */
 export const silentPanes = (verdicts: readonly PaneVerdict[]): PaneVerdict[] =>
   verdicts.filter((v) => v.journalled && !v.pane.hasSession);
+
+/**
+ * Whether `agent` reports its session only once its first prompt is submitted (issue #294, reason at
+ * `REPORTS_SESSION_ON_FIRST_PROMPT`). Such a pane with no session may just not have had a turn, which
+ * is not a fault, so neither `agent-sessions` nor `integration-<agent>` counts it as one on its own.
+ */
+export const reportsOnFirstPrompt = (agent: string): boolean => REPORTS_SESSION_ON_FIRST_PROMPT.includes(agent);
+
+/** `w2:p5 (claude), w4:p2 (codex)`: how a finding names the panes it is about. */
+const namePanes = (panes: readonly PaneVerdict[]): string =>
+  panes.map((v) => `${v.pane.paneId} (${v.pane.agent})`).join(", ");
+
+/** The one explanation both findings give for a first-prompt pane with no session yet. */
+export function firstPromptNote(agent: string): string {
+  return (
+    `${agent} reports its session to Herdr only after its first prompt, so a pane with no turn yet has none;` +
+    ` if one still has none after a reply, review its hooks with \`/hooks\` in ${agent} (a hook left` +
+    ` untrusted never runs), then \`herdr integration install ${agent}\` and a new session`
+  );
+}
 
 // ── Journal roots ────────────────────────────────────────────────────────────
 
@@ -172,7 +212,17 @@ export interface HistoryDeps {
   readonly files: Pick<Files, "exists" | "list">;
   /** The bridge's own `/api/snapshot`: its body, its refusal, or silence. */
   readonly snapshot: () => Promise<SnapshotRead>;
+  /** Which platform's Herdr minimum applies; the running machine's when absent. */
+  readonly host?: Host;
 }
+
+/**
+ * The oldest Herdr a Windows host is checked against. 0.9.3 is the build Collie was verified with on
+ * the Windows 11 test VM (2026-10-01: the named-pipe dial, the supervisor, restart). An older Windows
+ * build may work, and nobody has checked, so `doctor` warns rather than fails. Linux and macOS have
+ * no minimum here: every Herdr Collie supports there predates this check.
+ */
+export const HERDR_MIN_WINDOWS = "0.9.3";
 
 const INSTALL_NOTE = "then start a new session of that agent in the pane (hooks load at session start)";
 
@@ -199,7 +249,7 @@ export async function historyFindings(deps: HistoryDeps): Promise<Finding[]> {
   const verdicts = panes === null ? null : paneVerdicts(panes);
   return [
     herdr,
-    ...JOURNAL_AGENTS.map((agent) => integration(agent, status, verdicts)),
+    ...JOURNAL_AGENT_NAMES.map((agent) => integration(agent, status, verdicts)),
     python(deps),
     sessions(verdicts, read),
     journalRoots(deps),
@@ -226,7 +276,17 @@ function herdrVersion(deps: HistoryDeps): Finding {
     );
   }
   const version = firstLine(asked.stdout);
-  return ok(check, version === "" ? "herdr answered without naming a version" : version);
+  if (version === "") return ok(check, "herdr answered without naming a version");
+  const host = deps.host ?? HOST;
+  const named = /\b(\d+\.\d+\.\d+)\b/.exec(version)?.[1];
+  if (host.platform === "win32" && named !== undefined && compareSemver(named, HERDR_MIN_WINDOWS) < 0) {
+    return warn(
+      check,
+      `${version} — older than ${HERDR_MIN_WINDOWS}, the oldest Herdr for Windows Collie has been checked with`,
+      `update Herdr to ${HERDR_MIN_WINDOWS} or newer`,
+    );
+  }
+  return ok(check, version);
 }
 
 /** `herdr integration status`, read once and handed to every per-agent line. */
@@ -261,6 +321,11 @@ function integration(
   }
   const line = status.get(agent);
   if (line === undefined) {
+    // An adapter that discovers its own session needs no hook at all: no Herdr build lists one,
+    // and none has to. Green, not skipped — there is nothing to do here.
+    if (DISCOVERS_OWN_SESSIONS.includes(agent)) {
+      return ok(check, "no hook — the adapter finds the session log itself");
+    }
     return skipped(
       check,
       `this Herdr build does not list ${agent} — Collie can read its journal, Herdr has no hook for it`,
@@ -270,14 +335,21 @@ function integration(
   const affected = (verdicts ?? []).filter((v) => v.pane.agent === agent && !v.pane.hasSession);
   const running = affected.map((v) => v.pane.paneId).join(", ");
   if (line.state === "installed") {
-    return affected.length === 0
-      ? ok(check, "installed and current")
-      : warn(
-          check,
-          `installed and current, and ${String(affected.length)} ${agent} pane(s) still report no` +
-            ` session (${running}) — those sessions started before the hook did`,
-          `restart ${agent} in ${running}; \`herdr integration status\` confirms the hook is current`,
-        );
+    if (affected.length === 0) return ok(check, "installed and current");
+    // A current hook under a pane that has had no turn yet is the normal state for these agents.
+    if (reportsOnFirstPrompt(agent)) {
+      return ok(
+        check,
+        `installed and current; ${String(affected.length)} ${agent} pane(s) report no session yet` +
+          ` (${running}) — ${firstPromptNote(agent)}`,
+      );
+    }
+    return warn(
+      check,
+      `installed and current, and ${String(affected.length)} ${agent} pane(s) still report no` +
+        ` session (${running}) — those sessions started before the hook did`,
+      `restart ${agent} in ${running}; \`herdr integration status\` confirms the hook is current`,
+    );
   }
   if (line.state === "unknown") {
     return warn(
@@ -336,15 +408,18 @@ function sessions(verdicts: readonly PaneVerdict[] | null, read: SnapshotRead): 
     // A REFUSAL IS NOT A SILENCE (issue #238). The bridge fails closed on a request carrying no
     // identity when `tailscale serve` is in front, and an absent header cannot be read as "a local
     // caller" — a tagged node arrives without one too (`checkAccess`, bridge/server.ts). This verb
-    // sends the login it is configured with (`ownSnapshot`, doctor.ts), so a 403 here says that
-    // login is empty or is not the one the bridge was given, NOT that the bridge is down.
+    // sends the login it is configured with and the bridge's local read credential
+    // (`ownReadHeaders`, doctor.ts; reads need a pairing token since ADR 0086). So a 403 here says
+    // the login is empty or wrong, or the bridge wrote no `local-secret` (it predates the credential,
+    // or could not write its state folder), NOT that the bridge is down.
     if (read.kind === "refused") {
       return skipped(
         check,
         `the bridge refused this check's own read of \`/api/snapshot\` (${String(read.status)}) — it is up and` +
           " serving, and no pane can be checked from here",
-        "name your tailnet login in `COLLIE_TRUSTED_USER` for this instance (`collie config` shows what" +
-          " is set), restart the bridge so it reads the change, then re-run `collie doctor`",
+        "`collie restart` so the bridge writes its local read credential; if it still refuses, name your" +
+          " tailnet login in `COLLIE_TRUSTED_USER` for this instance (`collie config` shows what is set)," +
+          " restart again, then re-run `collie doctor`",
       );
     }
     return skipped(
@@ -362,11 +437,21 @@ function sessions(verdicts: readonly PaneVerdict[] | null, read: SnapshotRead): 
     `${String(verdicts.length)} agent pane(s), ${String(journalled)} of them on an agent this build can` +
     " read a journal for";
   if (silent.length === 0) return ok(check, `${summary} — every one of those reports a session`);
-  const named = silent.map((v) => `${v.pane.paneId} (${v.pane.agent})`).join(", ");
+  // Issue #294: a pane of an agent that reports only on its first prompt may just not have had a turn.
+  // It is named and explained, and it never makes this line an error on its own.
+  const waiting = silent.filter((v) => reportsOnFirstPrompt(v.pane.agent));
+  const faulty = silent.filter((v) => !reportsOnFirstPrompt(v.pane.agent));
+  const waitingAgents = [...new Set(waiting.map((v) => v.pane.agent))];
+  const notYet =
+    waiting.length === 0
+      ? ""
+      : `; ${String(waiting.length)} report no session YET: ${namePanes(waiting)} — ` +
+        waitingAgents.map((agent) => firstPromptNote(agent)).join("; ");
+  if (faulty.length === 0) return ok(check, `${summary}${notYet}`);
   return bad(
     check,
-    `${summary}; ${String(silent.length)} report NO session: ${named} — their History link and icon are` +
-      " hidden, and the pane looks otherwise normal",
+    `${summary}; ${String(faulty.length)} report NO session: ${namePanes(faulty)} — their History link and icon are` +
+      ` hidden, and the pane looks otherwise normal${notYet}`,
     `\`herdr integration install <agent>\` for each agent named above (the \`integration-…\` lines say which),` +
       ` ${INSTALL_NOTE}`,
   );

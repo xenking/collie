@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs";
+
 import { expect, test, type Page } from "@playwright/test";
 
 import { en } from "@/lib/i18n/messages/en";
 import { SERVER_BUILD_HEADER } from "@/lib/server-build";
 import { fixtureSnapshot } from "@/test/handlers";
-import type { UpdateInfo, UpdatePeerLeg, UpdateRun, UpdateRunState } from "@/lib/types";
+import type { UpdateCrewMember, UpdateInfo, UpdatePeerLeg, UpdateRun, UpdateRunState } from "@/lib/types";
 
 import { fill, installApiStub } from "./fixtures/api";
 import {
@@ -11,13 +13,15 @@ import {
   clearDelay,
   clearFail,
   clearThrottle,
+  holdSwapServer,
   readBuildStamp,
   readEntryScript,
+  releaseSwapServer,
   serveBuild,
   setThrottle,
 } from "./fixtures/builds";
 
-// THE UPDATE IN PROGRESS TAKES THE SCREEN, IN A REAL BROWSER (M28/01).
+// THE UPDATE IN PROGRESS TAKES THE SCREEN, IN A REAL BROWSER (M28/01, update mode since ADR 0064).
 //
 // Two cases over the one path no unit test can reach. The reducer's own cross-product is pinned in
 // `src/lib/update-screen.test.ts`, and the sheet's DOM in `src/components/update-screen.test.tsx`;
@@ -26,7 +30,8 @@ import {
 //   1. `inert` on the wrapper in `App.tsx` actually takes the app behind out of reach;
 //   2. the file count on this device's own row comes off a REAL service-worker precache of a REAL new
 //      bundle, one message per completed asset (`src/sw.ts`);
-//   3. the page reloads ONCE, on the controller swap, and the toast that follows names the version.
+//   3. the page reloads ONCE, on the controller swap, and the document that boots reopens update mode
+//      on Done, because the claim outlived the page. `update-screen.spec.ts` measures the panel's boxes.
 //
 // THE SWAP SERVER, NOT `vite preview`. The bundle has to change under a browser that is already
 // running one, which is what `e2e/serve-builds.ts` is for, and a swap is destructive to every other
@@ -41,17 +46,32 @@ import {
 /** The projects this file runs in: the phone, on the `app` target. A sheet has a viewport, but a
  *  service-worker precache of two real bundles does not get faster at the tablet size. */
 const PHONE_PROJECTS = new Set(["app-phone", "phone"]);
+/** The no-shift walk runs in Safari's engine as well: geometry is where the two engines disagree. */
+const NO_SHIFT_PROJECTS = new Set([...PHONE_PROJECTS, "app-phone-webkit"]);
+const NO_SHIFT_TITLE = "every state of update mode keeps the panel's boxes where they were";
 
-/** The card's action button and its confirm, by their accessible names out of the app's dictionary. */
-const UPDATE_ACTION = fill(en["settings.updateCard.action"], { version: "1.9.0" });
-const CONFIRM = en["settings.updateCard.confirmAction"];
-/** The sheet's accessible name, and the two sentences the case reads off it. */
-const DIALOG = en["updateScreen.dialogAria"];
-const TRUTH = en["updateScreen.truth"];
-const DONE_SOLO = fill(en["updateScreen.done.solo"], { machine: "bluefin", version: "1.9.0" });
-/** The crew-only case's button and its confirm (M32). */
-const RETRY_CREW = en["settings.updateCard.retryCrew"];
-const RETRY_CONFIRM = en["settings.updateCard.retryConfirmAction"];
+/** This bundle's own version, read from the manifest the release bumps. */
+// SAFETY: web/package.json always carries a string `version`; scripts/check-version.sh enforces it.
+const OWN = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+const [OWN_MAJOR = 1, OWN_MINOR = 0] = OWN.split(".").map(Number);
+/** The versions the fake run moves between. Derived from this bundle's own, never written down: a
+ *  target above it gives this phone a step 6, and a release that bumps the version can never make
+ *  the fake run a no-op (1.13.0's release commit did exactly that to a hard-coded "1.13.0"). */
+const FROM = `${OWN_MAJOR}.${Math.max(OWN_MINOR - 1, 0)}.0`;
+const TO = `${OWN_MAJOR}.${OWN_MINOR + 1}.0`;
+/** The version the LAST run went from, on a lead that has updated before. */
+const EARLIER = `${OWN_MAJOR}.${Math.max(OWN_MINOR - 2, 0)}.0`;
+/** The card's action button, and "Start update" on update mode's first screen (ADR 0064). */
+const UPDATE_ACTION = fill(en["settings.updateCard.action"], { version: TO });
+const CONFIRM = en["updateScreen.action.start"];
+/** The lock line the panel shows while a run this device started is in flight. */
+const LOCK = en["updateScreen.lock"];
+const DONE = en["updateScreen.done.heading"];
+/** Step 1's heading, on the lead this "bridge" is. */
+const CHECK = fill(en["updateScreen.check.heading"], { lead: "bluefin" });
+const BACK = en["updateScreen.action.back"];
+/** The crew-only case's button (M32): it names the one member it is for. */
+const RETRY_CREW = fill(en["settings.updateCard.retryOne"], { name: "minibuch" });
 
 /** Where the reload counter lives. Read back after a navigation, so `sessionStorage`. */
 const RELOADS_KEY = "e2e:reloads";
@@ -59,7 +79,8 @@ const RELOADS_KEY = "e2e:reloads";
 test.use({ baseURL: SWAP_BASE_URL });
 
 // SERIAL: one origin, one service-worker scope, one served-directory pointer. Two of these at once
-// would be two deploys landing on each other.
+// would be two deploys landing on each other. Serial covers this file in one project only; the lock
+// in `beforeEach` (`holdSwapServer`) covers service-worker.spec.ts and the other projects.
 test.describe.configure({ mode: "serial" });
 
 /** The run this "bridge" is reporting right now. One assignment is one step of the run. */
@@ -76,32 +97,55 @@ let lead: "behind" | "current" = "behind";
 let crewLegs: UpdatePeerLeg[] | null = null;
 /** When the lead stamped that run settled, or null while a leg is open. */
 let crewSettledAt: number | null = null;
+/** The run id the fake run carries, and so the one this device's claim takes off the 202. Unset,
+ *  the run has none, which is what every case before #283 walked. */
+let fakeRunId: string | undefined;
+/**
+ * A start the 202 accepted whose record has not been written yet. The real bridge reads the record
+ * BEFORE it starts the updater, and the updater writes the new run's record a beat later; here that
+ * beat ends on the next read of any door, unless the case walks the run on first.
+ */
+let startPending = false;
 
 function runAt(state: UpdateRunState): UpdateRun {
-  return {
+  const run: UpdateRun = {
     schema: 1,
     state,
-    from: "1.8.2",
-    to: "1.9.0",
+    from: FROM,
+    to: TO,
     startedAt: Date.now() - 20_000,
     updatedAt: Date.now(),
     pid: 4242,
     attempt: 0,
   };
+  if (fakeRunId !== undefined) run.runId = fakeRunId;
+  return run;
 }
 
 /** Walk the run to its next state. The phone picks it up on its next poll of either door. */
 function step(state: UpdateRunState): void {
+  startPending = false;
   currentRun = runAt(state);
 }
 
+/** The updater writes the record of the run the 202 began, if it has not yet. Called by every read. */
+function landStart(): void {
+  if (startPending) step("preflight");
+}
+
 test.beforeEach(async ({ page }, testInfo) => {
+  const projects = testInfo.title === NO_SHIFT_TITLE ? NO_SHIFT_PROJECTS : PHONE_PROJECTS;
   test.skip(
-    !PHONE_PROJECTS.has(testInfo.project.name),
+    !projects.has(testInfo.project.name),
     "two real bundles and a real precache; a second viewport proves nothing new here",
   );
-  // Two builds, a precache over a throttled link, and a run walked through five states.
-  test.setTimeout(120_000);
+  // One case at a time on the swap server, across both files and every project (`holdSwapServer`
+  // says why). No timeout while queued for it (`holdSwapServer` bounds the wait itself), then the
+  // case's own budget on top of the wait: two builds, a precache over a throttled link, and a run
+  // walked through five states.
+  test.setTimeout(0);
+  const queued = await holdSwapServer();
+  test.setTimeout(120_000 + queued);
 
   clearDelay();
   clearFail();
@@ -112,6 +156,8 @@ test.beforeEach(async ({ page }, testInfo) => {
   lead = "behind";
   crewLegs = null;
   crewSettledAt = null;
+  fakeRunId = undefined;
+  startPending = false;
 
   await installBridge(page);
   await installReloadCounter(page);
@@ -131,8 +177,9 @@ async function installBridge(page: Page): Promise<void> {
   // rather than three that can disagree.
   await page.route(
     (url) => url.pathname === "/api/snapshot",
-    (route) =>
-      route.fulfill({
+    (route) => {
+      landStart();
+      return route.fulfill({
         status: 200,
         contentType: "application/json",
         headers: { [SERVER_BUILD_HEADER]: stampedBuildId },
@@ -149,12 +196,14 @@ async function installBridge(page: Page): Promise<void> {
           ],
           update: { ...updateInfo(), run: currentRun ?? undefined },
         }),
-      }),
+      });
+    },
   );
   await page.route(
     (url) => url.pathname === "/api/update/check",
-    (route) =>
-      route.fulfill({
+    (route) => {
+      landStart();
+      return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
@@ -168,25 +217,30 @@ async function installBridge(page: Page): Promise<void> {
           // The census. On the current lead, one member a release back: the retry's reason to exist.
           crew:
             lead === "current"
-              ? [{ name: "minibuch", version: "1.8.2", verdict: "green", reasons: [], asOf: Date.now() }]
+              ? [{ name: "minibuch", version: FROM, verdict: "green", reasons: [], asOf: Date.now() }]
               : [],
         }),
-      }),
+      });
+    },
   );
   // The standby door, on the second port in real life and on this origin here. It is the one reader
   // that still answers while the bridge restarts, which is the state this case walks through.
   await page.route(
     (url) => url.pathname === "/standby/update",
-    (route) =>
-      currentRun === null
+    (route) => {
+      landStart();
+      return currentRun === null
         ? route.fulfill({ status: 404, contentType: "text/plain", body: "no run" })
         : route.fulfill({
             status: 200,
             contentType: "application/json",
             body: JSON.stringify(currentRun),
-          }),
+          });
+    },
   );
-  // The 202. It mints nothing and starts nothing: the case owns the run from here.
+  // The 202, shaped as the real bridge shapes it. It starts nothing: the case owns the run from here.
+  // `run` is the record as it was at the tap, read before the start, so on a lead that has updated
+  // before it is the LAST run's (2026-09-26). The id of the run just begun rides beside it.
   await page.route(
     (url) => url.pathname === "/api/update",
     (route) => {
@@ -198,30 +252,33 @@ async function installBridge(page: Page): Promise<void> {
         return route.fulfill({
           status: 202,
           contentType: "application/json",
-          body: JSON.stringify({ ok: true, to: "1.9.0", major: false, run: null }),
+          body: JSON.stringify({ ok: true, to: TO, major: false, run: currentRun, runId: "run-e2e-crew" }),
         });
       }
-      step("preflight");
+      const before = currentRun;
+      fakeRunId ??= "run-e2e";
+      startPending = true;
       return route.fulfill({
         status: 202,
         contentType: "application/json",
-        body: JSON.stringify({ ok: true, to: "1.9.0", major: false, run: currentRun }),
+        body: JSON.stringify({ ok: true, to: TO, major: false, run: before, runId: fakeRunId }),
       });
     },
   );
 }
 
+// The release clears the three directives, and only for the case that holds the lock. This hook also
+// runs for a case `beforeEach` skipped, which never took the lock and must not touch the directives of
+// the case that did (the note above `LOCK` in `fixtures/builds.ts` says what that cost in CI).
 test.afterEach(() => {
-  clearThrottle();
-  clearDelay();
-  clearFail();
+  releaseSwapServer();
 });
 
 function updateInfo(): UpdateInfo {
   if (lead === "current") {
     const info: UpdateInfo = {
-      current: "1.9.0",
-      latest: "1.9.0",
+      current: TO,
+      latest: TO,
       latestUrl: null,
       releaseAvailable: false,
       majorAvailable: null,
@@ -233,14 +290,14 @@ function updateInfo(): UpdateInfo {
     // settle stamp is absent while a leg is open, exactly as the bridge sends it.
     if (crewLegs !== null) {
       info.peers = crewLegs;
-      info.peersTo = "1.9.0";
+      info.peersTo = TO;
       if (crewSettledAt !== null) info.settledAt = crewSettledAt;
     }
     return info;
   }
   return {
-    current: "1.8.2",
-    latest: "1.9.0",
+    current: FROM,
+    latest: TO,
     latestUrl: null,
     releaseAvailable: true,
     majorAvailable: null,
@@ -304,59 +361,87 @@ async function appIsInert(page: Page): Promise<boolean> {
   return page.evaluate(() => document.querySelectorAll("#root > [inert]").length > 0);
 }
 
-test("the sheet takes the screen for a run this device started, and the end names the version", async ({
+/**
+ * Watch, from inside the page, for update mode's Done heading. A poll can step between two frames of
+ * a heading that stood for one beat; an observer cannot. The mark lives on `<html>`, so it outlives
+ * the heading and ends with the document.
+ */
+async function watchForDone(page: Page): Promise<void> {
+  await page.evaluate((done: string) => {
+    const root = document.documentElement;
+    const look = () => {
+      for (const heading of document.querySelectorAll('[data-slot="update-heading"]')) {
+        if (heading.textContent?.includes(done) === true) root.dataset.e2eSawDone = "yes";
+      }
+    };
+    new MutationObserver(look).observe(document.body, { subtree: true, childList: true, characterData: true });
+    look();
+  }, DONE);
+}
+
+/** Has this document shown the Done heading since {@link watchForDone}? */
+async function sawDone(page: Page): Promise<boolean> {
+  return page.evaluate(() => document.documentElement.dataset.e2eSawDone === "yes");
+}
+
+test("update mode locks the app for a run this device started, reloads once at step 6, and ends on Done", async ({
   page,
 }) => {
+  // A LEAD THAT HAS UPDATED BEFORE (2026-09-26). Every source reports the last run's settled record
+  // until the new run writes its own, and the 202 carries that record too. The phone used to show it
+  // as this run's end: "Update finished" at 0:00 with the old versions, then "started on another
+  // device" once the real run spoke.
+  currentRun = {
+    ...runAt("done"),
+    from: EARLIER,
+    to: FROM,
+    runId: "run-e2e-earlier",
+    startedAt: Date.now() - 86_500_000,
+    updatedAt: Date.now() - 86_400_000,
+  };
   await page.goto("/settings/updates");
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await page.evaluate((key: string) => window.sessionStorage.setItem(key, "0"), RELOADS_KEY);
+  await watchForDone(page);
 
-  // The confirm, exactly as an operator takes it: one tap plus one confirm.
+  // The card's button opens update mode at Ready to start, and Start update is the confirm.
   await page.getByRole("button", { name: UPDATE_ACTION }).click();
   await page.getByRole("button", { name: CONFIRM }).click();
 
-  // THE SHEET TAKES THE SCREEN, and the app behind it is genuinely out of reach.
-  const sheet = page.getByRole("dialog", { name: DIALOG });
-  await expect(sheet).toBeVisible({ timeout: 15_000 });
-  await expect(sheet).toHaveAttribute("aria-modal", "true");
-  await expect(sheet.getByText(TRUTH)).toBeVisible();
+  // THE PANEL TAKES THE SCREEN, on step 1, and the app behind it is genuinely out of reach.
+  const panel = page.getByRole("dialog");
+  await expect(panel).toBeVisible({ timeout: 15_000 });
+  await expect(panel.getByRole("heading", { name: CHECK })).toBeVisible({ timeout: 15_000 });
+  await expect(panel).toHaveAttribute("aria-modal", "true");
+  await expect(panel.getByText(LOCK)).toBeVisible();
   expect(await appIsInert(page), "the wrapper in App.tsx is inert while the run is in flight").toBe(true);
-  // No close, because there is nothing to close to: the app behind cannot be used.
-  await expect(sheet.getByRole("button", { name: en["updateScreen.close"] })).toHaveCount(0);
+  // No way back while the run is in flight: the app behind cannot be used.
+  await expect(panel.getByRole("button", { name: BACK })).toHaveCount(0);
 
   // The run, walked through its states. Each one is a poll away, and the restart is the window where
   // only the standby door answers.
-  for (const state of ["staging", "restarting", "verifying"] as const) {
-    step(state);
-    await expect(sheet.getByRole("list", { name: en["updateScreen.rows.label"] })).toBeVisible();
-  }
-  await expect(sheet.getByText(en["updateScreen.state.verifying"])).toBeVisible({ timeout: 15_000 });
+  for (const state of ["staging", "restarting", "verifying"] as const) step(state);
+  await expect(panel.getByRole("heading", { name: "Checking the new version on bluefin" })).toBeVisible({ timeout: 15_000 });
+  expect(await sawDone(page), "nothing said Update finished before the lead's own run did").toBe(false);
 
-  // THE NEW BUNDLE ARRIVES, at a real rate. The machines are done; this phone is still fetching the
-  // bundle they now serve, which is the combination the reducer treats as legitimate.
+  // THE LEAD IS DONE, AND THAT IS NOT THE END. This phone's own step comes next: the bridge serves a
+  // new bundle, at a real rate, and update mode asks for it by itself.
   step("done");
   stampedBuildId = readBuildStamp("b").id;
   setThrottle({ match: readEntryScript("b"), bytesPerSecond: 8 * 1024 });
   serveBuild("b");
-  await page.evaluate(async () => {
-    const registration = await navigator.serviceWorker.getRegistration();
-    await registration?.update();
-  });
 
-  // THE PREMISE, ASSERTED RATHER THAN ASSUMED: a worker really is on its way in. Without this the
-  // assertion below would fail as "no file count" whatever the reason, including "nothing installed".
+  // THE PREMISE, ASSERTED RATHER THAN ASSUMED: a worker really is on its way in.
   await expect
     .poll(() => workerOnItsWayIn(page), { timeout: 20_000, intervals: [200] })
     .toBe(true);
 
-  // The file count. Off the worker's own per-asset message, so a number on screen is a number of
-  // assets that really landed.
-  // No trailing `\b`: the elapsed clock renders immediately after the word, so the text on screen is
-  // "12 of 28 files0:11" and a word boundary there never matches.
+  // The file count, off the worker's own per-asset message, on this phone's row.
   const counted = /\b(\d+) of (\d+) files/;
   await expect
-    .poll(async () => counted.test((await sheet.textContent()) ?? ""), { timeout: 40_000, intervals: [250] })
+    .poll(async () => counted.test((await panel.textContent()) ?? ""), { timeout: 40_000, intervals: [250] })
     .toBe(true);
+  expect(await appIsInert(page), "still locked while this phone downloads").toBe(true);
 
   // The link speeds up, the install finishes, the new worker takes control, and THAT is the reload.
   clearThrottle();
@@ -365,24 +450,69 @@ test("the sheet takes the screen for a run this device started, and the end name
     .toBe(readEntryScript("b"));
   expect(await reloadCount(page)).toBe(1);
 
-  // The app is back: the sheet closed itself and nothing is inert once the run is over.
-  await expect(page.getByRole("dialog", { name: DIALOG })).toHaveCount(0);
+  // THE NEW DOCUMENT REOPENS THE MODE, on Done: the claim outlived the page (ADR 0064). The end is a
+  // screen with a way back, never a toast alone.
+  const done = page.getByRole("dialog", { name: DONE });
+  await expect(done).toBeVisible({ timeout: 15_000 });
+  await done.getByRole("button", { name: BACK }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect.poll(() => appIsInert(page), { timeout: 10_000 }).toBe(false);
 
-  // THE END ANNOUNCES ITSELF, and it names the MACHINE: this install has no crew. The announcement
-  // goes through the app's own status channel (`lib/status.ts`), and that channel's SURFACES are the
-  // dashboard's floating pill and the pane header's title slot — the Settings tree has neither, which
-  // is a fact about this app and not about this feature. So the case goes where the pill is, which is
-  // also where an operator who just watched an update ends up. The announcement is per document, and
-  // it is windowed to ten minutes, so a fresh load moments after the run still carries it.
-  await page.goto("/");
-  await expect(page.getByText(DONE_SOLO)).toBeVisible({ timeout: 15_000 });
+  // And a later load does not announce it again.
+  await page.reload();
+  await expect(page.getByRole("button", { name: UPDATE_ACTION })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
-test("a device that did not start the run gets a badge, never a dialog", async ({ page, context }) => {
-  // The second page is a second DEVICE as far as this feature is concerned: `startedHere` is a
-  // document-scoped store (`lib/update-ribbon.ts`), and a tab that never posted the confirm has no
-  // claim on the screen. A takeover nobody asked for reads as hijacked.
+test("a run this device started that gives up before anything moved ends on its failed screen, with the reason (#283)", async ({
+  page,
+}) => {
+  // The 1.13.0 shape of #283: the updater closed its staging as `idle` with a reason, the reducer
+  // read `idle` as "no update at all", and the panel simply vanished mid-run. The reason was on the
+  // record the whole time.
+  const reason = "the new version did not start here (killed by SIGKILL): zsh: killed  collie version";
+  fakeRunId = "run-e2e-283";
+  await page.goto("/settings/updates");
+  await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+
+  await page.getByRole("button", { name: UPDATE_ACTION }).click();
+  const panel = page.getByRole("dialog");
+  await expect(panel.getByRole("heading", { name: fill(en["updateScreen.ready.heading"], { version: TO }) })).toBeVisible();
+  const base = await geometry(page);
+  await page.getByRole("button", { name: CONFIRM }).click();
+  await expect(panel.getByText(LOCK)).toBeVisible({ timeout: 15_000 });
+
+  step("staging");
+  await expect(panel.getByRole("heading", { name: fill(en["updateScreen.build.heading"], { version: TO, lead: "bluefin" }) })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  // The updater gives up: nothing moved, so the record goes back to `idle`, carrying the reason.
+  currentRun = { ...runAt("idle"), reason };
+  const failed = page.getByRole("dialog", { name: fill(en["updateScreen.failed.heading"], { lead: "bluefin" }) });
+  await expect(failed).toBeVisible({ timeout: 15_000 });
+  await expect(failed.getByText(reason)).toBeVisible();
+  await expect(failed.getByText(fill(en["updateScreen.failed.subtitle"], { lead: "bluefin", from: FROM }))).toBeVisible();
+  // Its boxes are where Ready to start put them (DESIGN.md §6).
+  expectSame("failed", await geometry(page), base);
+  expect(await spills(page), "failed: nothing spills out of its box").toEqual([]);
+  // Nothing is in flight any more: the lock line is gone, and there is a way back.
+  await expect(failed.getByText(LOCK)).toHaveCount(0);
+  await expect(failed.getByRole("button", { name: en["updateScreen.action.tryAgain"] })).toBeVisible();
+
+  await failed.getByRole("button", { name: BACK }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect.poll(() => appIsInert(page), { timeout: 10_000 }).toBe(false);
+
+  // Closed is closed: the same record on a later load does not bring the screen back.
+  await page.reload();
+  await expect(page.getByRole("button", { name: UPDATE_ACTION })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+test("a device that did not start the run gets a strip, never a lock", async ({ page, context }) => {
+  // The second page is a second DEVICE as far as this feature is concerned: the claim lives in the
+  // tab's own `sessionStorage` (`lib/update-ribbon.ts`), and a tab that never started the run has none.
   await page.goto("/settings/updates");
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
 
@@ -393,51 +523,56 @@ test("a device that did not start the run gets a badge, never a dialog", async (
   // The run starts on the FIRST page.
   await page.getByRole("button", { name: UPDATE_ACTION }).click();
   await page.getByRole("button", { name: CONFIRM }).click();
-  await expect(page.getByRole("dialog", { name: DIALOG })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("dialog")).toBeVisible({ timeout: 15_000 });
   step("staging");
 
-  // The second page shows one line it can open, and nothing takes its screen.
-  const badge = other.getByRole("button", { name: /bluefin|Update in progress/ });
-  await expect(badge.first()).toBeVisible({ timeout: 20_000 });
-  await expect(other.getByRole("dialog", { name: DIALOG })).toHaveCount(0);
-  expect(await appIsInert(other), "a device that did not start the run is never blocked").toBe(false);
+  // The second page shows one line with a View, and nothing takes its screen.
+  await expect(other.getByText(/Update running, started on another device/)).toBeVisible({ timeout: 20_000 });
+  await expect(other.getByRole("dialog")).toHaveCount(0);
+  expect(await appIsInert(other), "a device that did not start the run is never locked").toBe(false);
 
-  // Tapping it expands, and the expanded sheet there IS closable — it was never a takeover.
-  await badge.first().click();
-  const opened = other.getByRole("dialog", { name: DIALOG });
+  // View opens the panel read-only: no lock line, and a way back.
+  await other.getByRole("button", { name: en["updateScreen.strip.view"] }).click();
+  const opened = other.getByRole("dialog");
   await expect(opened).toBeVisible();
-  await expect(opened.getByRole("button", { name: en["updateScreen.close"] })).toBeVisible();
+  await expect(opened.getByText(LOCK)).toHaveCount(0);
+  await opened.getByRole("button", { name: BACK }).click();
+  await expect(other.getByRole("dialog")).toHaveCount(0);
   await other.close();
 });
 
 test("a run that moves only the members takes the screen on the device that tapped it (M32)", async ({
   page,
 }) => {
-  // The lead already runs the newest release; one member is a release back. "Retry crew update" is
-  // the one action, and the run it starts writes no record on the lead.
+  // The lead already runs the newest release; one member is a release back. The card's button names
+  // it, and the run it starts writes no record on the lead.
   lead = "current";
   await page.goto("/settings/updates");
 
   await page.getByRole("button", { name: RETRY_CREW }).click();
-  await page.getByRole("button", { name: RETRY_CONFIRM }).click();
+  await expect(page.getByRole("dialog", { name: RETRY_CREW })).toBeVisible();
+  await page.getByRole("button", { name: CONFIRM }).click();
 
   // THE SAME TAP TAKES THE SCREEN, before any sweep has folded the run, and the app is out of reach.
-  const sheet = page.getByRole("dialog", { name: DIALOG });
-  await expect(sheet).toBeVisible({ timeout: 15_000 });
+  const panel = page.getByRole("dialog");
+  await expect(panel.getByText(LOCK)).toBeVisible({ timeout: 15_000 });
   expect(await appIsInert(page), "the wrapper in App.tsx is inert while the crew run is in flight").toBe(true);
-  await expect(sheet.getByRole("button", { name: en["updateScreen.close"] })).toHaveCount(0);
   // The lead is honest about itself: already on the version, and not part of this run.
-  await expect(sheet.getByText(en["updateScreen.state.current"])).toBeVisible();
+  await expect(panel.getByText(fill(en["updateScreen.row.already"], { version: TO }))).toBeVisible();
 
-  // The first sweep folds the run: the member is moving, and the app stays blocked.
-  crewLegs = [{ name: "minibuch", state: "updating", version: "1.8.2", updatedAt: Date.now() }];
-  await expect(sheet.getByText(en["updateScreen.state.updating"])).toBeVisible({ timeout: 15_000 });
+  // The first sweep folds the run: the member is moving, and the app stays locked.
+  crewLegs = [{ name: "minibuch", state: "updating", version: FROM, updatedAt: Date.now() }];
+  await expect(panel.getByText(en["updateScreen.state.updating"], { exact: false })).toBeVisible({ timeout: 15_000 });
   expect(await appIsInert(page)).toBe(true);
 
-  // The member arrives and the lead stamps the run settled. The sheet goes, and the app is back.
-  crewLegs = [{ name: "minibuch", state: "done", version: "1.9.0", updatedAt: Date.now() }];
+  // The member arrives and the lead stamps the run settled. The mode ends on Done, and Back hands the
+  // app back.
+  crewLegs = [{ name: "minibuch", state: "done", version: TO, updatedAt: Date.now() }];
   crewSettledAt = Date.now();
-  await expect(page.getByRole("dialog", { name: DIALOG })).toHaveCount(0, { timeout: 15_000 });
+  const done = page.getByRole("dialog", { name: DONE });
+  await expect(done).toBeVisible({ timeout: 15_000 });
+  await done.getByRole("button", { name: BACK }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect.poll(() => appIsInert(page), { timeout: 10_000 }).toBe(false);
 });
 
@@ -463,3 +598,407 @@ async function bundleOnPage(page: Page): Promise<string> {
     .then((entry) => entry ?? "no entry script")
     .catch(() => "mid-navigation");
 }
+
+// ── UPDATE MODE: NOTHING IN THE PANEL MOVES (ADR 0064) ──────────────────────────────────────────
+//
+// Altan's rule for the build, after the drawn options shifted between "Members, one unreachable" and
+// "Phone downloading": nothing in the panel moves between any two states. The mechanism is fixed
+// boxes (`components/update-screen.tsx`'s header); this is the measurement. It walks one update
+// through every state a real bundle can be put in, at 375x812, and after each one reads the box of
+// the heading, the subtitle, every row, the note and the footer, and compares it with the first
+// screen, "Ready to start", to half a pixel.
+//
+// It runs in Chromium (`app-phone`) AND in WebKit (`app-phone-webkit`, always in CI, `make
+// e2e-webkit` on this Fedora host), because Safari is where the phone opens Collie and it disagrees
+// with Chromium on geometry a unit test never sees. In an engine whose worker does not install here,
+// step 6 takes the no-worker path, a plain reload, and lands on the same Done screen; the download
+// state is measured when it happens.
+//
+// It moves the one served-directory pointer of the swap server, like the three cases above and every
+// case in service-worker.spec.ts. Being in this file does not keep it apart from those: the WebKit
+// walk is another project and service-worker.spec.ts another file, so each case holds the swap
+// server's lock (`holdSwapServer`, taken in the file's `beforeEach`) for as long as it runs.
+
+// THE LARGE-TEXT WALK. Android's font scale and a browser's text size raise the root font size, and
+// every box in the panel is in rem, so the panel must grow as one piece: same no-shift rule, nothing
+// spilling out of its box, and the panel still below the band. 150% is where a px box used to spill.
+for (const engine of [
+  { name: "Chromium, with the worker", project: "app-phone", worker: "allow", text: null },
+  { name: "WebKit, with no worker", project: "app-phone-webkit", worker: "block", text: null },
+  { name: "Chromium, text at 150%", project: "app-phone", worker: "allow", text: "150%" },
+] as const) {
+  // WHY WEBKIT RUNS WITH THE WORKER BLOCKED. Playwright's WebKit does not route a request that goes
+  // through a service worker, so with a worker in control every `/api/*` read here would reach the
+  // swap server itself and the app would show an outage. Blocked, the phone takes its no-worker path
+  // at step 6, a plain reload onto the new bundle, which is the path an HTTP install takes anyway.
+  // The download state is measured in Chromium, where the worker is real.
+  test.describe(`update mode's panel keeps its boxes in every state (${engine.name})`, () => {
+    test.use({ viewport: { width: 375, height: 812 }, serviceWorkers: engine.worker });
+
+    test.beforeEach(async ({ page }, testInfo) => {
+      test.skip(testInfo.project.name !== engine.project, `this walk is the ${engine.name} one`);
+      // Sixty seconds more than the file's budget, which already carries any wait for the swap server.
+      test.setTimeout(testInfo.timeout + 60_000);
+      await installCrewBridge(page);
+      if (engine.text !== null) {
+        // A stylesheet rule rather than the element's style: the page's own boot rewrites `<html>`.
+        await page.addInitScript((size: string) => {
+          const add = () => {
+            const style = document.createElement("style");
+            style.textContent = `html { font-size: ${size} !important; }`;
+            document.head.append(style);
+          };
+          if (document.head !== null) add();
+          else document.addEventListener("DOMContentLoaded", add, { once: true });
+        }, engine.text);
+      }
+    });
+
+    test(NO_SHIFT_TITLE, async ({ page }) => {
+      await walkEveryState(page, engine.worker === "allow", engine.text);
+    });
+  });
+}
+
+/** The walk itself: every state, measured against "Ready to start". */
+async function walkEveryState(page: Page, withWorker: boolean, text: string | null = null): Promise<void> {
+  const seen: string[] = [];
+  const dialog = page.getByRole("dialog");
+  const heading = (name: string) => page.getByRole("heading", { name, exact: true });
+
+  await page.goto("/settings/updates");
+  // A worker in control, where this walk runs with one.
+  if (withWorker) await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+  await page.evaluate((key: string) => window.sessionStorage.setItem(key, "0"), RELOADS_KEY);
+  if (text !== null) {
+    const root = await page.evaluate(() => getComputedStyle(document.documentElement).fontSize);
+    expect(root, "the larger text size is on the page").toBe(`${(16 * Number.parseFloat(text)) / 100}px`);
+  }
+
+  // ── Ready to start. The card's button opens the mode; it does not grow the card. ──
+  await page.getByRole("button", { name: fill(en["settings.updateCard.actionAll"], { version: TO }) }).click();
+  await expect(heading(fill(en["updateScreen.ready.heading"], { version: TO }))).toBeVisible();
+  const base = await geometry(page);
+  expect(base.rows).toHaveLength(4);
+  seen.push("ready");
+
+  const measure = async (state: string) => {
+    expectSame(state, await geometry(page), base);
+    expect(await spills(page), `${state}: nothing spills out of its box`).toEqual([]);
+    seen.push(state);
+  };
+  expect(await spills(page), "ready: nothing spills out of its box").toEqual([]);
+
+  // ── Steps 1 to 4, the lead. ──
+  await page.getByRole("button", { name: en["updateScreen.action.start"] }).click();
+  await expect(heading(fill(en["updateScreen.check.heading"], { lead: "bluefin" }))).toBeVisible({ timeout: 15_000 });
+  expect(await appIsInert(page), "the app is locked while the run it started is in flight").toBe(true);
+  await measure("check");
+
+  currentRun = crewRunAt("staging", WAITING());
+  await expect(heading(fill(en["updateScreen.build.heading"], { version: TO, lead: "bluefin" }))).toBeVisible({ timeout: 15_000 });
+  await measure("build");
+
+  currentRun = crewRunAt("restarting", WAITING());
+  await expect(heading(fill(en["updateScreen.restart.heading"], { lead: "bluefin" }))).toBeVisible({ timeout: 15_000 });
+  await measure("restart");
+
+  currentRun = crewRunAt("verifying", WAITING());
+  await expect(heading(fill(en["updateScreen.verify.heading"], { lead: "bluefin" }))).toBeVisible({ timeout: 15_000 });
+  await measure("verify");
+
+  // ── Step 5, the members, and the three shapes a member row takes. ──
+  currentRun = crewRunAt("done", [leg("minibuch", "updating"), leg("cellar", "waiting")]);
+  await expect(heading(en["updateScreen.members.heading"])).toBeVisible({ timeout: 15_000 });
+  await measure("members, one updating");
+
+  currentRun = crewRunAt("done", [leg("minibuch", "done", { version: TO }), leg("cellar", "waiting", { reason: "rate-limited, retries by 08:14" })]);
+  await expect(dialog.getByText(fill(en["updateScreen.ask.limited"], { name: "cellar" }))).toBeVisible({ timeout: 15_000 });
+  await measure("members, one rate-limited");
+
+  currentRun = crewRunAt("done", [leg("minibuch", "done", { version: TO }), leg("cellar", "waiting", { updatedAt: Date.now() - 90_000 })]);
+  await expect(dialog.getByText(/cellar has not answered for/)).toBeVisible({ timeout: 15_000 });
+  await measure("members, one unreachable");
+
+  // ── Step 6, this phone. Skip the quiet member; the phone's turn comes. ──
+  await page.getByRole("button", { name: fill(en["updateScreen.action.skip"], { name: "cellar" }) }).click();
+  await expect(heading(en["updateScreen.phone.heading"])).toBeVisible();
+  await measure("phone, getting the new app");
+
+  // The bridge now serves a new bundle, slowly, and this phone asks for it on its own.
+  stampedBuildId = readBuildStamp("b").id;
+  setThrottle({ match: readEntryScript("b"), bytesPerSecond: 8 * 1024 });
+  serveBuild("b");
+  const counted = /\d+ of \d+ files/;
+  const downloading = await expect
+    .poll(async () => counted.test((await dialog.textContent().catch(() => "")) ?? ""), { timeout: 20_000, intervals: [100] })
+    .toBe(true)
+    .then(() => true)
+    .catch(() => false);
+  if (downloading) await measure("phone downloading");
+  expect(downloading || !withWorker, "with a worker, the phone's download is on screen and measured").toBe(true);
+
+  // The install lands, the controller swaps, and the page reloads ONCE onto the new app. The new
+  // document finds the claim and opens on Done.
+  clearThrottle();
+  await expect(heading(en["updateScreen.done.heading"])).toBeVisible({ timeout: 60_000 });
+  expect(await reloadCount(page), "this phone reloaded once, at step 6").toBe(1);
+  await measure("done");
+  await expect(page.getByRole("button", { name: fill(en["updateScreen.action.retryOne"], { name: "cellar" }) })).toBeVisible();
+
+  await page.getByRole("button", { name: en["updateScreen.action.back"] }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect.poll(() => appIsInert(page)).toBe(false);
+
+  // ── The other two ends, each a run of its own. ──
+  currentRun = crewRunAt("rolled-back", WAITING(), "run-e2e-2");
+  await expect(heading(fill(en["updateScreen.rolledBack.heading"], { lead: "bluefin", from: FROM }))).toBeVisible({ timeout: 30_000 });
+  await measure("rolled back");
+  await page.getByRole("button", { name: en["updateScreen.action.back"] }).click();
+
+  currentRun = crewRunAt("stuck", WAITING(), "run-e2e-3");
+  await expect(heading(fill(en["updateScreen.stuck.heading"], { lead: "bluefin" }))).toBeVisible({ timeout: 30_000 });
+  await expect(dialog.getByText("collie update --rollback")).toBeVisible();
+  await measure("stuck");
+  await page.getByRole("button", { name: en["updateScreen.action.back"] }).click();
+
+  currentRun = crewRunAt("interrupted", WAITING(), "run-e2e-4");
+  await expect(dialog.getByText(fill(en["updateScreen.stopped.subtitle"], { lead: "bluefin", from: FROM }))).toBeVisible({ timeout: 30_000 });
+  await measure("stopped");
+
+  test.info().annotations.push({ type: "states measured", description: seen.join(", ") });
+}
+
+function crewRunAt(state: UpdateRunState, peers: UpdatePeerLeg[], runId = "run-e2e"): UpdateRun {
+  return {
+    schema: 1,
+    state,
+    from: FROM,
+    to: TO,
+    startedAt: Date.now() - 20_000,
+    updatedAt: Date.now(),
+    pid: 4242,
+    attempt: 0,
+    runId,
+    peers,
+    reason: state === "rolled-back" || state === "stuck" || state === "interrupted" ? "the health gate timed out" : undefined,
+    recovery: state === "stuck" ? "collie update --rollback" : undefined,
+  };
+}
+
+const leg = (name: string, state: UpdatePeerLeg["state"], over: Partial<UpdatePeerLeg> = {}): UpdatePeerLeg => ({
+  name,
+  state,
+  version: FROM,
+  updatedAt: Date.now(),
+  ...over,
+});
+
+const WAITING = (): UpdatePeerLeg[] => [leg("minibuch", "waiting"), leg("cellar", "waiting")];
+
+const CENSUS = (): UpdateCrewMember[] => [
+  { name: "minibuch", version: FROM, verdict: "green", reasons: [], asOf: Date.now() },
+  { name: "cellar", version: FROM, verdict: "green", reasons: [], asOf: Date.now() },
+];
+
+function crewUpdateInfo(): UpdateInfo {
+  return {
+    current: FROM,
+    latest: TO,
+    latestUrl: null,
+    releaseAvailable: true,
+    majorAvailable: null,
+    majorUrl: null,
+    bridgeStale: false,
+    checkedAt: Date.now(),
+  };
+}
+
+async function installCrewBridge(page: Page): Promise<void> {
+  crewStartPending = false;
+  await installApiStub(page);
+  const servers = ["bluefin", "minibuch", "cellar"].map((name) => ({
+    id: name,
+    name,
+    isLead: name === "bluefin",
+    reachable: true,
+    protocol: "ok",
+  }));
+  await page.route(
+    (url) => url.pathname === "/api/snapshot",
+    (route) => {
+      landCrewStart();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: { [SERVER_BUILD_HEADER]: stampedBuildId },
+        body: JSON.stringify({ ...fixtureSnapshot, servers, update: { ...crewUpdateInfo(), run: currentRun ?? undefined } }),
+      });
+    },
+  );
+  await page.route(
+    (url) => url.pathname === "/api/update/check",
+    (route) => {
+      landCrewStart();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: { [SERVER_BUILD_HEADER]: stampedBuildId },
+        body: JSON.stringify({
+          ...crewUpdateInfo(),
+          run: currentRun ?? undefined,
+          preflight: { schema: 1, verdict: "green", checks: [{ id: "disk", verdict: "green", reason: "4.2 GB free" }] },
+          crew: CENSUS(),
+        }),
+      });
+    },
+  );
+  await page.route(
+    (url) => url.pathname === "/standby/update",
+    (route) => {
+      landCrewStart();
+      return currentRun === null
+        ? route.fulfill({ status: 404, contentType: "text/plain", body: "no run" })
+        : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(currentRun) });
+    },
+  );
+  // The 202 as the real bridge sends it: the record read before the start, and the new run's id. The
+  // run's own record lands on the next read of any door.
+  await page.route(
+    (url) => url.pathname === "/api/update",
+    (route) => {
+      const before = currentRun;
+      crewStartPending = true;
+      return route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, to: TO, major: false, run: before, runId: "run-e2e" }),
+      });
+    },
+  );
+}
+
+/** The crew walk's own pending start: its run's first record, written on the next read. */
+let crewStartPending = false;
+
+function landCrewStart(): void {
+  if (!crewStartPending) return;
+  crewStartPending = false;
+  currentRun = crewRunAt("preflight", WAITING());
+}
+
+interface Box {
+  readonly top: number;
+  readonly height: number;
+  readonly left: number;
+  readonly width: number;
+}
+
+interface Geometry {
+  readonly heading: Box;
+  readonly subtitle: Box;
+  readonly rows: readonly Box[];
+  readonly note: Box;
+  readonly footer: Box;
+}
+
+/** The one box a slot names, or a failure that says which slot was missing. */
+function only(name: string, boxes: Box[] | undefined): Box {
+  const box = boxes?.[0];
+  if (box === undefined) throw new Error(`no ${name} on screen`);
+  return box;
+}
+
+/** Every box the rule is about, by the panel's own `data-slot` handles (DESIGN.md §9). */
+async function geometry(page: Page): Promise<Geometry> {
+  const slots = ["update-heading", "update-subtitle", "update-row", "update-note", "update-footer"] as const;
+  const found = await page.evaluate(
+    (names) =>
+      names.map((slot) =>
+        [...document.querySelectorAll(`[data-slot="${slot}"]`)].map((el) => {
+          const r = el.getBoundingClientRect();
+          return { top: r.top, height: r.height, left: r.left, width: r.width };
+        }),
+      ),
+    [...slots],
+  );
+  const [heading, subtitle, rows, note, footer] = found;
+  return {
+    heading: only("heading", heading),
+    subtitle: only("subtitle", subtitle),
+    rows: rows ?? [],
+    note: only("note", note),
+    footer: only("footer", footer),
+  };
+}
+
+/**
+ * Everything drawn inside a slot that reaches past the slot's own box, by half a pixel or more, and
+ * the panel reaching up under the band. A clamped or truncated line stays inside its box by design;
+ * what this catches is a px box holding rem text, the large-text fault counsel named for ADR 0064.
+ */
+async function spills(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const out: string[] = [];
+    const panel = document.querySelector('[data-slot="update-panel"]');
+    const band = document.querySelector('[data-slot="update-band"]');
+    if (panel !== null && band !== null) {
+      const gap = panel.getBoundingClientRect().top - band.getBoundingClientRect().bottom;
+      if (gap < -0.5) out.push(`panel under the band by ${-gap}px`);
+    }
+    for (const slot of ["update-heading", "update-subtitle", "update-row", "update-note", "update-footer"]) {
+      for (const box of document.querySelectorAll(`[data-slot="${slot}"]`)) {
+        const outer = box.getBoundingClientRect();
+        for (const inner of box.querySelectorAll("*")) {
+          const r = inner.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+          if (r.bottom - outer.bottom > 0.5 || outer.top - r.top > 0.5) {
+            out.push(`${slot}: <${inner.tagName.toLowerCase()}> ${r.top}-${r.bottom} outside ${outer.top}-${outer.bottom}`);
+          }
+          // A box a flex parent squeezed below its content: the rect stays inside, the text does not.
+          // A clamp, an ellipsis or a scroller holds more than it shows on purpose, and is left alone.
+          const css = getComputedStyle(inner);
+          const clamps =
+            (css.webkitLineClamp !== "" && css.webkitLineClamp !== "none") ||
+            css.textOverflow === "ellipsis" ||
+            css.overflowY === "auto" ||
+            css.overflowY === "scroll";
+          // A clamp is allowed to hide lines, never to cut one: a box squeezed to 1.25 lines shows the
+          // top of the second line and no ellipsis. Its height must be a whole number of lines.
+          const line = Number.parseFloat(css.lineHeight);
+          if (clamps && css.overflowY !== "auto" && css.overflowY !== "scroll" && line > 0 && inner.clientHeight > 0) {
+            const part = inner.clientHeight % line;
+            if (Math.min(part, line - part) > 1) {
+              out.push(`${slot}: <${inner.tagName.toLowerCase()} class="${inner.getAttribute("class") ?? ""}"> cuts a line, ${inner.clientHeight}px of ${line}px lines`);
+            }
+          }
+          // A decorative icon is left alone too: a spinning glyph's rotated corners count as overflow.
+          const decor = inner.closest('[aria-hidden="true"]') !== null;
+          if (!clamps && !decor && css.display !== "inline" && inner.scrollHeight - inner.clientHeight > 1) {
+            out.push(`${slot}: <${inner.tagName.toLowerCase()} class="${inner.getAttribute("class") ?? ""}"> holds ${inner.scrollHeight}px in ${inner.clientHeight}px`);
+          }
+        }
+      }
+    }
+    return out;
+  });
+}
+
+/** Half a pixel, in every direction, on every box. */
+function expectSame(state: string, got: Geometry, base: Geometry): void {
+  const close = (what: string, a: Box, b: Box) => {
+    for (const key of ["top", "height", "left", "width"] as const) {
+      expect(Math.abs(a[key] - b[key]), `${state}: ${what}.${key} moved from ${b[key]} to ${a[key]}`).toBeLessThanOrEqual(0.5);
+    }
+  };
+  close("heading", got.heading, base.heading);
+  close("subtitle", got.subtitle, base.subtitle);
+  expect(got.rows.length, `${state}: the row count`).toBe(base.rows.length);
+  got.rows.forEach((row, i) => {
+    const want = base.rows[i];
+    if (want !== undefined) close(`row ${i + 1}`, row, want);
+  });
+  close("note", got.note, base.note);
+  close("footer", got.footer, base.footer);
+}
+

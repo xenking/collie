@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CLAIM_KEY,
+  CLAIM_MAX_AGE_MS,
+  noteMemberSkipped,
   clearUpdateStarted,
   dismissesLocally,
   dismissTarget,
@@ -272,6 +275,42 @@ describe("the just-posted store", () => {
     expect(getUpdateStarted()).toBeNull();
     expect(hits).toBe(2);
     off();
+  });
+
+  // THE CLAIM OUTLIVES THE PAGE (ADR 0064). The phone's reload is the last step of an update, and the
+  // document that boots must find the claim before its first paint. A module variable died with the
+  // page that set it (the 2026-09-23 study's fault 4).
+  it("survives a reload: a fresh copy of the module reads it back from sessionStorage", async () => {
+    noteUpdateStarted(Date.now(), "run-7", { target: "1.12.0", peersOnly: false, bundleAtStart: "abc" });
+    noteMemberSkipped("cellar");
+    vi.resetModules();
+    const fresh = await import("./update-ribbon");
+    expect(fresh.getUpdateClaim()).toMatchObject({
+      runId: "run-7",
+      target: "1.12.0",
+      peersOnly: false,
+      bundleAtStart: "abc",
+      skipped: ["cellar"],
+    });
+    fresh.clearUpdateStarted();
+    expect(sessionStorage.getItem(CLAIM_KEY)).toBeNull();
+    clearUpdateStarted();
+  });
+
+  it("throws away a claim older than CLAIM_MAX_AGE_MS instead of reopening a stale screen", async () => {
+    sessionStorage.setItem(CLAIM_KEY, JSON.stringify({ startedAt: Date.now() - CLAIM_MAX_AGE_MS - 1 }));
+    vi.resetModules();
+    const fresh = await import("./update-ribbon");
+    expect(fresh.getUpdateClaim()).toBeNull();
+    expect(sessionStorage.getItem(CLAIM_KEY)).toBeNull();
+  });
+
+  it("reads a hand-edited or truncated value as no claim", async () => {
+    sessionStorage.setItem(CLAIM_KEY, "{not json");
+    vi.resetModules();
+    const fresh = await import("./update-ribbon");
+    expect(fresh.getUpdateClaim()).toBeNull();
+    sessionStorage.removeItem(CLAIM_KEY);
   });
 });
 
@@ -560,5 +599,76 @@ describe("the crew link sentence", () => {
     // one: the tap there reloads this page onto a bundle that already exists.
     const view = read({ bundleStale: true });
     expect(ribbonText(view, { from: 1, to: 2 })).toBe(ribbonText(view));
+  });
+});
+
+// ── THE ✕ ON A FAILED RUN CLOSES IT (1.21.1) ────────────────────────────────────────────────────
+//
+// The release lane on 2026-10-13: the lead updated itself to 1.21.0 from the phone, the crew step
+// settled with minibuch unreachable, and the red row could not be put down. The bridge recorded the
+// close (`dismissedCrewVersion: "1.21.0"`), and `ribbonView` never read it.
+describe("a closed crew failure stays closed", () => {
+  const SETTLED = NOW - 5 * 60_000;
+  // SAFETY: `unreachable` IS a member of `UpdatePeerLegState`; the assertion only narrows the
+  // inferred `string` of an object literal to it.
+  const minibuch = [
+    {
+      name: "minibuch",
+      state: "unreachable" as UpdatePeerLegState,
+      reason: "minibuch was not reached",
+      updatedAt: SETTLED,
+    },
+  ];
+  const settled = (settledAt = SETTLED) =>
+    info({
+      current: "1.21.0",
+      latest: "1.21.0",
+      releaseAvailable: false,
+      run: run("done", { from: "1.20.2", to: "1.21.0", peers: minibuch, settledAt }),
+    });
+
+  it("names the failure before the close, and the close is keyed to the run's version", () => {
+    const view = read({ update: settled() });
+    expect(view).toMatchObject({ kind: "peer-failed", name: "minibuch", target: "1.21.0" });
+    expect(dismissTarget(view)).toEqual({ scope: "crew", version: "1.21.0" });
+  });
+
+  it("the live record of 2026-10-13: a crew close with no stamp hides the row", () => {
+    // `update-state.json` as 1.21.0 wrote it: a version and no stamp.
+    expect(read({ update: settled(), dismissedCrewVersion: "1.21.0" })).toEqual({ kind: "silent" });
+  });
+
+  it("a stamped close made after the run settled hides the row on every later read", () => {
+    const update = { ...settled(), dismissedCrewVersion: "1.21.0", dismissedCrewAt: SETTLED + 60_000 };
+    expect(
+      read({ update, dismissedCrewVersion: "1.21.0", dismissedCrewAt: SETTLED + 60_000 }),
+    ).toEqual({ kind: "silent" });
+  });
+
+  it("a NEW run of the same version that fails again is named again", () => {
+    // "Try minibuch again" settles after the close: a new run, and a new sentence.
+    const later = settled(SETTLED + 10 * 60_000);
+    expect(read({ update: later, dismissedCrewVersion: "1.21.0", dismissedCrewAt: SETTLED + 60_000 })).toMatchObject({
+      kind: "peer-failed",
+      name: "minibuch",
+    });
+  });
+
+  it("a NEW version's failure is named again", () => {
+    const next = info({
+      current: "1.21.1",
+      latest: "1.21.1",
+      releaseAvailable: false,
+      run: run("done", { from: "1.21.0", to: "1.21.1", peers: minibuch, settledAt: SETTLED }),
+    });
+    expect(read({ update: next, dismissedCrewVersion: "1.21.0" })).toMatchObject({ kind: "peer-failed" });
+  });
+
+  it("a closed failure falls through to what is below it, and an offer close does not close it", () => {
+    expect(read({ update: settled(), dismissedCrewVersion: "1.21.0", bundleStale: true })).toEqual({
+      kind: "bundle",
+    });
+    // Two scopes, two decisions: closing an OFFER for the same version leaves the crew row up.
+    expect(read({ update: settled(), dismissedVersion: "1.21.0" })).toMatchObject({ kind: "peer-failed" });
   });
 });

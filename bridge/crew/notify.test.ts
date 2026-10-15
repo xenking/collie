@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
+import { AskPush } from "../durable/ask-push.ts";
+import { AskGuardStore } from "../durable/guard.ts";
 import type { NotifyClock } from "../notifications.ts";
 import type { PushMessage } from "../push.ts";
 import type { AgentStatus, PaneWire } from "../types.ts";
@@ -128,6 +130,8 @@ describe("PeerNotifier — a peer's alerts on the lead's phone", () => {
     expect(push.sent).toHaveLength(1);
     expect(push.sent[0]).toEqual({
       title: "claude needs you",
+      titleCode: "agent.blocked",
+      titleDetail: { agent: "claude" },
       body: "laptop · collie",
       tag: "collie:herd@laptop",
       paneId: "p1",
@@ -165,15 +169,15 @@ describe("PeerNotifier — a peer's alerts on the lead's phone", () => {
     peer.observe(
       "laptop",
       body([
-        pane("p1", "blocked", "claude", { terminalTitle: "api" }),
-        pane("p2", "blocked", "codex", { terminalTitle: "web" }),
-        pane("p3", "blocked", "pi", { terminalTitle: "worker" }),
+        pane("p1", "blocked", "claude", { paneLabel: "api" }),
+        pane("p2", "blocked", "codex", { paneLabel: "web" }),
+        pane("p3", "blocked", "pi", { paneLabel: "worker" }),
       ]),
     );
     clock.fireAll();
 
     // One slot, and its final state is the digest — the existing "one summary, not three races".
-    // Named by the one name rule (bridge/pane-name.ts), not by agent kind — three panes, three words.
+    // Named by the push name rule (notifications.ts § pushName), not by agent kind — three panes, three words.
     expect(new Set(push.tags)).toEqual(new Set(["collie:herd@laptop"]));
     expect(push.sent.at(-1)).toMatchObject({
       title: "3 agents need you",
@@ -198,6 +202,19 @@ describe("PeerNotifier — a peer's alerts on the lead's phone", () => {
     clock.fireAll();
     peer.observe("laptop", body([pane("p1", "working")]));
     expect(push.sent.at(-1)).toEqual({ type: "clear", tag: "collie:herd@laptop" });
+  });
+
+  test("a peer's working → idle is a finished turn and pushes once, naming the host (#345)", () => {
+    const { clock, push, peer } = notifier();
+    peer.observe("laptop", body([pane("p1", "working")]));
+    peer.observe("laptop", body([pane("p1", "idle")]));
+    clock.fireAll();
+    for (let i = 0; i < 10; i++) peer.observe("laptop", body([pane("p1", "idle")]));
+    clock.fireAll();
+    expect(push.sent).toHaveLength(1);
+    expect(push.sent[0]?.title).toBe("claude is done");
+    expect(push.sent[0]?.titleCode).toBe("agent.done");
+    expect(push.sent[0]?.host).toBe("laptop");
   });
 
   test("a pane closing on the peer retracts it too", () => {
@@ -283,5 +300,113 @@ describe("herdPushGate", () => {
   test("peer mode mutes the herd path so an alert never arrives twice", () => {
     const gate = herdPushGate("peer", { isMuted: () => false });
     expect(gate.isMuted()).toBe(true);
+  });
+});
+
+// ── Asks as data: the guard decides the push, not the way into blocked (ADR 0100) ──────────
+describe("a peer's pane that carries asks", () => {
+  function guarded() {
+    const clock = new FakeClock();
+    const push = new RecordingPush();
+    let now = 1_000_000;
+    const asks = new AskPush(new AskGuardStore(null), () => now);
+    const peer = new PeerNotifier<number>({
+      clock,
+      push,
+      mute: { isMuted: () => false },
+      delayMs: 5_000,
+      isNotifiable: (s) => s === "blocked" || s === "done",
+      asks,
+    });
+    return { clock, push, peer, tick: (ms: number) => (now += ms) };
+  }
+  const ask = (id: string, toolCallId: string) => ({
+    id,
+    kind: "permission",
+    toolCallId,
+    revision: 1,
+    title: "shell wants to run ls",
+    itemId: "item-1",
+    options: [{ id: "allow", label: "Allow", effect: "allow" as const }],
+  });
+  const blockedPanes = (push: RecordingPush) => push.sent.filter((m) => m.type !== "clear").length;
+
+  test("a new ask pushes once, through the coordinator, and a later poll of the same ask does not", () => {
+    const { clock, push, peer } = guarded();
+    peer.observe("laptop", body([pane("conv-1", "working", "durable", { asks: [] })]));
+    peer.observe("laptop", body([pane("conv-1", "blocked", "durable", { asks: [ask("a1", "call-1")] })]));
+    clock.fireAll();
+    expect(blockedPanes(push)).toBe(1);
+    expect(push.sent[0]?.host).toBe("laptop");
+    peer.observe("laptop", body([pane("conv-1", "blocked", "durable", { asks: [ask("a1", "call-1")] })]));
+    clock.fireAll();
+    expect(blockedPanes(push)).toBe(1);
+  });
+
+  test("re-ask: a restarted program's same question under a new ask id is shown, not pushed", () => {
+    const { clock, push, peer, tick } = guarded();
+    peer.observe("laptop", body([pane("conv-1", "working", "durable", { asks: [] })]));
+    peer.observe("laptop", body([pane("conv-1", "blocked", "durable", { asks: [ask("a1", "call-1")] })]));
+    clock.fireAll();
+    expect(blockedPanes(push)).toBe(1);
+    // The program restarts: the pane leaves, comes back idle, then blocked on the same call.
+    tick(10_000);
+    peer.observe("laptop", body([]));
+    peer.observe("laptop", body([pane("conv-1", "idle", "durable", { asks: [] })]));
+    peer.observe("laptop", body([pane("conv-1", "blocked", "durable", { asks: [ask("a2", "call-1")] })]));
+    clock.fireAll();
+    expect(blockedPanes(push)).toBe(1);
+  });
+
+  test("a pane without asks still pushes on its way into blocked, as before", () => {
+    const { clock, push, peer } = guarded();
+    peer.observe("laptop", body([pane("w1:p1", "working")]));
+    peer.observe("laptop", body([pane("w1:p1", "blocked")]));
+    clock.fireAll();
+    expect(blockedPanes(push)).toBe(1);
+  });
+
+  test("a hostile burst on one peer pane buzzes the phone once, not once per ask", () => {
+    const { clock, push, peer } = guarded();
+    peer.observe("laptop", body([pane("conv-1", "working", "durable", { asks: [] })]));
+    const burst = Array.from({ length: 50 }, (_, i) => ask(`a${String(i)}`, `call-${String(i)}`));
+    // Five sweeps as the asks pile up, ten at a time, each sweep re-arming the debounce and firing it.
+    for (let upTo = 10; upTo <= 50; upTo += 10) {
+      peer.observe("laptop", body([pane("conv-1", "blocked", "durable", { asks: burst.slice(0, upTo) })]));
+      clock.fireAll();
+    }
+    // The member lists every ask; the guard pushes three of them in the first sweep, which is one
+    // alert for the pane, and nothing after.
+    expect(blockedPanes(push)).toBe(1);
+  });
+
+  test("the lead's push for an ask is generic: the pane's push name, never the ask's title or tool line", () => {
+    const { clock, push, peer } = guarded();
+    peer.observe("laptop", body([pane("conv-1", "working", "durable", { asks: [] })]));
+    const secret = { ...ask("a1", "call-1"), title: "shell wants to run curl https://x/?token=hunter2", tool: { name: "shell", summary: "rm -rf /" } };
+    peer.observe("laptop", body([pane("conv-1", "blocked", "durable", { asks: [secret] })]));
+    clock.fireAll();
+    const msg = push.sent.find((m) => m.type !== "clear");
+    expect(msg?.titleCode).toBe("ask.permission");
+    expect(msg?.title).toBe("Permission needed in durable");
+    const text = JSON.stringify(msg);
+    for (const leak of ["hunter2", "curl", "rm -rf", "shell wants"]) expect(text).not.toContain(leak);
+  });
+
+  test("past 30 pushes in an hour, the lead sends one summary for the host and then nothing", () => {
+    const { clock, push, peer, tick } = guarded();
+    const panes: ReturnType<typeof pane>[] = [];
+    let floods = 0;
+    for (let i = 0; i < 40; i++) {
+      panes.push(pane(`conv-${String(i)}`, "blocked", "durable", { asks: [ask(`a${String(i)}`, `call-${String(i)}`)] }));
+      peer.observe("laptop", body([...panes]));
+      clock.fireAll();
+      tick(7_000);
+    }
+    floods = push.sent.filter((m) => m.titleCode === "ask.flood").length;
+    expect(floods).toBe(1);
+    const summary = push.sent.find((m) => m.titleCode === "ask.flood");
+    expect(summary?.title).toBe("A program on laptop is raising many asks");
+    expect(summary?.host).toBe("laptop");
   });
 });

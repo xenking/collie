@@ -223,6 +223,25 @@ describe("a tap while a worker is on its way in (2026-09-12)", () => {
   });
 });
 
+describe("the stuck-update recovery and the speech cache", () => {
+  it("deletes every cache but the speech cache, which holds a model the person chose to copy", async () => {
+    const deleted: string[] = [];
+    vi.stubGlobal("caches", {
+      keys: async () => ["workbox-precache-v2-https://x/", "collie-fonts", "collie-stt", "collie-stt:/collie/"],
+      delete: async (name: string) => {
+        deleted.push(name);
+        return true;
+      },
+    });
+    const h = await load({ controlled: true });
+    await h.mod.checkForUpdate();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.reload).toHaveBeenCalledTimes(1);
+    expect(deleted).toEqual(["workbox-precache-v2-https://x/", "collie-fonts"]);
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("the tap after the stuck guard's own reload", () => {
   // 2026-09-09, release lane, 1.6.0 → 1.7.0, iPhone PWA: every tap showed "updating…", reloaded, and
   // came back on the same stale bundle, for about three minutes. The stuck guard's reload is served by
@@ -309,5 +328,57 @@ describe("the tap after the stuck guard's own reload", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(h.reload).toHaveBeenCalledTimes(1);
     expect(h.registration.unregister).not.toHaveBeenCalled();
+  });
+});
+
+// ── UPDATE MODE AND THE RELOAD HOLD (ADR 0064) ────────────────────────────────────────────────────
+//
+// The phone's own reload is the LAST step of an update. A controller swap used to reload at once,
+// whatever the page held, and the 60 s worker check could find the new worker in the middle of a run.
+
+describe("the controller swap waits for the reload hold", () => {
+  it("a swap while a hold is up reloads nothing, then reloads once when the last hold clears", async () => {
+    const h = await load({ controlled: true });
+    const guard = await import("./reload-guard");
+    guard.holdReload("composer");
+    guard.holdReload(guard.UPDATE_MODE_HOLD);
+    h.swEvents.controllerchange?.();
+    h.swEvents.controllerchange?.();
+    expect(h.reload).not.toHaveBeenCalled();
+    // The swap is still stamped: the update screen reads it as this device's download being over.
+    expect(h.mod.getControllerChangedAt()).not.toBeNull();
+
+    guard.releaseReload(guard.UPDATE_MODE_HOLD);
+    expect(h.reload).not.toHaveBeenCalled();
+    guard.releaseReload("composer");
+    expect(h.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("with no hold, the swap reloads at once, as before", async () => {
+    const h = await load({ controlled: true });
+    h.swEvents.controllerchange?.();
+    expect(h.reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the 60 s worker check pauses while update mode holds", () => {
+  it("asks nothing while held, and asks again once released", async () => {
+    const h = await load({ controlled: true });
+    const guard = await import("./reload-guard");
+    guard.holdReload(guard.UPDATE_MODE_HOLD);
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(h.registration.update).not.toHaveBeenCalled();
+
+    guard.releaseReload(guard.UPDATE_MODE_HOLD);
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(h.registration.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("any other hold does not pause it: a composer draft is not an update", async () => {
+    const h = await load({ controlled: true });
+    const guard = await import("./reload-guard");
+    guard.holdReload("composer");
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(h.registration.update).toHaveBeenCalledTimes(1);
   });
 });

@@ -129,11 +129,28 @@ async function candidateRefsUnder(
     }
     try {
       // Root sessions only — a `parent_id` row is a subagent session, which herdr never reports.
-      const rows = db
-        .query<{ id: string }, [number]>(
-          "select id from session where parent_id is null order by time_updated desc limit ?",
-        )
-        .all(MAX_CANDIDATES);
+      // BOTH generations are sampled, half the budget each: on a machine that upgraded, a V2-only
+      // list would never exercise the V1 path the adapter still serves, which is the drift this
+      // probe exists to catch. The tables are constants, never built from input.
+      const perStore = Math.ceil(MAX_CANDIDATES / 2);
+      const newest = (table: "session_v2" | "session"): { id: string }[] => {
+        try {
+          return table === "session_v2"
+            ? db
+                .query<{ id: string }, [number]>(
+                  "select id from session_v2 where parent_id is null order by time_updated desc limit ?",
+                )
+                .all(perStore)
+            : db
+                .query<{ id: string }, [number]>(
+                  "select id from session where parent_id is null order by time_updated desc limit ?",
+                )
+                .all(perStore);
+        } catch {
+          return []; // the table does not exist in this generation
+        }
+      };
+      const rows = [...newest("session_v2"), ...newest("session")].slice(0, MAX_CANDIDATES);
       const refs: AgentSessionRef[] = rows.map((r) => ({ kind: "id", value: r.id }));
       return { refs, total: refs.length };
     } catch {
@@ -142,6 +159,8 @@ async function candidateRefsUnder(
       db.close();
     }
   }
+
+  if (agent === "openclaw") return openclawCandidates(root);
 
   const logs = await logsNewestFirst(root);
   const refs: AgentSessionRef[] = [];
@@ -152,6 +171,40 @@ async function candidateRefsUnder(
     if (ref !== null) refs.push(ref);
   }
   return { refs, total: logs.length };
+}
+
+/**
+ * OpenClaw keeps one SQLite per agent (`<root>/agents/<id>/agent/openclaw-agent.sqlite`) and names a
+ * session by its key, which is what the adapter's footer discovery hands over. So the candidates are
+ * the newest keys of every agent's `session_nodes`. Keys only, read-only, as above.
+ */
+async function openclawCandidates(root: string): Promise<{ refs: AgentSessionRef[]; total: number }> {
+  let agents: string[];
+  try {
+    agents = await readdir(join(root, "agents"));
+  } catch {
+    return { refs: [], total: 0 };
+  }
+  const refs: AgentSessionRef[] = [];
+  for (const agent of agents.toSorted()) {
+    let db: Database;
+    try {
+      db = new Database(join(root, "agents", agent, "agent", "openclaw-agent.sqlite"), { readonly: true });
+    } catch {
+      continue;
+    }
+    try {
+      const rows = db
+        .query<{ session_key: string }, [number]>("select session_key from session_nodes order by updated_at desc limit ?")
+        .all(MAX_CANDIDATES);
+      for (const r of rows) refs.push({ kind: "id", value: r.session_key });
+    } catch {
+      // a database of another shape: the adapter's own schema check says so when it is asked
+    } finally {
+      db.close();
+    }
+  }
+  return { refs, total: refs.length };
 }
 
 function summarise(entries: TranscriptEntry[]): string {

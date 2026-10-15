@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -15,6 +18,25 @@ describe("service-worker navigation passthrough", () => {
   it("never answers the API from the precache", () => {
     expect(isNetworkOnlyNavigation("/api/snapshot")).toBe(true);
     expect(isNetworkOnlyNavigation("/api/pane/w1:p1/keys")).toBe(true);
+  });
+
+  // The Files reads (ADR 0083) and the Machines routes (ADR 0084) are API calls like their neighbours:
+  // the worker answers none of them from the precache, with or without a query, and the app pages that
+  // show them are Collie's own routes, answered offline from the shell.
+  it("never answers the Files and Machines routes from the precache", () => {
+    for (const path of [
+      "/api/pane/w1%3Ap1/files",
+      "/api/pane/w1%3Ap1/files?dir=docs&host=laptop",
+      "/api/workspace/w1/files?path=README.md",
+      "/api/machines",
+      "/api/machines/local/history",
+      "/api/machines/laptop/alerts",
+    ]) {
+      expect(isNetworkOnlyNavigation(path)).toBe(true);
+    }
+    for (const page of ["/machines", "/machines/local", "/pane/w1%3Ap1/changes/files?dir=docs", "/space/w1/changes/files"]) {
+      expect(isNetworkOnlyNavigation(page)).toBe(false);
+    }
   });
 
   it("passes the reserved proxy namespace to the network, with or without the slash", () => {
@@ -158,5 +180,42 @@ describe("navigationNetworkOnlyUnder — the same denylist under a mount", () =>
   it("escapes a mount that carries a regex character", () => {
     expect(matches(navigationNetworkOnlyUnder("/a.b/"), "/a.b/api/x")).toBe(true);
     expect(matches(navigationNetworkOnlyUnder("/a.b/"), "/aXb/api/x")).toBe(false);
+  });
+});
+
+// What the worker caches at RUNTIME, read off its source (it cannot run under jsdom). The navigation
+// denylist above only governs navigations; a fetch of `/api/*/files/image` or any other `/api/` read
+// stays off every cache because sw.ts registers no runtime route that matches it. Pinned so a route
+// added later has to change this test first (ADR 0087: no service-worker cache of API answers; ADR
+// 0090: a picture's bytes are held in memory only).
+describe("the service worker's runtime caching", () => {
+  const SW_CODE = readFileSync(resolve(import.meta.dirname, "../sw.ts"), "utf8")
+    .split("\n")
+    .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+    .join("\n");
+
+  it("registers exactly three routes: the navigation fallback, the /fonts/ cache and the /stt/ cache", () => {
+    expect(SW_CODE.match(/registerRoute\(/g)?.length).toBe(3);
+    expect(SW_CODE).toContain("new NavigationRoute(createHandlerBoundToURL(");
+    expect(SW_CODE).toContain('url.pathname.startsWith(under("/fonts/"))');
+    expect(SW_CODE).toContain('url.pathname.startsWith(under("/stt/"))');
+  });
+
+  it("opens two runtime caches, the font cache and the speech cache, and never names an /api path", () => {
+    const opened = [...SW_CODE.matchAll(/caches\.open\(([^)]*)\)/g)].map((m) => m[1]);
+    expect(new Set(opened)).toEqual(new Set(["FONT_CACHE", "STT_CACHE"]));
+    expect(SW_CODE).not.toMatch(/["'`]\/api\//);
+    expect(SW_CODE).not.toMatch(/files\/image/);
+  });
+
+  it("creates the speech cache for nobody: it looks before it opens, in the route and in the sweep", () => {
+    // `caches.open` makes a cache that does not exist, so each use is guarded by `caches.has`.
+    const guards = SW_CODE.match(/caches\.has\(STT_CACHE\)/g)?.length ?? 0;
+    expect(guards).toBe(2);
+  });
+
+  it("stores only what sttStorable admits, and sweeps with sttSweepKeeps", () => {
+    expect(SW_CODE).toContain("sttStorable(response,");
+    expect(SW_CODE).toContain("sttSweepKeeps(");
   });
 });

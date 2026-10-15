@@ -16,12 +16,13 @@ import {
   type Warrant,
 } from "../bridge/crew/trust-store.ts";
 import { mintWarrant, type WarrantPush } from "../bridge/crew/warrant.ts";
-import { capture, context, fakeExec, fakeFiles, fakeOps, STATE, type SeededFiles, type SeededOps } from "./fakes.ts";
+import { capture, context, fakeExec, fakeFiles, fakeOps, STATE, type SeededFiles, type SeededOps, probeDefaults, probeOutput, type ProbeField } from "./fakes.ts";
 import { EXIT } from "./io.ts";
 import { cmdCrewDeputy } from "./crew-deputy.ts";
 import { leadDeputyLines } from "./crew-status-deputy.ts";
 import { cmdCrewStatus, failureLine } from "./crew.ts";
 import type { CrewAddDeps, RemoteResult } from "./remote.ts";
+import { hostFor } from "../bridge/host.ts";
 
 // `collie crew deputy` and the deputy half of `collie crew status`, against fakes for every seam.
 // NOTHING here spawns `ssh`, dials a network or touches a disk: the transport records `(host,
@@ -38,7 +39,12 @@ interface PushedWarrant {
   readonly certPem: string | null;
 }
 
+// `probeDefaults()` FIRST, then this suite's own values. The shared table is the one place the
+// field list lives (`cli/fakes.ts`, held against the golden script by `cli/probe-contract.test.ts`),
+// so this cannot be short a field the way it was until 2026-10-01. What stays here is the VALUES,
+// which are this suite's subject: a deputy with a checkout and a bridge already up.
 const PROBE_DEFAULTS = {
+  ...probeDefaults(),
   home: "/home/pat",
   git: "/usr/bin/git",
   bun: "/home/pat/.bun/bin/bun",
@@ -56,9 +62,8 @@ const PROBE_DEFAULTS = {
   port: "busy",
 } satisfies Record<string, string>;
 
-function probeOut(over: Record<string, string> = {}): string {
-  const all = { ...PROBE_DEFAULTS, ...over };
-  return [...Object.entries(all).map(([k, v]) => `collie-probe:${k}=${v}`), "collie-probe:probe=ok", ""].join("\n");
+function probeOut(over: Partial<Record<ProbeField, string>> = {}): string {
+  return probeOutput({ ...PROBE_DEFAULTS, ...over });
 }
 
 type Leg = "probe" | "restart";
@@ -159,6 +164,7 @@ function harness(opts: HarnessOptions = {}) {
   const now = opts.now ?? T0;
 
   const deps: CrewAddDeps = {
+    host: hostFor("linux"),
     // The same reason every other crew suite sets it: `PeerClient`'s REAL `setTimeout` must never
     // fire and report a fake member as unreachable.
     ctx: context({ COLLIE_CREW_TIMEOUT_MS: "60000", ...opts.env }),

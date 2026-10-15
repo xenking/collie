@@ -391,12 +391,38 @@ mkdir -p "$L_HOME" "$L_CONFIG" "$L_BIN"
 : > "$L_CALLS"
 
 port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+# Asks whether a port is free and hands it back for something else to bind LATER, which is a
+# time-of-check/time-of-use race. Several candidates narrow that window and do not close it. It is
+# still the right tool where the port is handed to the CLI to bind, or where the point is a port
+# with nothing on it (`DEAD_PORT`), because in neither case does this script own the listener.
+#
+# Where this script DOES own the listener, do not use it: `serve_free_port` below has the listener
+# pick its own port and report it back, so the port is bound before anyone knows its number.
 pick_port() {
   local p
   for p in "$@"; do
     if port_free "$p"; then echo "$p"; return 0; fi
   done
   fail "no free port among: $*"
+}
+
+# Start a background Bun listener on a kernel-chosen port and echo the port it got.
+#
+#   $1  a file to write the port into      $2  the label used in a failure message
+#   $3  the script body, as a Bun `-e` expression taking `serve(fetch)` already bound
+#
+# THE BUDGET IS TWENTY SECONDS, and that is the second half of this fix. The v1 listener waited
+# 40 x 0.1s and the suite's documented flake was "the v1 readiness listener never came up on 48790".
+# 48790 was free; what did not fit in four seconds was a COLD `bun -e` start on a loaded machine.
+# Twenty seconds is far longer than that start and still bounded, so a genuinely dead listener still
+# fails rather than hanging the suite.
+wait_for_port_file() {
+  local file="$1" label="$2" i
+  for i in $(seq 1 200); do
+    [ -s "$file" ] && return 0
+    sleep 0.1
+  done
+  fail "the ${label} never reported a port within 20s"
 }
 PORT="$(pick_port 48787 48887 48987)"
 DEAD_PORT="$(pick_port 48788 48888 48988)"
@@ -422,9 +448,12 @@ echo "systemctl \$*" >> "$L_CALLS"
 [ "\$2" = "is-active" ] && echo active
 exit 0
 EOF
+# `print` answers with a pid line, as launchd does for a running job: `start` reads it back after
+# `kickstart` and prints "bridge started" only when it shows.
 cat > "${L_BIN}/launchctl" <<EOF
 #!/bin/sh
 echo "launchctl \$*" >> "$L_CALLS"
+[ "\$1" = print ] && echo "	pid = 4242"
 exit 0
 EOF
 cat > "${L_BIN}/journalctl" <<EOF
@@ -521,7 +550,7 @@ firstrun HERDR_SOCKET_PATH="${F_HOME}/absent.sock" "$BIN" start \
   && fail "\`collie start\` came up with no multiplexer to mirror"
 assert_contains "$STDERR" "no COLLIE_MUX is set"
 assert_contains "$STDERR" "no multiplexers are running"
-assert_contains "$STDERR" "COLLIE_MUX=<herdr|tmux|zellij> collie start"
+assert_contains "$STDERR" "COLLIE_MUX=<durable|herdr|tern|tmux|tuios|zellij> collie start"
 [ -f "${F_CONFIG}/.env" ] && fail "a refused start still wrote a config"
 
 # Exactly one found, and no terminal to ask at: auto-selected, said out loud, and written down.
@@ -626,6 +655,7 @@ CALLS="$(cat "$L_CALLS")"
 assert_contains "$CALLS" "launchctl bootout gui/$(id -u)/herdr.collie"
 assert_contains "$CALLS" "launchctl enable gui/$(id -u)/herdr.collie"
 assert_contains "$CALLS" "launchctl bootstrap gui/$(id -u) ${PLIST}"
+assert_contains "$CALLS" "launchctl kickstart gui/$(id -u)/herdr.collie"
 assert_contains "$STDOUT" "bridge started (launchd: herdr.collie)"
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$PLIST" >/dev/null || fail "the generated plist is not a valid property list"
@@ -645,6 +675,7 @@ install_flaky_launchctl() {
   cat > "${L_BIN}/launchctl" <<EOF
 #!/bin/sh
 echo "launchctl \$*" >> "$L_CALLS"
+[ "\$1" = print ] && echo "	pid = 4242"
 [ "\$1" = bootstrap ] || exit 0
 n=0
 [ -f "${TMP_ROOT}/bootstrap.count" ] && read n < "${TMP_ROOT}/bootstrap.count"
@@ -936,14 +967,15 @@ assert_contains "$STDERR" "Refusing to fall back to another instance's config"
 assert_contains "$STDERR" "herdr.collie-v1/.env"
 
 # A second readiness listener, so v1's banner does not pay the probe's full budget (as for $PORT).
-V1_PORT="$(pick_port 48790 48890 48990)"
-bun -e "Bun.serve({ port: ${V1_PORT}, hostname: '127.0.0.1', fetch: () => new Response('ok') })" \
+# It BINDS FIRST and reports the port it got, so nothing here checks a port and binds it later.
+V1_PORT_FILE="${TMP_ROOT}/v1-port"
+bun -e "const s = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => new Response('ok') }); require('node:fs').writeFileSync('${V1_PORT_FILE}', String(s.port));" \
   >/dev/null 2>&1 &
 V1_LISTENER_PID=$!
 cleanup_instances() { kill "$V1_LISTENER_PID" 2>/dev/null || true; }
 trap 'cleanup_instances; cleanup_lifecycle; cleanup' EXIT
-for _ in $(seq 1 40); do port_free "$V1_PORT" || break; sleep 0.1; done
-port_free "$V1_PORT" && fail "the v1 readiness listener never came up on ${V1_PORT}"
+wait_for_port_file "$V1_PORT_FILE" "v1 readiness listener"
+V1_PORT="$(cat "$V1_PORT_FILE")"
 
 cli_v1() {
   : > "$L_CALLS"
@@ -1429,13 +1461,14 @@ chmod +x "${U_BIN}/herdr" "${U_BIN}/systemctl" "${U_BIN}/systemd-run" "${U_BIN}/
 # what the machine claims to be running; an empty file is "down".
 U_STATE="${UPDATE_HOME}/.local/state/collie"
 U_HEALTH="${TMP_ROOT}/update-health-version"
-U_PORT="$(pick_port 48791 48891 48991)"
+U_PORT_FILE="${TMP_ROOT}/update-health-port"
 printf '9.10.0\n' > "$U_HEALTH"
 cat > "${TMP_ROOT}/update-health.ts" <<EOF
-import { readFileSync } from "node:fs";
-Bun.serve({
+import { readFileSync, writeFileSync } from "node:fs";
+// Port 0 and then report it: this script owns the listener, so it binds first and asks second.
+const server = Bun.serve({
   hostname: "127.0.0.1",
-  port: ${U_PORT},
+  port: 0,
   fetch(req) {
     if (new URL(req.url).pathname !== "/api/health") return new Response("no", { status: 404 });
     const version = readFileSync("${U_HEALTH}", "utf8").trim();
@@ -1443,16 +1476,15 @@ Bun.serve({
     return Response.json({ ok: true, version, deposed: false, mode: "solo" });
   },
 });
+writeFileSync("${U_PORT_FILE}", String(server.port));
 EOF
 # `>/dev/null 2>&1` is load-bearing, not tidiness: a background child inheriting this script's
 # stdout holds the pipe open, and a caller reading the suite through `| tail` would then wait for
 # the health stand-in rather than for the suite.
 bun "${TMP_ROOT}/update-health.ts" >/dev/null 2>&1 &
 U_HEALTH_PID=$!
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  curl -fsS "http://127.0.0.1:${U_PORT}/api/health" >/dev/null 2>&1 && break
-  sleep 0.2
-done
+wait_for_port_file "$U_PORT_FILE" "update health stand-in"
+U_PORT="$(cat "$U_PORT_FILE")"
 
 # What the health stand-in claims this machine is running.
 health_says() { printf '%s\n' "$1" > "$U_HEALTH"; }
@@ -1918,11 +1950,11 @@ pair_env() {
     PATH="$BIN_DIR" "$BIN" "$@"
 }
 
-# Nothing paired yet: `devices list` says so in the words that matter — pairing is NOT enforced — and
-# materialises no file by asking the question.
+# Nothing paired yet: `devices list` says so in the words that matter — pairing is always on, so
+# nothing is answered until `collie pair` runs (ADR 0086) — and materialises no file by asking.
 pair_env devices list || fail "\`collie devices list\` failed on an unpaired machine: ${STDERR}"
 assert_contains "$STDOUT" "no devices paired"
-assert_contains "$STDOUT" "not enforced"
+assert_contains "$STDOUT" "always on"
 [ -z "$(ls -A "$PAIR_STATE")" ] || fail "\`devices list\` wrote into the state dir with nothing paired"
 
 # `pair` mints the code and writes the pending file the bridge reads at request time.
@@ -2110,7 +2142,7 @@ for args in "stt" "stt nonsense"; do
   set -e
   assert_eq "$rc" "2"
 done
-assert_contains "$(cat "${TMP_ROOT}/err")" "usage: collie stt {setup|test|status|off}"
+assert_contains "$(cat "${TMP_ROOT}/err")" "usage: collie stt {setup|whistle|test|status|off}"
 
 # Not one of them shelled out to anything — `stt` never runs a tool it was not told to.
 assert_eq "$(cat "$PAIR_CALLS")" ""

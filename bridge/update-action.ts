@@ -1,8 +1,11 @@
+import { closeSync, existsSync, openSync, renameSync, writeSync } from "node:fs";
+import { join } from "node:path";
+
 import type { JsonObject, JsonValue } from "./json.ts";
 import type { UpdateStatus } from "./types.ts";
 import type { PeerHealth } from "./crew/registry.ts";
 import { apiError, type ApiErrorBody, type ApiErrorDetail, type ErrorCode } from "./error-codes.ts";
-import { compareSemver } from "./update.ts";
+import { compareSemver, UPDATE_MIRROR_ENV } from "./update.ts";
 import { inFlight, type UpdateRun, type UpdateRunState } from "./update-run.ts";
 
 // `POST /api/update` — the phone's one-tap-plus-one-confirm start, and the preflight it is gated on
@@ -690,9 +693,10 @@ export class PreflightCache {
     let report: PreflightReport | null;
     try {
       report = parsePreflightReport((await this.deps.run()).stdout);
-    } catch {
+    } catch (error) {
       // The subprocess could not be started at all. That is "no report", which refuses the update —
-      // never "nothing is red".
+      // never "nothing is red". Logged, because the card then says only "could not be run".
+      console.warn(`[update] preflight could not start: ${error instanceof Error ? error.message : String(error)}`);
       report = null;
     }
     this.value = report;
@@ -785,6 +789,12 @@ export interface UpdateStartState {
    * a member behind the lead's own version, or one that rolled back.
    */
   readonly peers?: readonly { readonly name: string; readonly state: string }[];
+  /**
+   * Whether this lead's crew run is still open (`UpdateTurns.open`). Absent ⇒ no run. A second
+   * confirm while one is open is refused: it would replace the run's legs while a member may still
+   * be building under the first run's id (A5).
+   */
+  readonly crewRunOpen?: boolean;
 }
 
 /**
@@ -812,6 +822,10 @@ export function updateStartVerdict(req: UpdateStartRequest, state: UpdateStartSt
   if (running || state.lockHeld) {
     return refuse(409, "update.in_progress", { state: state.run?.state ?? "staging" });
   }
+  // One confirm at a time for the CREW too (A5). The same code and sentence an older phone already
+  // renders: "An update is already running (levelling the crew). Nothing was started." The run is
+  // bounded (`CREW_RUN_TTL_MS`), so this refusal is too.
+  if (state.crewRunOpen === true) return refuse(409, "update.in_progress", { state: "levelling the crew" });
 
   // ── THE PEERS-ONLY RUN (M16/04) ─────────────────────────────────────────────
   // Decided here, above the preflight, because the gates below are about THIS machine's own move and
@@ -1009,13 +1023,21 @@ export function updateStartCommand(a: {
    * (M16/04). Absent on the lead's own button, which takes what an update would take.
    */
   readonly toTag?: string | null;
+  /**
+   * The rehearsal mirror value the bridge runs with (a test seam, `bridge/update.ts`), raw, or null.
+   * The systemd-run tier starts `collie update` in a transient unit with a bare environment, so the
+   * value is handed over with `--setenv`, valid or not: `collie update` then takes the same mirror,
+   * or refuses the same bad value, and never asks GitHub in its place. The other tiers inherit it.
+   */
+  readonly mirror?: string | null;
 }): UpdateStartPlan {
   const verb = a.major ? ["update", "--major"] : ["update"];
   if (a.toTag !== undefined && a.toTag !== null) verb.push("--to-tag", a.toTag);
   if (a.runId !== undefined && a.runId !== null) verb.push("--run-id", a.runId);
   if (a.platform === "linux" && a.hasSystemdRun) {
+    const setenv = a.mirror === undefined || a.mirror === null ? [] : [`--setenv=${UPDATE_MIRROR_ENV}=${a.mirror}`];
     return {
-      command: ["systemd-run", "--user", "--collect", "--unit", `collie-api-update-${a.stamp}`, a.binary, ...verb],
+      command: ["systemd-run", "--user", "--collect", "--unit", `collie-api-update-${a.stamp}`, ...setenv, a.binary, ...verb],
       detach: false,
     };
   }
@@ -1023,13 +1045,67 @@ export function updateStartCommand(a: {
   return { command: [a.binary, ...verb], detach: true };
 }
 
-/** The options the runner is spawned with. Every stream is ignored, so nothing ties it to the bridge. */
+/**
+ * The options the runner is spawned with. stdin is ignored; stdout and stderr go to the runner log
+ * ({@link openRunnerLog}) when it could be opened, and are ignored when it could not. A file
+ * descriptor ties nothing to the bridge: the child holds its own copy, and the bridge closes its
+ * one the moment the spawn returns.
+ */
 export interface UpdateRunnerSpawnOptions {
   readonly cwd: string;
   readonly stdin: "ignore";
-  readonly stdout: "ignore";
-  readonly stderr: "ignore";
+  readonly stdout: "ignore" | number;
+  readonly stderr: "ignore" | number;
   readonly detached: boolean;
+}
+
+/** `<state dir>/update-runner.log`: the detached runner's own two streams, for one launch (#283). */
+export const updateRunnerLogPath = (stateDir: string): string => join(stateDir, "update-runner.log");
+
+/** An opened runner log: the descriptor the child writes to, and the bridge's own close of it. */
+export interface RunnerLog {
+  readonly fd: number;
+  close(): void;
+}
+
+/**
+ * Open the runner log for one launch, or null when it cannot be opened (the launch then goes ahead
+ * with both streams ignored, exactly as before this file existed).
+ *
+ * WHY IT EXISTS (#283). The runner used to start with every stream ignored, so a runner that died
+ * before it wrote a run record left nothing at all: a macOS operator pressed Update three times and
+ * the only trace was the last line of a staging log. Whatever the runner prints now lands here, and
+ * on the `setsid` and bare tiers that is `collie update`'s whole transcript. On the `systemd-run`
+ * tier it is only the client's one line; the runner's own output is in that unit's journal.
+ *
+ * BOUNDED BY RUNS, NOT BY BYTES. Each launch keeps the previous run's file as `update-runner.log.1`
+ * and starts this one empty, so the directory holds at most two runs. A byte cap cannot be applied
+ * to a descriptor another process writes to; one run of `collie update` prints a transcript, and a
+ * staged build's output is the longest of those.
+ */
+export function openRunnerLog(stateDir: string, header: string): RunnerLog | null {
+  const path = updateRunnerLogPath(stateDir);
+  try {
+    if (existsSync(path)) renameSync(path, `${path}.1`);
+    const fd = openSync(path, "w", 0o600);
+    try {
+      writeSync(fd, `${header}\n`);
+    } catch {
+      /* a header nobody could write is not a reason to lose the run's own output */
+    }
+    return {
+      fd,
+      close: () => {
+        try {
+          closeSync(fd);
+        } catch {
+          /* already closed */
+        }
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** `Bun.spawn` in the bridge; a recorder in a test. */
@@ -1044,19 +1120,24 @@ export type UpdateRunnerSpawn = (command: string[], options: UpdateRunnerSpawnOp
  */
 export function launchUpdateRunner(
   plan: UpdateStartPlan,
-  a: { readonly cwd: string; readonly spawn: UpdateRunnerSpawn },
+  a: { readonly cwd: string; readonly spawn: UpdateRunnerSpawn; readonly log?: RunnerLog | null },
 ): { ok: true } | { ok: false; reason: string } {
+  const out = a.log?.fd ?? "ignore";
   try {
     const child = a.spawn(plan.command, {
       cwd: a.cwd,
       stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
+      stdout: out,
+      stderr: out,
       detached: plan.detach,
     });
     child.unref();
     return { ok: true };
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  } finally {
+    // The child has its own copy of the descriptor by now; this process's copy only holds the file
+    // open for nothing.
+    a.log?.close();
   }
 }

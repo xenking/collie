@@ -1,0 +1,497 @@
+import { describe, expect, test } from "bun:test";
+
+import { createClaudeReducer } from "./claude.ts";
+import { createCodexReducer } from "./codex.ts";
+import { createGrokReducer } from "./grok.ts";
+import { createHermesReducer } from "./hermes.ts";
+import { createMuseReducer } from "./muse.ts";
+import { createOpencodeReducer } from "./opencode.ts";
+import { createPiReducer } from "./pi.ts";
+import {
+  createUnknownCounter,
+  describeUnknowns,
+  UNKNOWN_NAMES_MAX,
+  UNKNOWN_OVERFLOW,
+  unknownCount,
+  type RowReducer,
+} from "./reduce.ts";
+import { buildJournalRegistry, journalAgents } from "./registry.ts";
+
+// ── THE GATE FOR "WHAT THIS READER DID NOT RECOGNISE" ───────────────────────────────────────────
+//
+// Spec M41/05. Each reducer counts the row kinds and content kinds it had no branch for, and the
+// canary fails a run above zero, naming the type. Two properties are what make that gate worth
+// having, and both are pinned here per adapter:
+//
+//   1. A corpus of the types the adapter HAS met counts nothing — including the ones it drops on
+//      purpose, and including every kind of rubbish a tail read produces. A gate that cries on a
+//      normal session is a gate somebody turns off.
+//   2. A type the vendor ADDED is counted and NAMED, at whichever level it appeared: the row's own
+//      kind, a role, or a content block.
+//
+// Nothing here reads a real session: every corpus is built in the test, for the reason spec M41/05
+// declined recorded sessions as fixtures (a Claude JSONL carries file contents from every Read).
+
+/** Any JSON document — the same local type every other test in this directory declares. */
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue | undefined };
+
+const row = (o: Record<string, JsonValue>) => JSON.stringify(o);
+
+/** Rubbish every corpus ends with, because a tail read produces all of it. None of it is a TYPE. */
+const RUBBISH = ["", "   ", "12", "null", "true", '"a string"', "[1,2]", '{"no":"type"}', '{"type":"user","mess'];
+
+/** Push every line and answer the tally. */
+function tallyOf(reducer: RowReducer, lines: readonly string[]) {
+  for (const line of [...lines, ...RUBBISH]) reducer.push(line);
+  return reducer.unknowns();
+}
+
+/** The names a tally holds, sorted, so an assertion reads as an inventory. */
+function names(counts: ReadonlyMap<string, number>): string[] {
+  return [...counts.keys()].toSorted();
+}
+
+describe("claude", () => {
+  const clean = [
+    row({ type: "user", uuid: "u1", timestamp: "t", message: { role: "user", content: "hello" } }),
+    row({
+      type: "assistant",
+      uuid: "a1",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "reading" },
+          { type: "thinking", thinking: "hm" },
+          { type: "tool_use", id: "t1", name: "Read", input: { file_path: "/a.ts" } },
+          // Dropped on purpose, and listed in CLAUDE_KNOWN for exactly that reason.
+          { type: "image", source: { type: "base64", data: "x" } },
+        ],
+      },
+    }),
+    row({ type: "user", uuid: "u2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } }),
+    // The bookkeeping half of the inventory, one row each.
+    ...["attachment", "queue-operation", "last-prompt", "atis-latch", "mode", "permission-mode", "custom-title", "agent-name", "ai-title", "file-history-snapshot", "file-history-delta", "cost-state", "fork-context-ref", "started", "result", "launched", "summary"].map((type) =>
+      row({ type, uuid: "b" }),
+    ),
+    row({ type: "system", subtype: "compact_boundary", uuid: "s1" }),
+    row({ type: "continued-in", continuedInSessionId: "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9" }),
+  ];
+
+  test("the whole measured inventory counts nothing", () => {
+    const tally = tallyOf(createClaudeReducer(), clean);
+    expect(describeUnknowns(tally)).toBe("");
+    expect(unknownCount(tally)).toBe(0);
+  });
+
+  test("a row type Claude Code adds is counted and named", () => {
+    const tally = tallyOf(createClaudeReducer(), [...clean, row({ type: "time-travel", uuid: "z" }), row({ type: "time-travel", uuid: "z2" })]);
+    expect(names(tally.rows)).toEqual(["time-travel"]);
+    expect(tally.rows.get("time-travel")).toBe(2);
+    expect(describeUnknowns(tally)).toBe("row types time-travel (2)");
+  });
+
+  test("a content block Claude Code adds is counted and named", () => {
+    const tally = tallyOf(createClaudeReducer(), [
+      row({ type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "web_search_result", url: "x" }] } }),
+    ]);
+    expect(names(tally.parts)).toEqual(["web_search_result"]);
+    expect(describeUnknowns(tally)).toBe("part types web_search_result (1)");
+  });
+});
+
+describe("codex", () => {
+  const item = (payload: Record<string, JsonValue>) => row({ timestamp: "t", type: "response_item", payload });
+  const clean = [
+    row({ timestamp: "t", type: "session_meta", payload: { id: "s", cwd: "/repo" } }),
+    row({ timestamp: "t", type: "event_msg", payload: { type: "agent_message", message: "dropped" } }),
+    row({ timestamp: "t", type: "token_usage_record", payload: {} }),
+    row({ timestamp: "t", type: "turn_context", payload: {} }),
+    row({ timestamp: "t", type: "world_state", payload: {} }),
+    row({ timestamp: "t", type: "compacted", payload: { message: "a hand-off summary", replacement_history: [] } }),
+    item({ type: "message", role: "user", content: [{ type: "input_text", text: "fix the types" }] }),
+    item({ type: "message", role: "assistant", content: [{ type: "output_text", text: "Looking." }] }),
+    // Injected system prompts: a role the grammar refuses by name.
+    item({ type: "message", role: "developer", content: [{ type: "input_text", text: "instructions" }] }),
+    item({ type: "reasoning", summary: [{ type: "summary_text", text: "thinking" }] }),
+    item({ type: "function_call", name: "shell", arguments: '{"command":["ls"]}', call_id: "c1" }),
+    item({ type: "function_call_output", call_id: "c1", output: '{"output":"ok","metadata":{"exit_code":0}}' }),
+    // Dropped today, listed in CODEX_KNOWN with the gap written down beside it.
+    item({ type: "custom_tool_call", name: "apply_patch", input: "***" }),
+    item({ type: "custom_tool_call_output", call_id: "c2", output: "done" }),
+  ];
+
+  test("the whole measured inventory counts nothing", () => {
+    expect(describeUnknowns(tallyOf(createCodexReducer(), clean))).toBe("");
+  });
+
+  test("both levels of 'what is this row' are counted: the envelope and the payload", () => {
+    const tally = tallyOf(createCodexReducer(), [
+      ...clean,
+      row({ timestamp: "t", type: "rollout_meta", payload: {} }),
+      item({ type: "web_search_call", action: {} }),
+    ]);
+    expect(names(tally.rows)).toEqual(["rollout_meta", "web_search_call"]);
+  });
+
+  test("a role and a content block are counted where they appear", () => {
+    const tally = tallyOf(createCodexReducer(), [item({ type: "message", role: "tool", content: [{ type: "input_image", url: "x" }] })]);
+    expect(names(tally.rows)).toEqual(["role:tool"]);
+    expect(names(tally.parts)).toEqual(["input_image"]);
+  });
+});
+
+describe("grok", () => {
+  const clean = [
+    row({ type: "system", content: "You are Grok" }),
+    row({ type: "user", content: [{ type: "text", text: "<user_query>run it</user_query>" }], prompt_index: 1 }),
+    row({ type: "reasoning", id: "rs1", summary: [{ type: "summary_text", text: "planning" }] }),
+    row({ type: "assistant", content: "one", tool_calls: [{ id: "c1", name: "bash", arguments: '{"command":"ls"}' }] }),
+    row({ type: "backend_tool_call", kind: { tool_type: "web_search", action: { query: "x" } } }),
+    row({ type: "tool_result", tool_call_id: "c1", content: "exit 0" }),
+  ];
+
+  test("the header's own inventory counts nothing", () => {
+    expect(describeUnknowns(tallyOf(createGrokReducer(), clean))).toBe("");
+  });
+
+  test("a new row type and a new content block are both counted", () => {
+    const tally = tallyOf(createGrokReducer(), [...clean, row({ type: "memory", content: [{ type: "image_url", url: "x" }] })]);
+    expect(names(tally.rows)).toEqual(["memory"]);
+    expect(names(tally.parts)).toEqual(["image_url"]);
+  });
+});
+
+describe("hermes", () => {
+  const clean = [
+    row({ id: 1, role: "user", content: "show history", timestamp: 1 }),
+    row({ id: 2, role: "assistant", content: "one", reasoning: "read-only", timestamp: 2 }),
+    row({ id: 3, role: "tool", tool_call_id: "c1", tool_name: "bash", content: "/home/you", timestamp: 3 }),
+    // Hidden and inactive rows render nothing and are still roles this adapter has met.
+    row({ id: 4, role: "assistant", content: "gone", timestamp: 4, active: 0, compacted: 0 }),
+    row({ id: 5, role: "user", content: "hidden", timestamp: 5, display_kind: "hidden" }),
+  ];
+
+  test("the three modelled roles count nothing", () => {
+    expect(describeUnknowns(tallyOf(createHermesReducer(), clean))).toBe("");
+  });
+
+  test("an unmodelled role is counted, where `rowEntry` only answers null", () => {
+    const tally = tallyOf(createHermesReducer(), [...clean, row({ id: 6, role: "system", content: "prompt", timestamp: 6 })]);
+    expect(names(tally.rows)).toEqual(["role:system"]);
+  });
+
+  test("its part tally is empty by format, never by omission", () => {
+    // Hermes has no content discriminator at all: content is a column, and a tool call is a JSON
+    // array with no type on it. There is nothing here a vendor could add a value to.
+    const tally = tallyOf(createHermesReducer(), [...clean, row({ id: 7, role: "wat", content: "x", timestamp: 7 })]);
+    expect(tally.parts.size).toBe(0);
+  });
+});
+
+describe("muse", () => {
+  const envelope = (payloadType: string, payload: Record<string, JsonValue>) =>
+    row({ schema_version: 1, id: "row-1", recorded_at: 1790904354495081, payload_type: payloadType, payload });
+  const run = (kind: string) =>
+    envelope("runtime.session", { kind: "run", run_id: "run-1", event: { kind, message_id: "m1" } });
+  const clean = [
+    // One user turn with both content kinds the format carries.
+    envelope("runtime.user_intent.accepted", {
+      model_messages: [{ role: "user", content: [{ kind: "text", text: "hi" }, { kind: "asset", asset: {} }] }],
+    }),
+    envelope("runtime.user_intent.materialized", {}),
+    envelope("runtime.session.task", {}),
+    envelope("runtime.session.metadata", {}),
+    envelope("runtime.session.route_facts", {}),
+    envelope("runtime.retained_fact", {}),
+    envelope("runtime.command_intake.received", {}),
+    envelope("runtime.command_intake.settled", {}),
+    envelope("runtime.command_intake.session_name.received", {}),
+    envelope("run.model.configured", {}),
+    envelope("tool_batch.effect.started", {}),
+    envelope("tool_batch.effect.terminal", {}),
+    envelope("async.owner.attempt_admitted", {}),
+    envelope("reminder.cleanup_effect.started", {}),
+    envelope("reminder.cleanup_effect.terminal", {}),
+    envelope("approval_wait.effect.started", {}),
+    envelope("approval_wait.effect.terminal", {}),
+    envelope("session.resource_pressure.observed", {}),
+    envelope("session.opened.observed", {}),
+    envelope("session.startup_phases.observed", {}),
+    envelope("session.end", {}),
+    envelope("session.resumed", {}),
+    envelope("session.name.changed", {}),
+    envelope("command.invoked", {}),
+    ...[
+      "spawn_accepted",
+      "resume_context_recorded",
+      "attempt_admitted",
+      "child_session_bound",
+      "start_attested",
+      "status_updated",
+      "runtime_observed",
+      "result_ready",
+    ].map((kind) => envelope(`subagent.control.${kind}`, {})),
+    // The run/task/approval event inventory, one row each.
+    ...[
+      "task_stream_linked",
+      "goal_usage_attribution",
+      "hook_run_started",
+      "hook_run_terminal",
+      "reasoning_committed",
+      "provider_request_options_configured",
+      "model_input_trace_recorded",
+      "model_response_created",
+      "model_completed",
+      "assistant_tool_calls_committed",
+      "tool_result_batch_committed",
+      "memory_reminder_child_session_linked",
+      "reminder_proposal",
+      "reminder_reconciler_outcome",
+      "skill_reminder_decision",
+      "reasoning_summary_delta",
+      "context_block_diagnostic",
+      "reasoning_summary_committed",
+      "resource_usage_sampled",
+      "started",
+      "model_request_configured",
+      "terminal",
+      "assistant_message_committed",
+      "todo_snapshot_updated",
+      "reminder_installed",
+      "tool_result_model_visible_content",
+      "inbox_item_queued",
+      "inbox_item_drained",
+      "inbox_delivery_anomaly",
+      "skill_read_observed",
+      "workflow_child_lifecycle",
+      "tool_results_cleared",
+      "context_compaction_candidate",
+      "context_compaction_installed",
+      "context_projection_checkpoint",
+      "context_projection_checkpoint_skipped",
+      "user_input_prompt_requested",
+      "user_input_prompt_settled",
+      "task_backgrounded",
+      "run_retracted",
+      "workflow_run_launched",
+      "workflow_launch_reconciled",
+    ].map(run),
+    ...[
+      "proposed",
+      "accepted",
+      "scheduled",
+      "started",
+      "side_effect_intent",
+      "completed",
+      "status",
+      "output",
+      "rejected",
+      "tool_output_ref",
+      "failed",
+      "cancelled",
+      "timed_out",
+    ].map((kind) =>
+      envelope("runtime.session", { kind: "task", task_id: "task-1", event: { kind, task_id: "task-1" } }),
+    ),
+    ...["requested", "decision_applied", "automated_review_started", "automated_review_completed"].map(
+      (kind) =>
+        envelope("runtime.session", {
+          kind: "approval",
+          approval_id: "a1",
+          event: { kind, decision: "approved", tool_call_id: "call_1" },
+        }),
+    ),
+    envelope("runtime.session", { kind: "agent_tree_initialized" }),
+    // The third content kind, beside a tool result.
+    envelope("runtime.session", {
+      kind: "run",
+      run_id: "run-1",
+      event: {
+        kind: "tool_result_model_visible_content",
+        message_id: "m1",
+        call_id: "call_1",
+        content: [{ kind: "image", base64_data: "x", media_type: "image/png" }],
+      },
+    }),
+  ];
+
+  test("the whole measured inventory counts nothing", () => {
+    const tally = tallyOf(createMuseReducer(), clean);
+    expect(describeUnknowns(tally)).toBe("");
+    expect(unknownCount(tally)).toBe(0);
+  });
+
+  test("a row type Muse adds is counted and named", () => {
+    const tally = tallyOf(createMuseReducer(), [
+      ...clean,
+      envelope("runtime.future.row", {}),
+      envelope("runtime.future.row", {}),
+    ]);
+    expect(names(tally.rows)).toEqual(["runtime.future.row"]);
+    expect(tally.rows.get("runtime.future.row")).toBe(2);
+    expect(describeUnknowns(tally)).toBe("row types runtime.future.row (2)");
+  });
+
+  test("a run event Muse adds is counted under its composite", () => {
+    const tally = tallyOf(createMuseReducer(), [...clean, run("future_event")]);
+    expect(names(tally.rows)).toEqual(["run/future_event"]);
+  });
+
+  test("a content block Muse adds is counted and named", () => {
+    const tally = tallyOf(createMuseReducer(), [
+      envelope("runtime.user_intent.accepted", {
+        model_messages: [{ role: "user", content: [{ kind: "future_block", text: "?" }] }],
+      }),
+    ]);
+    expect(names(tally.parts)).toEqual(["future_block"]);
+    expect(describeUnknowns(tally)).toBe("part types future_block (1)");
+  });
+});
+
+describe("opencode", () => {
+  const line = (role: string, parts: JsonValue[]) =>
+    row({ id: `msg_${role}`, ts: 1, data: { role, time: { created: 1 } }, parts: parts.map((d, i) => ({ id: `prt_${i}`, data: d })) });
+  const clean = [
+    line("user", [{ type: "text", text: "hi", time: { start: 1, end: 2 } }]),
+    line("assistant", [
+      { type: "step-start" },
+      { type: "reasoning", text: "thinking" },
+      { type: "text", text: "one" },
+      { type: "tool", tool: "bash", callID: "c1", state: { status: "completed", input: { command: "ls" }, output: "ok" } },
+      // The three this adapter drops today, each listed in OPENCODE_KNOWN with the gap beside it.
+      { type: "patch", hash: "abc" },
+      { type: "file", filename: "a.png" },
+      { type: "compaction", auto: true },
+      { type: "step-finish" },
+    ]),
+    line("summary", [{ type: "text", text: "compacted" }]),
+  ];
+
+  test("the whole measured inventory counts nothing", () => {
+    expect(describeUnknowns(tallyOf(createOpencodeReducer(), clean))).toBe("");
+  });
+
+  test("a role and a part type OpenCode adds are counted and named", () => {
+    const tally = tallyOf(createOpencodeReducer(), [...clean, line("assistant", [{ type: "snapshot", id: "s" }]), line("tool", [])]);
+    expect(names(tally.rows)).toEqual(["role:tool"]);
+    expect(names(tally.parts)).toEqual(["snapshot"]);
+  });
+});
+
+describe("pi", () => {
+  const message = (id: string, m: Record<string, JsonValue>) => row({ type: "message", id, parentId: "p0", timestamp: "t", message: m });
+  const clean = [
+    row({ type: "session", version: 3, id: "019f1827-bf99-7927-9684-76318de905b5", cwd: "/repo" }),
+    message("m1", { role: "user", content: [{ type: "text", text: "read it" }] }),
+    message("m2", { role: "assistant", content: [{ type: "thinking", thinking: "hm" }, { type: "toolCall", id: "c1", name: "read", arguments: { path: "/x" } }] }),
+    message("m3", { role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: "contents" }] }),
+    message("m4", { role: "bashExecution", command: "ls", output: "a.ts", exitCode: 0 }),
+    message("m5", { role: "system", content: "injected context" }),
+    message("m6", { role: "user", content: [{ type: "image", data: "x", mimeType: "image/png" }] }),
+    row({ type: "compaction", id: "c9", parentId: "p0", summary: "so far" }),
+    row({ type: "branch_summary", id: "c10", parentId: "p0", summary: "branch" }),
+    row({ type: "custom_message", id: "c11", parentId: "p0", display: true, content: "a note" }),
+    // An extension's own bookkeeping: `customType` + `data`, no `display`, nothing to show.
+    row({ type: "custom", id: "c12", parentId: "p0", customType: "pi.todo", data: {} }),
+    ...["model_change", "thinking_level_change", "usage", "label"].map((type) => row({ type, id: `k-${type}`, parentId: "p0" })),
+    // Session names: pi 1.1.0's `session_info`, and Oh My Pi's id-less `title` and its `title_change`.
+    row({ type: "session_info", id: "n1", parentId: "p0", name: "a name" }),
+    row({ type: "title", v: 1, title: "", updatedAt: "t" }),
+    row({ type: "title_change", id: "n2", parentId: "n1", title: "OK", source: "auto" }),
+    // Oh My Pi 18.10's cost ledger and service tier, shaped as a real session wrote them: the tier at
+    // session start (`--service-tier auto`), the usage of a composer prediction after the reply.
+    row({ type: "service_tier_change", id: "s1", parentId: "p0", timestamp: "t", serviceTier: { openai: "auto" } }),
+    row({
+      type: "model_usage",
+      id: "u1",
+      parentId: "m2",
+      timestamp: "t",
+      purpose: "composer-prediction",
+      api: "openai-completions",
+      provider: "p",
+      model: "m",
+      usage: { input: 274, output: 164, cacheRead: 8000, cacheWrite: 0, totalTokens: 8438 },
+      stopReason: "stop",
+    }),
+    // A tier that was cleared writes `serviceTier: null`.
+    row({ type: "service_tier_change", id: "t1", parentId: "u1", timestamp: "t", serviceTier: null }),
+  ];
+
+  test("the whole measured inventory counts nothing", () => {
+    expect(describeUnknowns(tallyOf(createPiReducer(), clean))).toBe("");
+  });
+
+  test("model_usage and service_tier_change are known rows that draw nothing", () => {
+    for (const type of ["model_usage", "service_tier_change"]) {
+      const reducer = createPiReducer();
+      const reduction = reducer.push(row({ type, id: "k1", parentId: "p0", serviceTier: null }));
+      expect(reduction.added, type).toEqual([]);
+      expect(reducer.unknowns().rows.has(type), type).toBe(false);
+    }
+  });
+
+  test("a new row type, a new role and a new block are each counted at their own level", () => {
+    const tally = tallyOf(createPiReducer(), [
+      ...clean,
+      row({ type: "queue", id: "q1", parentId: "p0" }),
+      message("m7", { role: "agentHandoff", content: [{ type: "audio", data: "x" }] }),
+    ]);
+    expect(names(tally.rows)).toEqual(["queue", "role:agentHandoff"]);
+    expect(names(tally.parts)).toEqual(["audio"]);
+    // The `user` fallback at the bottom of `draw` would otherwise swallow that role in silence.
+    expect(tally.rows.get("role:agentHandoff")).toBe(1);
+  });
+});
+
+describe("the counter itself", () => {
+  test("a tally is a snapshot: a later row cannot change what a caller holds", () => {
+    const reducer = createClaudeReducer();
+    reducer.push(JSON.stringify({ type: "first-new", uuid: "a" }));
+    const held = reducer.unknowns();
+    reducer.push(JSON.stringify({ type: "second-new", uuid: "b" }));
+    expect(names(held.rows)).toEqual(["first-new"]);
+    expect(names(reducer.unknowns().rows)).toEqual(["first-new", "second-new"]);
+  });
+
+  test("the name list is bounded and the COUNT is not", () => {
+    const reducer = createClaudeReducer();
+    const over = UNKNOWN_NAMES_MAX + 8;
+    for (let i = 0; i < over; i++) reducer.push(JSON.stringify({ type: `new-${i}`, uuid: "x" }));
+    const tally = reducer.unknowns();
+    // The first MAX names are kept — a format change shows up in the first rows that carry it — and
+    // the rest are counted under one name rather than dropped.
+    expect(tally.rows.size).toBe(UNKNOWN_NAMES_MAX + 1);
+    expect(tally.rows.has("new-0")).toBe(true);
+    expect(tally.rows.has(`new-${over - 1}`)).toBe(false);
+    expect(tally.rows.get(UNKNOWN_OVERFLOW)).toBe(8);
+    expect(unknownCount(tally)).toBe(over);
+  });
+
+  test("a value that is not a non-empty string is not a type", () => {
+    const counter = createUnknownCounter({ rows: ["user"], roles: [], parts: [] });
+    const notTypes: (JsonValue | undefined)[] = [undefined, null, "", 7, true, ["a"], { a: 1 }];
+    for (const value of notTypes) counter.row(value);
+    expect(counter.tally().rows.size).toBe(0);
+  });
+
+  test("describeUnknowns names both levels, commonest first", () => {
+    const counter = createUnknownCounter({ rows: [], roles: [], parts: [] });
+    counter.row("beta");
+    counter.row("alpha");
+    counter.row("alpha");
+    counter.part("gamma");
+    expect(describeUnknowns(counter.tally())).toBe("row types alpha (2), beta (1); part types gamma (1)");
+  });
+});
+
+// A ninth adapter cannot land without a tally: the canary's gate reads every registered adapter's
+// reducer, and one that answered nothing would be an agent whose drift nobody is watching.
+test("every registered journal adapter's reducer answers a tally", () => {
+  const registry = buildJournalRegistry({ claude: [], codex: [], pi: [], opencode: [], grok: [], hermes: [], muse: [], openclaw: [] });
+  expect(journalAgents(registry)).toHaveLength(8);
+  for (const [agent, adapter] of Object.entries(registry)) {
+    const tally = adapter.reducer().unknowns();
+    expect(tally.rows.size, agent).toBe(0);
+    expect(tally.parts.size, agent).toBe(0);
+  }
+});

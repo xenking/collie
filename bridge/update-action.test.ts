@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   firstRed,
   FreshPreflightGate,
   launchUpdateRunner,
+  openRunnerLog,
+  updateRunnerLogPath,
   mergedUpdateVerdict,
   CREW_PREFLIGHT_MAX_CHECKS,
   CREW_PREFLIGHT_TRUNCATED_ID,
@@ -241,6 +244,24 @@ describe("POST api/update — the update write gate's verdict", () => {
     expect(v).toMatchObject({ kind: "refuse", status: 409, body: { code: "update.in_progress" } });
   });
 
+  test("a second confirm while the crew run is still open is refused, full or peers-only (A5)", () => {
+    // The lead is done, a member is still waiting out its own hourly limit, and the operator taps
+    // again. Accepting would replace the run's legs while that member may be building under the
+    // first run's id, so it is refused with the code and sentence every phone already renders.
+    const refused = {
+      kind: "refuse",
+      status: 409,
+      body: {
+        error: "an update is already running (levelling the crew); nothing was started",
+        code: "update.in_progress",
+        detail: { state: "levelling the crew" },
+      },
+    } as const;
+    expect(updateStartVerdict(ask(), state({ run: runAt("done"), crewRunOpen: true }))).toEqual(refused);
+    expect(updateStartVerdict(ask({ peersOnly: true }), state({ current: "1.4.0", crewRunOpen: true }))).toEqual(refused);
+    expect(updateStartVerdict(ask(), state({ run: runAt("done"), crewRunOpen: false })).kind).toBe("start");
+  });
+
   test("a finished run does not block the next one", () => {
     expect(updateStartVerdict(ask(), state({ run: runAt("done") })).kind).toBe("start");
     expect(updateStartVerdict(ask(), state({ run: runAt("rolled-back") })).kind).toBe("start");
@@ -339,6 +360,25 @@ describe("update hands off — the command that leaves this process's cgroup", (
     });
   });
 
+  test("a rehearsal mirror reaches the transient unit's bare environment; the other tiers inherit it", () => {
+    // The transient unit starts `collie update` with a bare environment. Without this the CLI there
+    // would not see a mirror the bridge was started with and would ask GitHub instead.
+    for (const value of ["http://127.0.0.1:47321", "http://10.0.0.5:1"]) {
+      expect(updateStartCommand({ ...base, major: false, hasSystemdRun: true, hasSetsid: true, mirror: value }).command).toEqual([
+        "systemd-run", "--user", "--collect", "--unit", "collie-api-update-42",
+        `--setenv=COLLIE_UPDATE_MIRROR=${value}`, "/opt/collie/bin/collie", "update",
+      ]);
+    }
+    // No mirror: the command is the one it always was. Other tiers: the child inherits the variable.
+    expect(updateStartCommand({ ...base, major: false, hasSystemdRun: true, hasSetsid: true, mirror: null }).command).not.toContain(
+      "--setenv=COLLIE_UPDATE_MIRROR=",
+    );
+    expect(updateStartCommand({ ...base, platform: "win32", major: false, hasSystemdRun: false, hasSetsid: false, mirror: "http://127.0.0.1:1" })).toEqual({
+      command: ["/opt/collie/bin/collie", "update"],
+      detach: true,
+    });
+  });
+
   test("a major crossing hands the CLI its own consent flag (ADR 0020)", () => {
     const plan = updateStartCommand({ ...base, major: true, hasSystemdRun: true, hasSetsid: true });
     expect(plan.command.slice(-2)).toEqual(["update", "--major"]);
@@ -416,6 +456,75 @@ describe("the runner leaves the service's process group (#213)", () => {
       throw new Error("ENOENT");
     };
     expect(launchUpdateRunner(plan, { cwd: "/x", spawn })).toEqual({ ok: false, reason: "ENOENT" });
+  });
+});
+
+describe("the runner's own output is kept (#283)", () => {
+  const plan = () =>
+    updateStartCommand({ platform: "darwin", binary: "/x/collie", major: false, stamp: "1", hasSystemdRun: false, hasSetsid: false });
+
+  test("both streams go to the log's descriptor, and the bridge's copy is closed after the spawn", () => {
+    const seen: UpdateRunnerSpawnOptions[] = [];
+    let closed = 0;
+    const r = launchUpdateRunner(plan(), {
+      cwd: "/x",
+      spawn: (_command, options) => {
+        seen.push(options);
+        expect(closed).toBe(0);
+        return { unref: () => {} };
+      },
+      log: { fd: 42, close: () => void closed++ },
+    });
+    expect(r).toEqual({ ok: true });
+    expect(seen[0]?.stdout).toBe(42);
+    expect(seen[0]?.stderr).toBe(42);
+    expect(seen[0]?.stdin).toBe("ignore");
+    expect(closed).toBe(1);
+  });
+
+  test("a spawn that throws still closes the log", () => {
+    let closed = 0;
+    const r = launchUpdateRunner(plan(), {
+      cwd: "/x",
+      spawn: () => {
+        throw new Error("ENOENT");
+      },
+      log: { fd: 42, close: () => void closed++ },
+    });
+    expect(r).toEqual({ ok: false, reason: "ENOENT" });
+    expect(closed).toBe(1);
+  });
+
+  test("each launch starts the file empty with a header, and keeps the previous run as .1", () => {
+    const dir = mkdtempSync(join(tmpdir(), "collie-runner-log-"));
+    try {
+      const path = updateRunnerLogPath(dir);
+      expect(path).toBe(join(dir, "update-runner.log"));
+      writeFileSync(path, "the previous run\n");
+      const log = openRunnerLog(dir, "2026-09-24T00:00:00.000Z setsid /x/collie update");
+      expect(log).not.toBeNull();
+      log!.close();
+      expect(readFileSync(path, "utf8")).toBe("2026-09-24T00:00:00.000Z setsid /x/collie update\n");
+      expect(readFileSync(`${path}.1`, "utf8")).toBe("the previous run\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a log that cannot be opened is null, and the launch goes ahead with the streams ignored", () => {
+    const dir = mkdtempSync(join(tmpdir(), "collie-runner-log-"));
+    try {
+      // A state dir that is really a file: no log can be created under it, whatever the platform's
+      // permission model is (a read-only dir, `chmod 0o500`, stops nothing on NTFS and nothing as root).
+      const notADir = join(dir, "a-file");
+      writeFileSync(notADir, "");
+      expect(openRunnerLog(join(notADir, "state"), "header")).toBeNull();
+      const seen: UpdateRunnerSpawnOptions[] = [];
+      launchUpdateRunner(plan(), { cwd: "/x", spawn: (_c, o) => (seen.push(o), { unref: () => {} }), log: null });
+      expect(seen[0]?.stdout).toBe("ignore");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

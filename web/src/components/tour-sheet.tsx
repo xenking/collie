@@ -1,17 +1,15 @@
 import * as React from "react";
 import { KeyRound, MonitorDown, SquarePlus, BellRing } from "lucide-react";
-import { useNavigate } from "react-router";
 
 import { Button } from "@/components/ui/button";
+import { useNav } from "@/hooks/use-nav";
 import { Card } from "@/components/ui/card";
 import { ListGroup } from "@/components/ui/list-group";
 import { SectionLabel } from "@/components/ui/section-label";
 import { BottomSheet } from "@/components/ui/sheet";
 import { CollieMark } from "@/components/collie-mark";
-import { NewSpaceSheet } from "@/components/new-space-sheet";
 import { useLocale } from "@/hooks/use-locale";
 import { usePushControl } from "@/hooks/use-push";
-import { useSpaceActions } from "@/hooks/use-spaces";
 import { t, tn } from "@/lib/i18n";
 import { promptInstall, useInstallOffer } from "@/lib/install";
 import { reasonText } from "@/lib/push-copy";
@@ -19,7 +17,7 @@ import type { EnableResult, PushState } from "@/lib/push";
 import type { HomeData } from "@/lib/loaders";
 import { leadHost, hostName, paneScope } from "@/lib/hosts";
 import { useMuxName } from "@/lib/mux-capability";
-import { homePath, pairedDevicesPath, panePath } from "@/lib/nav";
+import { homePath, newPath, pairedDevicesPath, panePath } from "@/lib/nav";
 import { triage } from "@/lib/triage";
 import type { AgentView } from "@/lib/types";
 import { isReadOnly } from "@/lib/types";
@@ -235,7 +233,7 @@ export function TourSheet({
       // Full height, overriding the primitive's `max-h-[82dvh]`: this screen is the whole screen
       // while it is up, and a sheet that leaves the dashboard peeking above it invites a tap on a
       // control the operator has not been told about yet. The panel is already the scroller.
-      className="h-[100dvh] max-h-[100dvh] rounded-t-none"
+      className="h-(--app-h) max-h-(--app-h) rounded-t-none"
     >
       <div ref={panelRef} data-slot="tour-panel" className="flex min-h-full flex-col gap-6">
         {/* Skip is text, top-left. Never only an ✕: the ✕ in the sheet's own header reads as "close a
@@ -440,12 +438,10 @@ export function TourHost({ home, onDecision }: TourHostProps) {
  * an app that never shows it from probing push at boot.
  */
 function FirstRunLive({ home, onClosed }: { home: HomeData; onClosed: () => void }) {
-  const navigate = useNavigate();
+  const nav = useNav();
   const mux = useMuxName();
   const { state, busy, setEnabled } = usePushControl();
   const installOffer = useInstallOffer();
-  const { newSpace } = useSpaceActions();
-  const [spaceOpen, setSpaceOpen] = React.useState(false);
 
   // The blocked panes, in the dashboard's own order (lib/triage.ts): "needs you" is the first
   // section, newest first inside it. Reading it through `triage` rather than re-filtering here is
@@ -459,48 +455,36 @@ function FirstRunLive({ home, onClosed }: { home: HomeData; onClosed: () => void
   const exit = (reason: TourExit) => {
     onClosed();
     if (reason === "pair") {
-      navigate(pairedDevicesPath(home.scope));
+      nav.down(pairedDevicesPath(home.scope));
       return;
     }
     if (reason === "space") {
-      setSpaceOpen(true);
+      nav.down(newPath({ machine: home.scope.host, session: home.scope.session }));
       return;
     }
     if (reason === "pane" && blocked) {
-      navigate(panePath(blocked.paneId, paneScope(home.scope, blocked, home.servers, home.sessions)));
+      nav.down(panePath(blocked.paneId, paneScope(home.scope, blocked, home.servers, home.sessions)));
       return;
     }
-    if (reason === "dashboard" || reason === "pane") navigate(homePath(home.scope));
+    // The dashboard the tour sits on: a sideways replace, never a second dashboard entry (ADR 0067).
+    if (reason === "dashboard" || reason === "pane") nav.side(homePath(home.scope));
   };
 
   return (
-    <>
-      <TourSheet
-        open={!spaceOpen}
-        onClose={exit}
-        mux={mux}
-        host={host}
-        panes={home.agents.length}
-        needsYou={needs.length}
-        machines={home.servers.length}
-        readOnly={isReadOnly(home.device)}
-        pushState={state}
-        pushBusy={busy}
-        onEnablePush={() => setEnabled(true)}
-        installOffer={installOffer}
-        onInstall={() => void promptInstall()}
-      />
-      {/* The "Nothing is running yet" card's remedy, mounted HERE rather than reached for on the
-          dashboard: this gate is not always opened over the dashboard, and a button that navigated
-          first and opened a sheet second would need a signal to survive the navigation. No `repos`
-          is passed, and that is a fact rather than an omission — the card only appears when nothing
-          is running, so there is no open space for a worktree to be branched from. */}
-      <NewSpaceSheet
-        open={spaceOpen}
-        onClose={() => setSpaceOpen(false)}
-        onCreate={newSpace}
-        scope={home.scope}
-      />
-    </>
+    <TourSheet
+      open
+      onClose={exit}
+      mux={mux}
+      host={host}
+      panes={home.agents.length}
+      needsYou={needs.length}
+      machines={home.servers.length}
+      readOnly={isReadOnly(home.device)}
+      pushState={state}
+      pushBusy={busy}
+      onEnablePush={() => setEnabled(true)}
+      installOffer={installOffer}
+      onInstall={() => void promptInstall()}
+    />
   );
 }

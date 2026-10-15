@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { createPortal } from "react-dom";
-import { useNavigate } from "react-router";
 import { Check, Layers } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { useNav } from "@/hooks/use-nav";
 import { BottomSheet } from "@/components/ui/sheet";
 import { homePath } from "@/lib/nav";
 import type { Scope } from "@/lib/scope";
@@ -30,7 +30,7 @@ export function SessionSwitcher({ sessions, scope, viewAll }: SessionSwitcherPro
   useLocale();
   const current = scope.session;
   const [open, setOpen] = useState(false);
-  const navigate = useNavigate();
+  const nav = useNav();
 
   const reachableCount = sessions.filter((s) => s.reachable).length;
   const onNonPrimary = current !== undefined;
@@ -49,7 +49,8 @@ export function SessionSwitcher({ sessions, scope, viewAll }: SessionSwitcherPro
     if (!s.reachable) return; // unreachable rows are non-clickable (disabled), guard anyway
     const target = s.isPrimary ? undefined : s.name; // primary carries no `?s=`
     if (target === current && !viewAll) return; // already here
-    navigate(homePath({ host: scope.host, session: target }));
+    // Sideways, like the machine switcher: a replace (ADR 0067).
+    nav.side(homePath({ host: scope.host, session: target }));
   }
 
   /**
@@ -64,7 +65,7 @@ export function SessionSwitcher({ sessions, scope, viewAll }: SessionSwitcherPro
    */
   function widen(): void {
     setOpen(false);
-    navigate(homePath({ host: scope.host }, { all: true }));
+    nav.side(homePath({ host: scope.host }, { all: true }));
   }
 
   return (
@@ -83,10 +84,10 @@ export function SessionSwitcher({ sessions, scope, viewAll }: SessionSwitcherPro
         // 1.31:1 (dark) smudge suddenly visible — a fill too weak to be a surface and too present to
         // be nothing. A component's edge is --border (1.16:1 light / 1.33:1 dark), which is the
         // treatment the sibling trigger already used.
-        className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent active:scale-95"
+        className="flex min-w-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent active:scale-95"
       >
-        <Layers className="size-3.5" />
-        <span className="max-w-[7rem] truncate">{currentName}</span>
+        <Layers className="size-3.5 shrink-0" />
+        <span className="min-w-0 max-w-[7rem] truncate">{currentName}</span>
       </button>
 
       {/* Portal to document.body so the sheet's `fixed inset-0` always resolves against the viewport,

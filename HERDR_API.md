@@ -117,6 +117,11 @@ the socket assumptions behind the design in [`ARCHITECTURE.md`](./ARCHITECTURE.m
   appears, **do not chunk a send.** Chunking is what [`.adr/0010`](./.adr/0010-long-sends-are-verified-via-the-paste-placeholder.md)
   rejects: `pane.send_text` carries no bracketed paste, so a chunk boundary landing on a lone `\n`
   submits a half-written message.
+- **Bytes arriving intact is not text arriving intact.** Re-probed 2026-10-03 on herdr 0.9.0 (macOS):
+  12,000 bytes reached a raw-mode reader byte-for-byte, as twelve ~1,022-byte reads. Claude Code
+  turned those reads into separate paste tokens and kept only the last one. Markers written inside
+  `text` pass through untouched, which is how Collie sends a long reply to Claude as one bracketed
+  paste ([`.adr/0010`](./.adr/0010-long-sends-are-verified-via-the-paste-placeholder.md), addendum).
 - **An ack means "herdr took the bytes", never "the TUI acted on them".** Both `send_text` and
   `send_keys` return before the target program has read, let alone rendered, anything. So a
   successful RPC pair is not evidence a reply was delivered — a focused TUI dialog can swallow the
@@ -309,6 +314,12 @@ not require a literal `done` from Herdr. See [ADR 0003](.adr/0003-one-shared-see
 > harness leaves the previous one's ref behind: a pane running `pi` was observed still advertising a
 > `herdr:claude` id. The record's own `agent` field is what distinguishes the two — compare it against
 > the pane's `agent` before trusting the ref (`bridge/state-engine.ts`).
+>
+> "Last" does not hold within one running grok (live-verified 2026-10-08, grok 1.0.46, Herdr 0.9.0).
+> A `/resume` inside grok reports the resumed id with session-start source `load`, and Herdr answers
+> `ok` but keeps the pane's first id. Herdr accepts a replacement from grok only for source `new`,
+> still so on its main branch that day. `GrokTranscriptSource.reconcile` (`bridge/journal/grok.ts`)
+> corrects the stale id from grok's own `active_sessions.json`.
 
 > **Pane records now carry `scroll`** (new in 0.7.2, live-verified 2026-07-07): `pane.list`,
 > `pane.get`, `pane.current`, and `session.snapshot` panes all include

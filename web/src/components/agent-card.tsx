@@ -7,14 +7,34 @@ import { ShellBadge, StatusBadge, StatusDot } from "@/components/status-badge";
 import { AgentIcon } from "@/components/agent-icon";
 import { PaneMeta } from "@/components/pane-meta";
 import { PaneHint } from "@/components/pane-hint";
+import { BranchLabel } from "@/components/ui/branch-label";
+import { paneGitHead } from "@/lib/git-head";
 import { paneCwdLine, paneName, panePlaceParts, soleTabName } from "@/lib/pane-name";
-import { statusLabel } from "@/lib/types";
+import { statusLabel, statusLabelPast } from "@/lib/types";
 import type { AgentView } from "@/lib/types";
 import { useLocale } from "@/hooks/use-locale";
+import { useLongPress } from "@/hooks/use-long-press";
 
 interface AgentCardProps {
   agent: AgentView;
-  onClick: () => void;
+  /** The tap. Handed the row's own button, which is the glide's origin when `glideKey` is set. */
+  onClick: (row: HTMLButtonElement) => void;
+  /**
+   * The row as a glide origin (lib/glide.ts, the `pane` pair): the pane's own path, `panePath`,
+   * which the pane header's back arrow spells the same way to find this row again. Unset, the row
+   * takes no part in a glide.
+   */
+  glideKey?: string;
+  /** The finger landed on the row: the moment to start the pane's read (lib/pane-prefetch.ts). */
+  onPress?: () => void;
+  /**
+   * A hold on the row (450ms, or `contextmenu`: a right-click, the Menu key, Android's own long
+   * press) opens the pane's actions sheet instead of the pane (ADR 0070). The click that ends the hold
+   * is swallowed, so a hold never also opens the pane. Omit and the row has no hold at all.
+   */
+  onHold?: () => void;
+  /** The row button's DOM id, so a list can find the row again after a pin moved it. */
+  id?: string;
   /**
    * Where the row is being shown. "herd" (default) is a flat list across every space, so line 2
    * carries the place. "tab" is a list already grouped under its space and tab, so line 2 is the
@@ -53,6 +73,13 @@ interface AgentCardProps {
    * 5 percent blocked tint alone. The row is the mark; nothing on its edge and nothing moves.
    */
   tint?: boolean;
+  /**
+   * The row is drawn from the SAVED COPY (M46 spec 10, `HomeData.stale`): the bridge did not answer
+   * and this is what the phone last heard. The whole row dims and its status is said in the past
+   * tense, "was working", because a cached row must never read as live. The tap still opens the pane,
+   * which draws its own saved copy; nothing on it acts from cache (spec 11).
+   */
+  stale?: boolean;
 }
 
 /** The row's text: line 1's name, and line 2's two runs. */
@@ -93,13 +120,21 @@ interface RowLines {
 export function AgentCard({
   agent,
   onClick,
+  glideKey,
+  onPress,
+  onHold,
+  id,
   scope = "herd",
   statusStyle = "badge",
   density = "card",
   unseen = false,
   tint = false,
+  stale = false,
 }: AgentCardProps) {
   useLocale();
+  // Inert when `onHold` is undefined: every handler returns at once, the native context menu stays,
+  // and no click is swallowed, so a row with no hold behaves exactly as it did.
+  const hold = useLongPress(onHold);
   const isShell = agent.kind === "shell";
   const blocked = agent.status === "blocked";
   const inTab = scope === "tab";
@@ -157,10 +192,17 @@ export function AgentCard({
           tailPositional: place.tab?.positional ?? false,
         };
   const { primary, detailLead, detailTail } = lines;
+  // THE BRANCH LEADS LINE 2, in every scope: the one fact that tells two checkouts of one repo apart,
+  // which neither the workspace nor the tab says. It sits in the 16px slot the line already has, so
+  // the row keeps its stated 44px, and it is mono at 11px (ui/branch-label.tsx). It gives way less
+  // than the tab beside it but never takes the whole line. No branch (no checkout, an older bridge or
+  // crew member, or a reading not taken yet) draws exactly the line drawn before it existed.
+  const head = paneGitHead(agent);
+  const hasRest = detailLead !== null || detailTail !== null;
   // A workspace-grouped row whose tab has no name of its own reads its position instead — `tab 2` —
   // via `tabTitle` (`lib/pane-name.ts`) — or, when the raw label carries no digit at all, nothing:
-  // the slot is then skipped outright.
-  const skipBlankSlot = inPlace && detailTail === null;
+  // the slot is then skipped outright, unless the branch fills it.
+  const skipBlankSlot = inPlace && detailTail === null && head === null;
   // The dot leads line 1, INLINE, ahead of the tile — not on the tile's corner. The corner was
   // right at `size-9`: a 10px badge on a 36px tile is a badge. On a 16px tile it is most of the
   // artwork, and shrinking it to fit kills the one glance cue the row has — the resting states are
@@ -173,10 +215,23 @@ export function AgentCard({
 
   return (
     <button
+      id={id}
       type="button"
-      onClick={onClick}
+      onClick={(e) => onClick(e.currentTarget)}
+      {...hold}
+      // Both halves of a press: the pane's read starts on the finger landing, and the hold's timer
+      // arms on the same event.
+      onPointerDown={(e) => {
+        onPress?.();
+        hold.onPointerDown(e);
+      }}
+      data-glide-origin={glideKey === undefined ? undefined : "pane"}
+      data-glide-key={glideKey}
       className={cn(
         "w-full text-left transition-transform active:scale-[0.99]",
+        // A held row must not start iOS's selection loupe or touch callout: both end in a
+        // `pointercancel` that kills the hold timer (hooks/use-long-press.ts).
+        onHold && "select-none [-webkit-touch-callout:none]",
         // No radius on a flat row, in ANY state. These sit in a `divide-y` list, and a rounded fill
         // under a full-width straight hairline reads as a rendering fault — the corners pull away
         // from a line that doesn't follow them. Corners belong to where the row sits, never to what
@@ -207,6 +262,10 @@ export function AgentCard({
           // dot (`cornerDot`) and this tint alone, nothing on the edge.
           blocked && (flat ? "bg-status-blocked/5" : "border-status-blocked/40 bg-status-blocked/5"),
           tint && flat && blocked && "bg-status-blocked/10",
+          // The saved copy: dimmed as one piece, so no part of the row reads as live. Opacity only,
+          // so nothing moves when the live answer brings it back (DESIGN.md §2).
+          "transition-opacity",
+          stale && "opacity-50",
         )}
       >
         <div className="min-w-0 flex-1">
@@ -229,6 +288,9 @@ export function AgentCard({
                 // A hollow resting ring must be filled with the colour it actually sits on — a card
                 // is `--card`, a flat row is the page.
                 surface={flat ? "bg-background" : "bg-card"}
+                glide="dot"
+                // The shape is drawn in a 12px box; the row keeps the 10px slot the dot had.
+                className="-mx-px"
               />
             )}
             {/* An avatar is a FRAME around someone else's artwork, not a shape that means
@@ -236,19 +298,23 @@ export function AgentCard({
                 `agent-chat.tsx` are all framed at the house radius — a circle would crop the
                 artwork. Full-round stays RESERVED for things that are a circle in meaning: the
                 status dot above, the switch thumb, round icon buttons. */}
+            {/* The dot, the tile and the name are the three parts that fly into the pane header
+                when the row opens it (`data-glide`, lib/glide.ts); they mean nothing otherwise. */}
             {isShell ? (
-              <div className="flex size-4 shrink-0 items-center justify-center rounded-sm border bg-muted">
+              <div data-glide="tile" className="flex size-4 shrink-0 items-center justify-center rounded-sm border bg-muted">
                 <TerminalSquare className="size-2.5 text-muted-foreground" />
               </div>
             ) : (
-              <AgentIcon agent={agent.agent} className="size-4" />
+              <AgentIcon agent={agent.agent} className="size-4" glide="tile" />
             )}
             {/* No longer `flex-1`: that let the name claim the whole line, which pushed the unseen
                 dot all the way to the far end, beside the meta, instead of beside the NAME. It now
                 sizes to its own text and only `min-w-0` lets it truncate below that — the dot still
                 sits right after whatever survives the truncation. `PaneMeta`'s own `ml-auto` is what
                 claims the row's spare width now, so it still lands at the end. */}
-            <span className="min-w-0 truncate self-baseline font-medium">{primary}</span>
+            <span data-glide="name" className="min-w-0 truncate self-baseline font-medium">
+              {primary}
+            </span>
             {/* A finished pane you haven't opened yet: the square (ui/unseen-mark.tsx). Right after
                 the name, never before it, and its slot is reserved on a flat row so the name
                 truncates at one width whether the mark is drawn or not. */}
@@ -265,7 +331,7 @@ export function AgentCard({
               its own is a one-line row. A workspace-grouped row is the exception: its slot is
               always there, holding the tab's name or its position — UNLESS neither is available,
               which skips the slot outright and centres the name in the 44px row instead. */}
-          {!skipBlankSlot && (inPlace || detailLead !== null || detailTail !== null) && (
+          {!skipBlankSlot && (inPlace || hasRest || head !== null) && (
             <div
               data-slot="agent-row-detail"
               className={cn(
@@ -275,6 +341,18 @@ export function AgentCard({
                 flat && "h-4 items-center",
               )}
             >
+              {head !== null && (
+                <>
+                  <BranchLabel head={head} className={cn("shrink", hasRest && "max-w-[78%]")} />
+                  {hasRest && (
+                    // Two facts side by side rather than one containing the other, so a middot, not
+                    // the place's own crumb.
+                    <span className="shrink-0 text-muted-foreground/60" aria-hidden>
+                      ·
+                    </span>
+                  )}
+                </>
+              )}
               {inPlace && lines.tailPositional && detailTail !== null ? (
                 // The unnamed tab's position, a shade lighter than an ordinary tab name so it never
                 // reads as one.
@@ -323,10 +401,10 @@ export function AgentCard({
         {isShell ? (
           <ShellBadge />
         ) : cornerDot ? (
-          /* The dot itself is colour-only and lives on line 1; give SR users the word. */
-          <span className="sr-only">{statusLabel(agent.status)}</span>
+          /* The mark lives on line 1 and is aria-hidden; give SR users the word. */
+          <span className="sr-only">{stale ? statusLabelPast(agent.status) : statusLabel(agent.status)}</span>
         ) : (
-          <StatusBadge status={agent.status} />
+          <StatusBadge status={agent.status} past={stale} />
         )}
       </Shell>
     </button>

@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, Crown, Network, Shield } from "lucide-react";
-import { useLoaderData, useNavigate } from "react-router";
+import { Activity, ArrowLeft, Crown, Network, Shield } from "lucide-react";
+import { useLoaderData } from "react-router";
 
 import { RouteHeader } from "@/components/app-header";
 import { Button } from "@/components/ui/button";
@@ -12,15 +12,17 @@ import { BottomSheet } from "@/components/ui/sheet";
 import { useCrew } from "@/components/crew-provider";
 import { healthTone, healthWord, CrewFormation } from "@/components/crew-formation";
 import { useLocale } from "@/hooks/use-locale";
+import { useNav } from "@/hooks/use-nav";
 import { timeAgoShort } from "@/lib/format";
 import { hostCounts } from "@/lib/hosts";
 import { t } from "@/lib/i18n";
 import { type CrewData } from "@/lib/loaders";
-import { homePath } from "@/lib/nav";
+import { homePath, machinePath } from "@/lib/nav";
 import { useOptionalRootData } from "@/lib/route-data";
 import { useScope } from "@/lib/session";
 import type { AgentView, CrewMemberStatus, CrewStatusResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { BandMain } from "@/components/ui/strip-host";
 
 // The crew census: the whole crew drawn as a FORMATION, and the answer to "how is my crew doing?".
 //
@@ -51,7 +53,7 @@ import { cn } from "@/lib/utils";
 // slow would report a dead machine as current. lib/host-health.ts's header has the full argument;
 // this page obeys it for `rotatedAt` and `enrolledAt` as well as for `lastSeenAt`.
 export function CrewRoute() {
-  const navigate = useNavigate();
+  const nav = useNav();
   const scope = useScope();
   useLocale();
   const root = useOptionalRootData();
@@ -93,7 +95,7 @@ export function CrewRoute() {
               size="icon"
               // 44px — the tap floor every control in this row shares. size="icon" alone is 36px.
               className="size-11"
-              onClick={() => navigate(homePath(scope))}
+              onClick={() => nav.up(homePath(scope))}
               aria-label={t("crew.nav.back")}
             >
               <ArrowLeft className="size-5" />
@@ -103,7 +105,7 @@ export function CrewRoute() {
         }
       />
 
-      <main className="relative flex min-h-0 flex-1 flex-col space-y-4 overflow-y-auto p-4">
+      <BandMain base={16} className="relative flex min-h-0 flex-1 flex-col space-y-4 overflow-y-auto p-4">
         {/* Three outcomes, three shapes, and never a spinner: this loader always resolves before the
             route's element mounts, so "still loading" is not a state this page can be in. A 404 (a
             solo collie, or a peer) and a failed fetch are DIFFERENT sentences — the first says there
@@ -119,7 +121,7 @@ export function CrewRoute() {
             onSelect={(m) => setOpenId(m.id)}
           />
         )}
-      </main>
+      </BandMain>
 
       {/* Portalled to the body, exactly as the ServerSwitcher's sheet is: the sheet is `fixed`, and
           this route's scrolling `<main>` is a containing block that would otherwise clip it. */}
@@ -134,12 +136,19 @@ export function CrewRoute() {
               <MemberSheet
                 member={selected}
                 status={status}
+                onLoad={() => {
+                  setOpenId(null);
+                  // Down onto the machine's own page: a level below Crew, so Back returns here.
+                  nav.down(machinePath(selected.id, scope));
+                }}
                 onGo={() => {
                   setOpenId(null);
                   // The ServerSwitcher's rule, restated because it is the one this milestone exists
                   // to enforce: a host switch goes HOME on that machine and NEVER carries a pane or
                   // session id across. `w1:p1` on the peer is a different terminal entirely.
-                  navigate(
+                  // Sideways onto that machine's dashboard: a replace, so Back does not return to
+                  // the census the operator just left for it (ADR 0067).
+                  nav.side(
                     homePath({ host: selected.isLead ? undefined : selected.id, session: undefined }),
                   );
                 }}
@@ -168,10 +177,12 @@ const NO_AGENTS: AgentView[] = [];
 function MemberSheet({
   member,
   status,
+  onLoad,
   onGo,
 }: {
   member: CrewMemberStatus;
   status: CrewStatusResponse;
+  onLoad: () => void;
   onGo: () => void;
 }) {
   // Compared against the LEAD's version, not against the newest one known: a crew levels to whatever
@@ -300,6 +311,12 @@ function MemberSheet({
         </div>
       )}
 
+      {/* Where its load, history and alert rules live. A link to the page, never a switch of machine:
+          "Go to this machine" below is the one that moves the phone. */}
+      <Button variant="outline" className="w-full" onClick={onLoad}>
+        <Activity className="size-4" aria-hidden />
+        {t("machines.memberSheet.link")}
+      </Button>
       <Button className="w-full" onClick={onGo}>
         {t("crew.sheet.goTo")}
       </Button>

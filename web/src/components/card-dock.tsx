@@ -11,6 +11,7 @@ import type {
   WizardModel,
 } from "@/lib/blocks";
 import type { MultiSelectIntent } from "@/lib/multi-select-action";
+import type { Scope } from "@/lib/scope";
 import { PromptSelectBlock, type PromptBlockAction } from "@/components/prompt-select-block";
 import { WizardBlock } from "@/components/wizard-block";
 import { PreviewSelectBlock, type PreviewBlockAction } from "@/components/preview-select-block";
@@ -75,6 +76,12 @@ export interface CardDockProps {
   onUnreadDialogAction?: (key: string, cancel: UnreadDialogModel) => void | Promise<void>;
   /** Disable every card's controls (read-only device, gone pane). */
   promptDisabled?: boolean;
+  /** The pane the card answers for, and its scope. The prompt card enables only while the bridge has
+   *  answered a read for it lately (lib/liveness.ts, M46 spec 11). */
+  paneId?: string;
+  scope?: Scope;
+  /** The screen is drawn from the on-device cache (M46 spec 10): the prompt card stays locked. */
+  stale?: boolean;
   /** The soft keyboard is up: the dock's cap drops from 55dvh to 40dvh. */
   composing?: boolean;
   /** The mirror's chosen face (`mirrorFont`), so a card's `font-mono` rows and its Terminal mirror
@@ -85,6 +92,9 @@ export interface CardDockProps {
    *  card's whole-pane mirror, a card put down to Terminal) still focuses the composer, exactly as it
    *  did while the card lived inside the mirror. The handler declines a tap on a control itself. */
   onClick?: (event: MouseEvent<HTMLDivElement>) => void;
+  /** The device's Wrap lines setting, for the unread-dialog card, the one card that mirrors the whole
+   *  pane: its mirror wraps or pans as the pane mirror above it does (#372). */
+  wrap?: boolean;
 }
 
 /** The one card on screen, as a React element, or null when every block is raw. */
@@ -97,6 +107,10 @@ function liftedCard({
   onMenuAction,
   onUnreadDialogAction,
   promptDisabled,
+  paneId,
+  scope,
+  stale,
+  wrap,
 }: CardDockProps): ReactNode {
   const promptBlock = blocks.find((b): b is PromptBlock => b.kind === "prompt-select");
   if (promptBlock) {
@@ -105,6 +119,9 @@ function liftedCard({
         prompt={promptBlock.prompt}
         lines={promptBlock.lines}
         disabled={promptDisabled || !onPromptAction}
+        paneId={paneId}
+        scope={scope}
+        stale={stale}
         onAction={(action) => onPromptAction?.(action, promptBlock.prompt) ?? false}
       />
     );
@@ -163,6 +180,7 @@ function liftedCard({
         cancel={unreadBlock.cancel}
         lines={unreadBlock.lines}
         disabled={promptDisabled || !onUnreadDialogAction}
+        wrap={wrap}
         onAction={(key) => onUnreadDialogAction?.(key, unreadBlock.cancel)}
       />
     );

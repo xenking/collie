@@ -16,7 +16,7 @@
 // (web/src/fixtures/panes/claude--select-multiselect-*.txt), and never touches a pane or the network.
 
 import type { StyledLine } from "../../blocks";
-import { classifyFooter, isBlank, isHorizontalRule, lineText } from "./markers";
+import { classifyFooter, selectFooterStart, isBlank, isHorizontalRule, lineText, questionRowText } from "./markers";
 import { checkboxState, isFreeTextLabel, parseOptionRow, trailingMenuRows } from "./prompt-select";
 import { parseStepperLine } from "./wizard";
 import type { WizardStepChip } from "../wizard-model";
@@ -191,12 +191,15 @@ function detectCheckboxPhase(
   fi: number,
 ): MultiSelectRegion | null {
   if (classifyFooter(texts[fi]!, texts) !== "select") return null;
+  // The footer's first row: a footer a narrow pane wrapped onto two rows starts above `fi`, and the
+  // option rows are measured to that row (`fi` stays on the last row for the pointer read).
+  const footerAt = selectFooterStart(texts, fi);
 
   // Numbered rows near the footer — the trailing 1,2,…,m run (the checkbox options + the numbered
   // "Chat about this" escape); a numbered body above it drops out (same hazard as prompt-select).
   const from = Math.max(0, fi - OPTION_SCAN_WINDOW);
   const rows: { index: number; n: number; label: string }[] = [];
-  for (let i = from; i < fi; i++) {
+  for (let i = from; i < footerAt; i++) {
     const parsed = parseOptionRow(texts[i]!);
     if (parsed) rows.push({ index: i, ...parsed });
   }
@@ -205,7 +208,7 @@ function detectCheckboxPhase(
   if (menu.length < 2) return null;
   if (menu.length > 9) return null; // a row ≥10 needs the unsendable digit "10"
   const firstOpt = menu[0]!.index;
-  if (fi - menu[menu.length - 1]!.index > MAX_FOOTER_GAP) return null;
+  if (footerAt - menu[menu.length - 1]!.index > MAX_FOOTER_GAP) return null;
 
   // The screen MUST carry the navigable advance row, and we locate it by POSITION, not by scanning
   // for the first line that reads "Submit"/"Next". Claude Code draws it in exactly one place: last
@@ -220,7 +223,7 @@ function detectCheckboxPhase(
   //
   // No rule below the options means a layout we don't know: bail rather than guess.
   let ruleIdx = -1;
-  for (let i = fi - 1; i > firstOpt; i--) {
+  for (let i = footerAt - 1; i > firstOpt; i--) {
     if (isHorizontalRule(texts[i]!)) {
       ruleIdx = i;
       break;
@@ -242,10 +245,19 @@ function detectCheckboxPhase(
   if (!stepper) return null;
   const stepperIdx = stepper.index;
 
-  // The question: every non-blank line between the stepper and the first option, joined.
+  // The "Type something" text field is the last checkbox row above the advance row, by POSITION: once
+  // someone types, the row reads "[✔] teal". While `❯` is on it every digit is typed INTO it (measured
+  // on Claude Code 2.1.283), so a toggle button would write its digit into someone's answer. No
+  // model has a lock for that, so the screen is not claimed; off the field, the typed row toggles
+  // with its digit like any other row (measured) and stays an option.
+  const fieldRow = menu.findLast((row) => row.index < advanceIdx);
+  if (fieldRow !== undefined && /^\s*❯/.test(texts[fieldRow.index]!)) return null;
+
+  // The question: every non-blank line between the stepper and the first option, joined, without the
+  // `│` gutter Claude paints down a question of more than one row.
   const questionLines: string[] = [];
   for (let i = stepperIdx + 1; i < firstOpt; i++) {
-    if (!isBlank(texts[i]!)) questionLines.push(texts[i]!.trim());
+    if (!isBlank(texts[i]!)) questionLines.push(questionRowText(texts[i]!));
   }
   if (questionLines.length === 0) return null;
   const question = questionLines.join(" ");
@@ -264,7 +276,7 @@ function detectCheckboxPhase(
     const cb = checkboxState(row.label);
     if (!cb) return null; // the checkbox-prefix discriminator: bail to the single-select grammar
     if (isFreeTextLabel(cb.rest)) continue;
-    const nextIdx = r + 1 < menu.length ? menu[r + 1]!.index : fi;
+    const nextIdx = r + 1 < menu.length ? menu[r + 1]!.index : footerAt;
     const desc: string[] = [];
     for (let i = row.index + 1; i < nextIdx; i++) {
       const t = texts[i]!;
