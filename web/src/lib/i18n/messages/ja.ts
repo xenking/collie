@@ -1281,6 +1281,8 @@ export const ja: Dictionary = {
   "apiError.unknown": "エラーが発生しました。再試行してください。",
   "apiError.reply.not_submitted":
     "メッセージはペインに入力されましたが送信されていません。再送前にペインを確認してください。",
+  "reply.unconfirmed":
+    "Enter は送信されましたが、ペインを読み取れず送信を確認できませんでした。再送前にペインを確認してください。",
   "apiError.reply.send_failed": "メッセージの送信に失敗しました: {reason}",
   "apiError.keys.send_failed": "キーの送信に失敗しました: {reason}",
   "apiError.prompt_changed": "送信前に画面が変更されました。ペインを確認してください。",

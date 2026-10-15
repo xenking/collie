@@ -711,6 +711,8 @@ async function submitOnly(
       // The bridge acked the key; only the screen says whether the harness took it as a submit.
       const left = await draftLeftBySubmit(adapter, args);
       if (left === null) return { status: "sent" };
+      // No frame could be read: the key went out, but nothing proves the message left the box.
+      if (left === undefined) return { status: "error", error: t("reply.unconfirmed"), textDelivered: true };
       // Never submit text the operator did not type: Enter again only while the box still holds exactly
       // the sent message. A completion that rewrote it (`@READ` -> `@README.md`) stays unsent.
       const unchanged = draftCarriesSend(args.text, left.draft) && carriesReplyTail(args.text, left.draft);
@@ -731,15 +733,15 @@ const SUBMIT_CONFIRM_ATTEMPTS = 4;
 
 /**
  * Whether the input box still holds a message after a submit key: its draft, and the prompt region the
- * NEXT submit must bind to; null once the box is empty or gone. A read that fails says nothing, so a
- * pane that cannot be read at all is not held against the send: the bridge already acked the key.
+ * NEXT submit must bind to; null once a read shows the box empty or gone; undefined when no read
+ * succeeded at all, which proves nothing either way.
  */
 async function draftLeftBySubmit(
   adapter: HarnessAdapter,
   args: GuardedReplyArgs,
-): Promise<{ prompt: string | undefined; draft: string | null } | null> {
+): Promise<{ prompt: string | undefined; draft: string | null } | null | undefined> {
   const sleep = args.sleep ?? defaultSleep;
-  let left: { prompt: string | undefined; draft: string | null } | null = null;
+  let left: { prompt: string | undefined; draft: string | null } | undefined;
   for (let attempt = 0; attempt < SUBMIT_CONFIRM_ATTEMPTS; attempt++) {
     if (attempt > 0) await sleep(POLL_DELAY_MS);
     try {

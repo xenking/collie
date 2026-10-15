@@ -1260,6 +1260,8 @@ export const zhTW: Dictionary = {
   // --- apiError (the bridge's refusals, keyed by the code on the wire) ---
   "apiError.unknown": "操作失敗，請重試。",
   "apiError.reply.not_submitted": "訊息已填入窗格但尚未提交。重新傳送前請檢查窗格狀態。",
+  "reply.unconfirmed":
+    "已送出 Enter，但無法讀取窗格以確認訊息已提交。重新傳送前請檢查窗格狀態。",
   "apiError.reply.send_failed": "訊息傳送失敗：{reason}",
   "apiError.keys.send_failed": "按鍵傳送失敗：{reason}",
   "apiError.prompt_changed": "傳送前畫面內容已變更，請檢查窗格。",

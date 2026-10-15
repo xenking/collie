@@ -1277,6 +1277,8 @@ export const ko: Dictionary = {
   "apiError.unknown": "오류가 발생했습니다. 다시 시도하십시오.",
   "apiError.reply.not_submitted":
     "메시지가 창에 입력되었으나 전송되지 않았습니다. 재전송 전에 창을 확인하십시오.",
+  "reply.unconfirmed":
+    "Enter는 전송되었으나 창을 읽을 수 없어 전송을 확인하지 못했습니다. 재전송 전에 창을 확인하십시오.",
   "apiError.reply.send_failed": "메시지를 전송하지 못했습니다: {reason}",
   "apiError.keys.send_failed": "키 입력을 전송하지 못했습니다: {reason}",
   "apiError.prompt_changed": "전송 전에 화면 상태가 변경되었습니다. 창을 확인하십시오.",

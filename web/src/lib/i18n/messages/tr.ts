@@ -1133,6 +1133,7 @@ export const tr: Dictionary = {
   "directTyping.status.backgrounded": "Terminale yazma durduruldu, uygulama arka plana alındı.",
   "apiError.unknown": "Bir sorun oluştu. Tekrar deneyin.",
   "apiError.reply.not_submitted": "Mesajınız bölmeye yazıldı ancak gönderilmedi, tekrar göndermeden önce bölmeyi kontrol edin.",
+  "reply.unconfirmed": "Enter gönderildi ancak gönderimi doğrulamak için bölme okunamadı, tekrar göndermeden önce bölmeyi kontrol edin.",
   "apiError.reply.send_failed": "Mesaj gönderilemedi: {reason}",
   "apiError.keys.send_failed": "Bu tuşlar gönderilemedi: {reason}",
   "apiError.prompt_changed": "Bu gönderilmeden önce ekran değişti, bölmeyi kontrol edin.",

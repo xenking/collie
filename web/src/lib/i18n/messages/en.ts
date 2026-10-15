@@ -1375,6 +1375,8 @@ export const en = {
   "apiError.unknown": "Something went wrong. Try again.",
   "apiError.reply.not_submitted":
     "Your message was typed into the pane but not sent — check the pane before sending it again.",
+  "reply.unconfirmed":
+    "Enter went out, but the pane couldn't be read to confirm the message was sent — check the pane before sending it again.",
   "apiError.reply.send_failed": "The message couldn't be sent: {reason}",
   "apiError.keys.send_failed": "Those keys couldn't be sent: {reason}",
   "apiError.prompt_changed": "The screen changed before that could be sent — check the pane.",

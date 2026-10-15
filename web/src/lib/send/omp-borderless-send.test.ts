@@ -89,4 +89,17 @@ describe("omp 18.10 borderless send: the message must leave the prompt before it
     expect((await send()).status).toBe("sent");
     expect(submitKeys(replies)).toHaveLength(1);
   });
+
+  it("keeps the draft when no pane read after Enter succeeds, since nothing proves the send", async () => {
+    const replies = fakePane([capture("submitted")]);
+    let reads = 0;
+    server.use(
+      http.get(/\/api\/pane\/[^/]+$/, () =>
+        submitKeys(replies).length > 0 ? HttpResponse.error() : (reads++, HttpResponse.json({ paneId: "w1V:p1", text: capture("autocomplete") })),
+      ),
+    );
+    expect(await send()).toMatchObject({ status: "error", textDelivered: true });
+    expect(reads).toBeGreaterThan(0);
+    expect(submitKeys(replies)).toHaveLength(1);
+  });
 });
