@@ -42,9 +42,8 @@ type SttUpdate = {
 };
 
 /** The only STT configuration the proxy accepts: mono Russian PCM from the Collie browser. */
-export function sttConfig(apiKey: string, context: SonioxContext): Record<string, unknown> {
+export function sttConfig(context: SonioxContext): Record<string, unknown> {
   return {
-    api_key: apiKey,
     model: "stt-rt-v5",
     audio_format: "pcm_s16le",
     sample_rate: STT_SAMPLE_RATE,
@@ -79,9 +78,8 @@ async function fetchVocabulary(config: TurnConfig): Promise<SonioxContext> {
 }
 
 /** TTS runs server-side too; speed is deliberately fixed to the requested +1.5%. */
-export function ttsConfig(apiKey: string, voice: string, streamId: string): Record<string, unknown> {
+export function ttsConfig(voice: string, streamId: string): Record<string, unknown> {
   return {
-    api_key: apiKey,
     model: "tts-rt-v1",
     language: "ru",
     voice,
@@ -122,7 +120,12 @@ export function voiceTokenMatches(presented: string | null, expected: string): b
   return timingSafeEqual(Buffer.from(presented), Buffer.from(expected));
 }
 
-function connect(url: string): Promise<WebSocket> {
+/**
+ * Soniox authenticates at connection time (the `api_key` start-message field is deprecated and refused
+ * from 2027-01-15), so the long-lived key rides the Authorization header of the server-side socket and
+ * never appears in a message or reaches the browser.
+ */
+function connect(url: string, apiKey: string): Promise<WebSocket> {
   const deferred = Promise.withResolvers<WebSocket>();
   let timeout: ReturnType<typeof setTimeout> | null = null;
   let settled = false;
@@ -132,7 +135,9 @@ function connect(url: string): Promise<WebSocket> {
     if (timeout) clearTimeout(timeout);
     complete();
   };
-  const ws = new WebSocket(url);
+  // SAFETY: Bun's WebSocket takes `{ headers }` as its second argument; the DOM lib typing in this
+  // project only declares the `protocols` overload, so the constructor is invoked reflectively.
+  const ws: WebSocket = Reflect.construct(WebSocket, [url, { headers: { Authorization: `Bearer ${apiKey}` } }]);
   timeout = setTimeout(() => {
     settle(() => deferred.reject(new Error("Soniox WebSocket connection timed out")));
     ws.close();
@@ -436,7 +441,7 @@ export class TurnController {
 
   async #openStt(): Promise<WebSocket> {
     const context = await fetchVocabulary(this.cfg);
-    const stt = await connect(STT_URL);
+    const stt = await connect(STT_URL, this.cfg.sonioxApiKey);
     if (this.#closed) {
       stt.close();
       throw new Error("voice relay is closed");
@@ -444,7 +449,7 @@ export class TurnController {
     this.#stt = stt;
     stt.addEventListener("message", (event) => this.#onSttMessage(stt, event));
     stt.addEventListener("close", () => this.#onSttClose(stt));
-    stt.send(JSON.stringify(sttConfig(this.cfg.sonioxApiKey, context)));
+    stt.send(JSON.stringify(sttConfig(context)));
     return stt;
   }
 
@@ -559,7 +564,7 @@ export class TurnController {
     }
     if (this.#tts !== tts || this.#speech !== speech || !this.#isCurrent(speech.generation)) return;
     try {
-      tts.send(JSON.stringify(ttsConfig(this.cfg.sonioxApiKey, this.cfg.sonioxTtsVoice, speech.streamId)));
+      tts.send(JSON.stringify(ttsConfig(this.cfg.sonioxTtsVoice, speech.streamId)));
       tts.send(JSON.stringify({ text, text_end: true, stream_id: speech.streamId }));
       if (!this.#ttsKeepalive) {
         this.#ttsKeepalive = setInterval(() => {
@@ -583,7 +588,7 @@ export class TurnController {
   async #ensureTts(): Promise<WebSocket> {
     if (this.#tts) return this.#tts;
     if (this.#openingTts) return this.#openingTts;
-    const opening = connect(TTS_URL);
+    const opening = connect(TTS_URL, this.cfg.sonioxApiKey);
     this.#openingTts = opening;
     try {
       const tts = await opening;
