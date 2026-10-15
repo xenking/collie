@@ -250,6 +250,7 @@
       // These tests implement browser/WebSocket fakes whose assertions are checked by their fixtures.
       "files": [
         "**/bridge/voice.test.ts",
+        "**/bridge/voice-pane.test.ts",
         "**/web/src/components/voice-input.test.tsx"
       ],
       "rules": {

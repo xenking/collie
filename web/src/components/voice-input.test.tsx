@@ -240,6 +240,29 @@ describe("VoiceInput", () => {
     }
   });
 
+  it("in toggle mode a slow press (held past 350 ms) still starts recording", async () => {
+    render(
+      <VoiceInput
+        replySpeechSupported={true}
+        recordingMode="toggle"
+        paneId="w1:p4"
+        showControl
+        disabled={false}
+        onTranscript={vi.fn(async () => false)}
+        onVoiceStateChange={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Start voice input" });
+    fireEvent.pointerDown(button, { button: 0, pointerId: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    fireEvent.pointerUp(button, { button: 0, pointerId: 1 });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"start"}'));
+  });
+
   it("reconnects a handed-off relay after the mobile socket closes", async () => {
     const onTranscript = vi.fn(async () => true);
     const onError = vi.fn();

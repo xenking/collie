@@ -734,11 +734,11 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
       if (mode === "hold") suppressClickRef.current = true;
       return false;
     }
+    // A toggle press is a tap however long it lasted: the click that follows does the toggling.
+    if (mode !== "hold") return false;
     suppressClickRef.current = true;
-    if (mode === "hold") {
-      if (commit) stop();
-      else cancel();
-    }
+    if (commit) stop();
+    else cancel();
     return true;
   }
 

@@ -224,6 +224,7 @@ import type {
   UploadCapability,
   UploadResponse,
 } from "./types.ts";
+import { prepareVoicePane } from "./voice-pane.ts";
 import { VoiceBroker, voiceTokenMatches, type VoiceSocketData } from "./voice.ts";
 
 // Headroom the runtime's own body cap (Bun.serve maxRequestBodySize) keeps above the operator's
@@ -2324,34 +2325,10 @@ export function startServer(opts: {
         const rt = await target();
         if (rt instanceof Response) return rt;
         const paneId = url.searchParams.get("pane");
-        let pane = paneId
-          ? rt.engine.current().agents.find((candidate) => candidate.paneId === paneId)
-          : undefined;
-        if (!paneId || !pane) return text("voice requires a live pane", 409);
-        const waking = pane.sleeping === true;
-        if (waking) {
-          const sent = await rt.herdr.sendKeys(paneId, ["Enter"]);
-          if (!sent.ok) return text(`voice wake failed: ${sent.detail}`, 409);
-          const deadline = Date.now() + 15_000;
-          while (Date.now() < deadline) {
-            try {
-              await rt.herdr.refresh();
-              rt.engine.pokeNow();
-            } catch {
-              // Keep the bounded wake wait; the next poll may recover the adapter.
-            }
-            pane = rt.engine.current().agents.find((candidate) => candidate.paneId === paneId);
-            if (pane && pane.agent === "omp" && pane.agentSession?.kind === "path") break;
-            await new Promise((resolve) => setTimeout(resolve, 250));
-          }
-        }
-        pane = paneId
-          ? rt.engine.current().agents.find((candidate) => candidate.paneId === paneId)
-          : undefined;
-        const ompSessionFile = pane?.agent === "omp" && pane.agentSession?.kind === "path"
-          ? pane.agentSession.value
-          : null;
-        if (waking && ompSessionFile === null) return text("voice wake timed out", 409);
+        if (!paneId) return text("voice requires a live pane", 409);
+        const prepared = await prepareVoicePane(rt, paneId);
+        if (!prepared.ok) return text(prepared.detail, 409);
+        const ompSessionFile = prepared.sessionFile;
         // NUL cannot occur in a real session path; the JSON tuple makes the synthetic namespace unambiguous.
         const sessionFile = ompSessionFile ?? `\0collie:voice:${JSON.stringify([rt.name, paneId])}`;
         const upgraded = server.upgrade(req, {
