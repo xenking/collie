@@ -14,7 +14,7 @@ class FakeSocket {
   static readonly OPEN = 1;
   static instances: FakeSocket[] = [];
   static autoReady = true;
-  static readyMessage: Record<string, unknown> = { kind: "ready" };
+  static readyMessage: { kind: "ready"; replySpeech?: boolean } = { kind: "ready" };
   readonly send = vi.fn();
   readyState = FakeSocket.OPEN;
   binaryType = "blob";
