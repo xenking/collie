@@ -25,6 +25,8 @@ const NOT_STORAGE = new Map<string, string>([
   ["collie:open", "a service-worker postMessage type (lib/notification-open.ts)"],
   ["collie:herd", "a notification tag (lib/push-decision.ts)"],
   ["collie:herd@<host>", "the per-host notification tag, named in a comment"],
+  ["collie.voice", "the voice WebSocket's subprotocol (components/voice-input.tsx)"],
+  ["collie.bearer.", "the subprotocol prefix the voice WebSocket offers its pairing token under"],
 ]);
 
 type Area = "local" | "session";

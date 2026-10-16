@@ -502,15 +502,29 @@ export function toDeviceWire(
   }));
 }
 
+/** The subprotocol a browser WebSocket offers its pairing token under (fork: the voice socket). */
+export const BEARER_PROTOCOL = "collie.bearer.";
+
 /**
  * The `Authorization: Bearer <token>` value, or null. Case-insensitive on the scheme (RFC 7235) and
  * tolerant of extra spacing, because a proxy may rewrite whitespace.
+ *
+ * A browser cannot set `Authorization` on a WebSocket, so with no such header the token may arrive as
+ * the offered subprotocol `collie.bearer.<token>` (base64url is a valid protocol token). A page script
+ * cannot forge a `Sec-` header, and the token is the same secret either way. A malformed
+ * `Authorization` never falls through to it.
  */
 export function bearerToken(headers: { get(name: string): string | null }): string | null {
   const raw = headers.get("authorization");
-  if (!raw) return null;
-  const match = /^Bearer\s+(\S+)\s*$/i.exec(raw.trim());
-  return match ? match[1]! : null;
+  if (raw) {
+    const match = /^Bearer\s+(\S+)\s*$/i.exec(raw.trim());
+    return match ? match[1]! : null;
+  }
+  for (const offered of (headers.get("sec-websocket-protocol") ?? "").split(",")) {
+    const value = offered.trim();
+    if (value.startsWith(BEARER_PROTOCOL) && value.length > BEARER_PROTOCOL.length) return value.slice(BEARER_PROTOCOL.length);
+  }
+  return null;
 }
 
 // ── The store ────────────────────────────────────────────────────────────────────────────────
