@@ -140,7 +140,7 @@ type OpenPanel = "123" | "presets" | "fkeys" | null;
 // the fault "Ctrl C" shipped with on a 390px phone. `min-w-0` on the button (`navBtn`'s className) is
 // what lets the button itself shrink small enough for this to ever engage.
 function textLabel(s: string) {
-  return <span className="truncate">{s}</span>;
+  return <span className="min-w-0 truncate">{s}</span>;
 }
 
 // A key wider or taller than a cell sits on the grid by its anchor and spans its area, so the dock
@@ -275,12 +275,13 @@ export function NavTray({
         title={aria}
         // touch-action/select-none: without them a held button on iOS starts a text selection and
         // Android may treat the hold as a scroll gesture, both of which cancel the pointer stream.
-        // min-w-0/overflow-hidden: a grid item's default min-width is `auto` (its content's own
-        // width), which can push a key wider than its column instead of letting it shrink — this is
-        // what let "Ctrl C" spill past a 1/7 column on a 390px phone. `overflow-hidden` is the floor
-        // under `truncate` on the label itself.
+        // min-w-0: a grid item's default min-width is `auto` (its content's own width), which can
+        // push a key wider than its column instead of letting it shrink — this is what let "Ctrl C"
+        // spill past a 1/7 column on a 390px phone. The text label is `min-w-0 truncate`, so it
+        // gives way inside the key. There is NO `overflow-hidden` on the key: it would clip the
+        // `::before` that reaches the 44px tap floor (KEY_TAP_TARGET), sideways first.
         className={cn(
-          "h-9 min-w-0 overflow-hidden touch-manipulation select-none px-0 text-sm font-medium",
+          "h-9 min-w-0 touch-manipulation select-none px-0 text-sm font-medium",
           extraClassName,
           resting && restingClassName,
         )}
@@ -344,15 +345,17 @@ export function NavTray({
   );
 
   // Tap-target idiom (DESIGN.md §6, the same move as `STRIP_TAP_TARGET` in ui/labelled-strip.tsx): a
-  // transparent `::before` extends a button's clickable box without adding drawn size. The grid's
-  // gap is 4px (`gap-1`), so 2px on each side horizontally fills it to the midpoint between two keys,
-  // and 4px top and bottom reaches the next row's drawn edge and no further: a key's hit box never
-  // enters a sibling's drawn box. 36px drawn (`h-9`) + 4 + 4 = 44px tall, the tap floor; a 7-column
-  // key is 40.5px drawn at 390px with the commit column (the narrowest case), + 2 + 2 = 44px
-  // wide. The commit Enter's own two-row span clears the floor in both axes, so it wears none of
-  // this, except on a one-row board, where it is as short as a key.
+  // transparent `::before` extends a button's clickable box without adding drawn size. An absolute
+  // inset is measured from the PADDING box, inside the key's 1px border, so each inset reaches 1px
+  // less than it says. The grid's gap is 4px (`gap-1`): 3px sideways reaches 2px past the border,
+  // the middle of the gap, and 5px above and below reaches 4px, the neighbour's own edge and no
+  // further, so a key's hit box never enters a sibling's drawn box. Drawn 36px (`h-9`) + 4 + 4 = 44px
+  // tall, the tap floor; a 7-column key is 40.5px drawn at 390px with the commit column (the
+  // narrowest case), + 2 + 2 = 44.5px wide. The commit Enter's own two-row span clears the floor in
+  // both axes, so it wears none of this, except on a one-row board, where it is as short as a key.
+  // The key must not clip (`overflow-hidden`), or the reach is cut off at the border.
   const KEY_TAP_TARGET =
-    "relative before:absolute before:-inset-x-[2px] before:-inset-y-1 before:content-['']";
+    "relative before:absolute before:-inset-x-[3px] before:-inset-y-[5px] before:content-['']";
 
   // The board's keys. A cell is a seventh of a phone wide, so every key gets `min-w-0` and the
   // KEY_TAP_TARGET reach, exactly as the fixed pad's keys had.

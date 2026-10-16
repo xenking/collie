@@ -120,14 +120,14 @@ describe("NavTray", () => {
     expect(enter.style.gridRow).toBe("1 / span 1");
     expect(enter.parentElement!.style.gridTemplateRows).toBe("repeat(1, 36px)");
     // As short as a key there, so it reaches out to the 44px floor as every key does.
-    expect(enter.className).toContain("before:-inset-y-1");
+    expect(enter.className).toContain("before:-inset-y-[5px]");
   });
 
-  it("every board key reaches 44px by hit area: 4px above and below, 2px into each side gap; a two-row Enter needs none", () => {
+  it("every board key reaches 44px by hit area: 4px above and below, 2px into each side gap, past the 1px border; a two-row Enter needs none", () => {
     render(<NavTray onSend={vi.fn()} />);
     const esc = screen.getByRole("button", { name: "Esc" });
-    expect(esc.className).toContain("before:-inset-y-1");
-    expect(esc.className).toContain("before:-inset-x-[2px]");
+    expect(esc.className).toContain("before:-inset-y-[5px]");
+    expect(esc.className).toContain("before:-inset-x-[3px]");
     expect(screen.getByRole("button", { name: "Enter" }).className).not.toContain("before:");
   });
 
@@ -173,13 +173,14 @@ describe("NavTray", () => {
     expect(onSend).toHaveBeenCalledExactlyOnceWith(["ctrl+c"]);
   });
 
-  it("no pad key can overflow its column — every key gets min-w-0 and overflow-hidden", () => {
+  it("no pad key can overflow its column — every key gets min-w-0 and a truncating label, and no overflow clip (it would cut the ::before hit area)", () => {
     render(<NavTray onSend={vi.fn()} />);
     for (const name of ["Esc", "Tab", "Up", "Ctrl+C", "Space", "Left", "Down", "Right", "Enter"]) {
       const btn = screen.getByRole("button", { name });
       expect(btn).toHaveClass("min-w-0");
-      expect(btn).toHaveClass("overflow-hidden");
+      expect(btn).not.toHaveClass("overflow-hidden");
     }
+    expect(screen.getByText("Esc")).toHaveClass("min-w-0", "truncate");
   });
 
   it("every icon key (Space, Shift, Tab, Enter, and the arrows) keeps its aria-label", () => {

@@ -50,6 +50,31 @@ test("Space spans four columns, Enter spans both rows and no key's label overflo
   expect(spaceBox!.width).toBeGreaterThanOrEqual(upBox!.width * 3.6);
   expect(spaceBox!.height).toBeLessThanOrEqual(upBox!.height * 1.2);
 
+  // Every single-cell key reaches the 44px floor by hit area (DESIGN.md section 6): the ::before
+  // reaches 2px into each side gap and 4px above and below, past the 1px border. elementFromPoint proves the reach is not
+  // clipped (an overflow clip on the key would cut it).
+  const hit = await page.evaluate(() => {
+    const out: Record<string, string> = {};
+    for (const n of ["Esc", "Up", "Left", "Right"]) {
+      const el = document.querySelector<HTMLElement>(`button[aria-label='${n}']`)!;
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el, "::before");
+      // The inset is from the padding box, inside the border, so the reach is the inset less the border.
+      const b = parseFloat(getComputedStyle(el).borderLeftWidth);
+      out[n] = [r.width - parseFloat(cs.left) - parseFloat(cs.right) - 2 * b, r.height - parseFloat(cs.top) - parseFloat(cs.bottom) - 2 * b].map((v) => v.toFixed(1)).join("x");
+    }
+    const left = document.querySelector("button[aria-label='Left']")!.getBoundingClientRect();
+    const probe = document.elementFromPoint(left.right + 1, left.y + left.height / 2);
+    out.rightOfLeft = probe?.getAttribute("aria-label") ?? "none";
+    return out;
+  });
+  for (const n of ["Esc", "Up", "Left", "Right"]) {
+    const [w, h] = hit[n].split("x").map(Number);
+    expect(w, `${n} hit width`).toBeGreaterThanOrEqual(43.9);
+    expect(h, `${n} hit height`).toBeGreaterThanOrEqual(43.9);
+  }
+  expect(hit.rightOfLeft, "the gap beside Left is Left's own reach").toBe("Left");
+
   // The tray's own Enter stands at the right edge, past the board, and spans both rows.
   const enterBox = await page.getByRole("button", { name: "Enter", exact: true }).boundingBox();
   expect(enterBox).not.toBeNull();
@@ -58,10 +83,18 @@ test("Space spans four columns, Enter spans both rows and no key's label overflo
 
   // Every key on the fixed pad, including the quick "^C": none may scroll its own content.
   const keyNames = ["Esc", "Tab", "Shift", "Ctrl", "Alt", "Up", "Ctrl+C", "Space", "Left", "Down", "Right", "Enter"];
+  // The key's CONTENT must stay inside its drawn box. The button's own scrollWidth is no test: it
+  // counts the transparent ::before that reaches the 44px tap floor (2px past each side).
+  const overflowing: string[] = [];
   for (const name of keyNames) {
-    const overflow = await page
-      .getByRole("button", { name, exact: true })
-      .evaluate((el) => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }));
-    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
+    const bad = await page.getByRole("button", { name, exact: true }).evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return [...el.querySelectorAll("*")].some((c) => {
+        const r = c.getBoundingClientRect();
+        return c.scrollWidth > c.clientWidth || r.left < box.left - 0.5 || r.right > box.right + 0.5;
+      });
+    });
+    if (bad) overflowing.push(name);
   }
+  expect(overflowing, "keys whose content overflows their box").toEqual([]);
 });
