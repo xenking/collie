@@ -6,8 +6,9 @@ Grammar: `ask.ts`. Corpus: `omp--select-menu.txt` and `omp--select-menu-moved.tx
 2026-08), `omp--select-menu-other.txt` and `omp--select-menu-noted.txt` (omp 18.4.4, Nerd Font preset,
 2026-10-01), `omp--v18-4-ask-*.txt` (omp 18.4.10, 2026-10-02), `omp--v18-8-ask-single-described.txt`
 (omp 18.8.0, 2026-10-07), `omp--v18-8-ask-single-described-moved.txt` (omp 18.8.7, 2026-10-10),
-and `omp--v18-10-ask-*.txt` (omp 18.10.3, 2026-10-13). Key semantics come from the published
-Ask dialog implementation in those versions and the live probes below.
+`omp--v18-10-ask-*.txt` (omp 18.10.3, 2026-10-13), and `omp--v18-11-ask-nerd-*.txt` (omp 18.11.1,
+Nerd Font preset, with pi-o-my's statusline-below row under the box, 2026-10-16). Key semantics come
+from the published Ask dialog implementation in those versions and the live probes below.
 
 ## What the screen prints
 

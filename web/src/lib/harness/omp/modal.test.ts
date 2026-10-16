@@ -82,6 +82,12 @@ const MODALS_WITH_A_WAY_OUT = [
   "omp--v18-10-ask-long.txt",
   "omp--v18-10-ask-long-expanded.txt",
   "omp--v18-10-ask-revisited.txt",
+  // OMP 18.11.1 batch in the Nerd Font preset, statusline-below row under the box (pi-o-my).
+  "omp--v18-11-ask-nerd-batch.txt",
+  "omp--v18-11-ask-nerd-batch-moved.txt",
+  "omp--v18-11-ask-nerd-batch-second.txt",
+  "omp--v18-11-ask-nerd-batch-revisited.txt",
+  "omp--v18-11-ask-nerd-batch-review.txt",
   // The compact model picker (`/switch`, Alt+P) in omp 18.4.10. Its footer ends `⎋ close · Alt+P task
   // model`, one segment past the way out (modal.ts header). The session state is LIFTED (omp/switch.ts)
   // and draws no card; the task-model state, the `@` quick-roles state, a search with no match and the
