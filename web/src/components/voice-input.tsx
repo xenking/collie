@@ -4,6 +4,7 @@ import { Loader2, Mic, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type { VoiceRecordingMode } from "@/lib/api";
+import { getDeviceToken } from "@/lib/pairing";
 
 export type VoicePhase = "idle" | "listening" | "finalizing" | "working" | "speaking";
 
@@ -210,6 +211,12 @@ function websocketUrl(paneId: string, session?: string): string {
   return url.toString();
 }
 
+/** A WebSocket cannot carry `Authorization`; the bridge reads the pairing token from the subprotocols. */
+function websocketProtocols(): string[] {
+  const token = getDeviceToken();
+  return token ? ["collie.voice", `collie.bearer.${token}`] : ["collie.voice"];
+}
+
 /**
  * Russian voice input over the bridge proxy. The browser has microphone access; only the server has
  * SONIOX_API_KEY, and final text follows Collie's existing composer delivery preference.
@@ -394,7 +401,7 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
     if (socketRef.current?.readyState === WebSocket.OPEN) return Promise.resolve(socketRef.current);
     if (connectingRef.current) return connectingRef.current;
     const deferred = newDeferred<WebSocket>();
-    const socket = new WebSocket(websocketUrl(paneId, session));
+    const socket = new WebSocket(websocketUrl(paneId, session), websocketProtocols());
     socket.binaryType = "arraybuffer";
     socketRef.current = socket;
     connectingRef.current = deferred.promise;

@@ -120,6 +120,29 @@ export function voiceTokenMatches(presented: string | null, expected: string): b
   return timingSafeEqual(Buffer.from(presented), Buffer.from(expected));
 }
 
+/** The subprotocol the voice socket speaks; the bridge echoes it so the browser accepts the upgrade. */
+export const VOICE_PROTOCOL = "collie.voice";
+const BEARER_PROTOCOL = "collie.bearer.";
+
+/**
+ * A browser cannot set `Authorization` on a WebSocket, so the voice socket offers its pairing token
+ * (base64url, a valid subprotocol token) as `collie.bearer.<token>`. Returns the request the pairing
+ * gate must see, carrying that token as a bearer, and the subprotocol to echo; an explicit
+ * `Authorization` header always wins.
+ */
+export function voiceSocketAuth(req: Request): { request: Request; protocol: string | null } {
+  const offered = (req.headers.get("sec-websocket-protocol") ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const protocol = offered.includes(VOICE_PROTOCOL) ? VOICE_PROTOCOL : null;
+  const token = offered.find((value) => value.startsWith(BEARER_PROTOCOL))?.slice(BEARER_PROTOCOL.length);
+  if (!token || req.headers.has("authorization")) return { request: req, protocol };
+  const headers = new Headers(req.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  return { request: new Request(req.url, { method: req.method, headers }), protocol };
+}
+
 /**
  * Soniox authenticates at connection time (the `api_key` start-message field is deprecated and refused
  * from 2027-01-15), so the long-lived key rides the Authorization header of the server-side socket and

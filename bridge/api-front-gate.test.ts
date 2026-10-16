@@ -200,6 +200,13 @@ describe("apiFrontGate: every /api/ path but the allowlist is refused without a 
     }
   });
 
+  test("the voice WebSocket's subprotocol token passes the front gate, on that path only", async () => {
+    const { store } = await storeWith(true);
+    const offered = { "sec-websocket-protocol": `collie.voice, collie.bearer.${TOKEN}` };
+    expect(apiFrontGate(request("GET", "/api/voice/media", offered), "/api/voice/media", config(), store)).toBeNull();
+    expect(apiFrontGate(request("GET", "/api/snapshot", offered), "/api/snapshot", config(), store)!.status).toBe(403);
+  });
+
   test("a path outside /api/ is not this gate's business", async () => {
     const { store } = await storeWith(true);
     for (const path of ["/", "/index.html", "/assets/app.js", "/crew/v1/hello", "/standby/health", "/api", "//api/snapshot", "/API/snapshot"]) {
