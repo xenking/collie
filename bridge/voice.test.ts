@@ -10,6 +10,7 @@ import {
   ttsConfig,
   TurnController,
   VoiceBroker,
+  voiceSocketAuth,
   voiceTokenMatches,
   type VoiceSocketData,
 } from "./voice.ts";
@@ -445,6 +446,54 @@ describe("VoiceBroker remote lease", () => {
     } finally {
       Reflect.set(globalThis, "fetch", nativeFetch);
       await rm(tokenFile, { force: true });
+    }
+  });
+});
+
+describe("voiceSocketAuth", () => {
+  test("lifts the subprotocol pairing token into a bearer for the gate and echoes the voice protocol", () => {
+    const req = new Request("http://127.0.0.1/api/voice/media?pane=p1", {
+      headers: { origin: "http://127.0.0.1", "sec-websocket-protocol": "collie.voice, collie.bearer.tok-abc_123" },
+    });
+    const auth = voiceSocketAuth(req);
+    expect(auth.protocol).toBe("collie.voice");
+    expect(auth.request.headers.get("authorization")).toBe("Bearer tok-abc_123");
+    expect(auth.request.headers.get("origin")).toBe("http://127.0.0.1");
+  });
+
+  test("an explicit Authorization header wins and nothing is echoed when the protocol is not offered", () => {
+    const req = new Request("http://127.0.0.1/api/voice/media", {
+      headers: { authorization: "Bearer real", "sec-websocket-protocol": "collie.bearer.other" },
+    });
+    const auth = voiceSocketAuth(req);
+    expect(auth.request).toBe(req);
+    expect(auth.protocol).toBeNull();
+  });
+
+  test("a real WebSocket handshake reaches the gate with the token and opens on the echoed protocol", async () => {
+    let seen = null as string | null;
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req, server) {
+        const auth = voiceSocketAuth(req);
+        seen = auth.request.headers.get("authorization");
+        if (seen !== "Bearer tok") return new Response("device not paired", { status: 403 });
+        const headers = auth.protocol ? { "Sec-WebSocket-Protocol": auth.protocol } : undefined;
+        return server.upgrade(req, { headers }) ? undefined : new Response("upgrade failed", { status: 400 });
+      },
+      websocket: { message() {} },
+    });
+    try {
+      const ws = new WebSocket(`ws://127.0.0.1:${srv.port}/api/voice/media`, ["collie.voice", "collie.bearer.tok"]);
+      await new Promise<void>((resolve, reject) => {
+        ws.addEventListener("open", () => resolve(), { once: true });
+        ws.addEventListener("error", () => reject(new Error("handshake refused")), { once: true });
+      });
+      expect(seen).toBe("Bearer tok");
+      expect(ws.protocol).toBe("collie.voice");
+      ws.close();
+    } finally {
+      srv.stop(true);
     }
   });
 });

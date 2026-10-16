@@ -4,6 +4,7 @@ import { afterAll } from "vitest";
 import { http, HttpResponse } from "msw";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { loadDraft } from "@/lib/drafts";
+import { clearDeviceToken, setDeviceToken } from "@/lib/pairing";
 import { __resetOperatorCommands } from "@/lib/operator-config";
 import { server } from "@/test/setup";
 import { Composer } from "./composer";
@@ -27,7 +28,10 @@ class FakeSocket {
   onerror: (() => void) | null = null;
   onclose: (() => void) | null = null;
 
-  constructor(_url: string) {
+  readonly protocols: string[] | undefined;
+
+  constructor(_url: string, protocols?: string[]) {
+    this.protocols = protocols;
     FakeSocket.instances.push(this);
     if (FakeSocket.autoReady) queueMicrotask(() => this.emit(FakeSocket.readyMessage));
   }
@@ -97,6 +101,28 @@ describe("VoiceInput", () => {
     else Reflect.deleteProperty(globalThis, "AudioContext");
     if (mediaDevicesDescriptor) Object.defineProperty(navigator, "mediaDevices", mediaDevicesDescriptor);
     else Reflect.deleteProperty(navigator, "mediaDevices");
+  });
+
+  it("offers the device's pairing token as a subprotocol, since a WebSocket carries no Authorization", async () => {
+    setDeviceToken("tok-abc_123");
+    try {
+      render(
+        <VoiceInput
+          replySpeechSupported={true}
+          paneId="w1:p4"
+          recordingMode="toggle"
+          showControl
+          disabled={false}
+          onTranscript={vi.fn(async () => true)}
+          onVoiceStateChange={vi.fn()}
+          onError={vi.fn()}
+        />,
+      );
+      await startVoice();
+      expect(FakeSocket.instances[0]!.protocols).toEqual(["collie.voice", "collie.bearer.tok-abc_123"]);
+    } finally {
+      clearDeviceToken();
+    }
   });
 
   it("commits only the bridge-final transcript and binds it to the active generation", async () => {
