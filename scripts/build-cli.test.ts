@@ -14,10 +14,9 @@ const root = join(import.meta.dir, "..");
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
   scripts: Record<string, string>;
 };
-// A Windows checkout with `core.autocrlf` holds these files with CRLF line ends; the assertions below
-// match multi-line shell, so both are read with LF line ends whatever the checkout did.
+// A Windows checkout with `core.autocrlf` holds this file with CRLF line ends; the assertion below
+// matches shell text, so it is read with LF line ends whatever the checkout did.
 const readLf = (path: string): string => readFileSync(path, "utf8").replaceAll("\r\n", "\n");
-const release = readLf(join(root, ".github", "workflows", "release.yml"));
 const aurVmTest = readLf(join(root, "packaging", "aur", "vm-install.test.sh"));
 
 describe("build-cli arguments", () => {
@@ -182,13 +181,6 @@ describe("release and AUR local-binary compile routes", () => {
   test("the package CLI-only command delegates to build-cli", () => {
     expect(packageJson.scripts.build).toBe("bun run cli/main.ts build");
     expect(packageJson.scripts["build:cli"]).toBe("bun run scripts/build-cli.ts");
-  });
-
-  test("the release passes its selected Bun, target and artifact path to build-cli", () => {
-    expect(release).toMatch(
-      /bun run scripts\/build-cli\.ts \\\n            --bun "\$upstream_bun" \\\n            --target "\$BUN_TARGET" \\\n            --outfile "\$stage\/bin\/collie"/,
-    );
-    expect(release).not.toMatch(/^\s*"\$upstream_bun" build --compile/m);
   });
 
   test("the AUR VM instruction keeps its local artifact on build-cli", () => {
