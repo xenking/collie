@@ -225,7 +225,7 @@ import type {
   UploadResponse,
 } from "./types.ts";
 import { prepareVoicePane } from "./voice-pane.ts";
-import { VoiceBroker, voiceSocketAuth, voiceTokenMatches, type VoiceSocketData } from "./voice.ts";
+import { VoiceBroker, voiceProtocol, voiceTokenMatches, type VoiceSocketData } from "./voice.ts";
 
 // Headroom the runtime's own body cap (Bun.serve maxRequestBodySize) keeps above the operator's
 // upload cap. It has to sit above cap + multipart overhead so the handler's own 413 fires first for
@@ -2319,9 +2319,8 @@ export function startServer(opts: {
       }
 
       if (pathname === "/api/voice/media") {
-        // The browser's WebSocket carries the pairing token as a subprotocol, not a header.
-        const auth = voiceSocketAuth(req);
-        const denied = guard(auth.request, cfg, "write", pairing);
+        // The browser's WebSocket offers its pairing token as a subprotocol; `bearerToken` reads it there.
+        const denied = guard(req, cfg, "write", pairing);
         if (denied) return denied;
         if (!cfg.sonioxApiKey) return text("voice is not configured", 503);
         const rt = await target();
@@ -2333,15 +2332,16 @@ export function startServer(opts: {
         const ompSessionFile = prepared.sessionFile;
         // NUL cannot occur in a real session path; the JSON tuple makes the synthetic namespace unambiguous.
         const sessionFile = ompSessionFile ?? `\0collie:voice:${JSON.stringify([rt.name, paneId])}`;
+        const protocol = voiceProtocol(req);
         const upgraded = server.upgrade(req, {
           data: {
             paneId,
             session: rt.name,
             sessionFile,
             replySpeechSupported: ompSessionFile !== null,
-            device: requestDevice(auth.request, cfg, pairing).device,
+            device: requestDevice(req, cfg, pairing).device,
           } satisfies VoiceSocketData,
-          headers: auth.protocol ? { ...SECURITY_HEADERS, "Sec-WebSocket-Protocol": auth.protocol } : SECURITY_HEADERS,
+          headers: protocol ? { ...SECURITY_HEADERS, "Sec-WebSocket-Protocol": protocol } : SECURITY_HEADERS,
         });
         return upgraded ? undefined : text("WebSocket upgrade failed", 400);
       }
@@ -6447,8 +6447,7 @@ export function apiFrontGate(
 ): Response | null {
   if (!pathname.startsWith("/api/")) return null;
   if (isOpenApiRoute(pathname, req.method)) return null;
-  // Fork: the voice WebSocket carries its pairing token as a subprotocol; a browser cannot set headers on it.
-  return guard(pathname === "/api/voice/media" ? voiceSocketAuth(req).request : req, cfg, "read", pairing);
+  return guard(req, cfg, "read", pairing);
 }
 
 /**

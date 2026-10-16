@@ -4,13 +4,14 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, jest, test } from "bun:test";
 
 import type { Config } from "./config.ts";
+import { bearerToken } from "./pairing.ts";
 import {
   sttConfig,
   sttUpdate,
   ttsConfig,
   TurnController,
   VoiceBroker,
-  voiceSocketAuth,
+  voiceProtocol,
   voiceTokenMatches,
   type VoiceSocketData,
 } from "./voice.ts";
@@ -450,24 +451,24 @@ describe("VoiceBroker remote lease", () => {
   });
 });
 
-describe("voiceSocketAuth", () => {
-  test("lifts the subprotocol pairing token into a bearer for the gate and echoes the voice protocol", () => {
+describe("the voice socket's credential", () => {
+  test("the gate reads the subprotocol pairing token, and only the voice protocol is echoed", () => {
     const req = new Request("http://127.0.0.1/api/voice/media?pane=p1", {
       headers: { origin: "http://127.0.0.1", "sec-websocket-protocol": "collie.voice, collie.bearer.tok-abc_123" },
     });
-    const auth = voiceSocketAuth(req);
-    expect(auth.protocol).toBe("collie.voice");
-    expect(auth.request.headers.get("authorization")).toBe("Bearer tok-abc_123");
-    expect(auth.request.headers.get("origin")).toBe("http://127.0.0.1");
+    expect(bearerToken(req.headers)).toBe("tok-abc_123");
+    expect(voiceProtocol(req)).toBe("collie.voice");
   });
 
-  test("an explicit Authorization header wins and nothing is echoed when the protocol is not offered", () => {
-    const req = new Request("http://127.0.0.1/api/voice/media", {
+  test("an explicit Authorization header wins, a malformed one does not fall through, and nothing is echoed unoffered", () => {
+    const both = new Request("http://127.0.0.1/api/voice/media", {
       headers: { authorization: "Bearer real", "sec-websocket-protocol": "collie.bearer.other" },
     });
-    const auth = voiceSocketAuth(req);
-    expect(auth.request).toBe(req);
-    expect(auth.protocol).toBeNull();
+    expect(bearerToken(both.headers)).toBe("real");
+    expect(voiceProtocol(both)).toBeNull();
+    const malformed = new Headers({ authorization: "Basic xyz", "sec-websocket-protocol": "collie.bearer.other" });
+    expect(bearerToken(malformed)).toBeNull();
+    expect(bearerToken(new Headers({ "sec-websocket-protocol": "collie.bearer." }))).toBeNull();
   });
 
   test("a real WebSocket handshake reaches the gate with the token and opens on the echoed protocol", async () => {
@@ -475,11 +476,12 @@ describe("voiceSocketAuth", () => {
     const srv = Bun.serve({
       port: 0,
       fetch(req, server) {
-        const auth = voiceSocketAuth(req);
-        seen = auth.request.headers.get("authorization");
-        if (seen !== "Bearer tok") return new Response("device not paired", { status: 403 });
-        const headers = auth.protocol ? { "Sec-WebSocket-Protocol": auth.protocol } : undefined;
-        return server.upgrade(req, { headers }) ? undefined : new Response("upgrade failed", { status: 400 });
+        seen = bearerToken(req.headers);
+        if (seen !== "tok") return new Response("device not paired", { status: 403 });
+        const protocol = voiceProtocol(req);
+        return server.upgrade(req, { headers: protocol ? { "Sec-WebSocket-Protocol": protocol } : undefined })
+          ? undefined
+          : new Response("upgrade failed", { status: 400 });
       },
       websocket: { message() {} },
     });
@@ -489,7 +491,7 @@ describe("voiceSocketAuth", () => {
         ws.addEventListener("open", () => resolve(), { once: true });
         ws.addEventListener("error", () => reject(new Error("handshake refused")), { once: true });
       });
-      expect(seen).toBe("Bearer tok");
+      expect(seen).toBe("tok");
       expect(ws.protocol).toBe("collie.voice");
       ws.close();
     } finally {
