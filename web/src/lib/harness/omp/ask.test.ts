@@ -62,6 +62,47 @@ it("shows every batch answer and submits the review with Enter alone", () => {
   ]);
 });
 
+describe("omp 18.11.1 batch in the Nerd Font preset (its keycaps for Tab, Alt and a chosen radio are glyphs)", () => {
+  it("lifts the current question with its tab caption and the pointer walk", () => {
+    const model = detectAskSelect(load("omp--v18-11-ask-nerd-batch.txt"));
+    expect(model?.question).toBe("Pick a color");
+    expect(model?.caption).toBe("Ask (1/2) · color");
+    expect(model?.options.map((option) => [option.label, option.keys, option.keyLabel])).toEqual([
+      ["Red", ["Enter"], "❯"],
+      ["Green", ["Down", "Enter"], ""],
+      ["Blue", ["Down", "Down", "Enter"], ""],
+      [OTHER, ["Down", "Down", "Down", "Enter"], ""],
+      ["Cancel", ["Escape"], "Esc"],
+    ]);
+    expect(ompModalOnScreen(load("omp--v18-11-ask-nerd-batch.txt"))).toBe(true);
+  });
+
+  it("follows the pointer, keeps the question's identity, and reads the next question", () => {
+    const first = detectAskSelect(load("omp--v18-11-ask-nerd-batch.txt"));
+    const moved = detectAskSelect(load("omp--v18-11-ask-nerd-batch-moved.txt"));
+    expect(moved?.options.find((option) => option.label === "Green")).toMatchObject({ keys: ["Enter"], keyLabel: "❯" });
+    expect(moved?.coreSignature).toBe(first?.coreSignature);
+    const second = detectAskSelect(load("omp--v18-11-ask-nerd-batch-second.txt"));
+    expect(second?.question).toBe("Pick a size");
+    expect(second?.caption).toBe("Ask (2/2) · size");
+  });
+
+  it("reads a revisited question whose answer wears the chosen-radio glyph", () => {
+    const model = detectAskSelect(load("omp--v18-11-ask-nerd-batch-revisited.txt"));
+    expect(model?.question).toBe("Pick a size");
+    expect(model?.options.map((option) => option.label)).toEqual(["Small", "Medium", "Large", OTHER, "Cancel"]);
+  });
+
+  it("submits the review with Enter alone", () => {
+    const model = detectAskSelect(load("omp--v18-11-ask-nerd-batch-review.txt"));
+    expect(model?.question).toBe("Review answers\n1. color: Green\n2. size: Small");
+    expect(model?.options).toEqual([
+      { label: "Submit", keys: ["Enter"], keyLabel: "⏎" },
+      { label: "Cancel", keys: ["Escape"], keyLabel: "Esc" },
+    ]);
+  });
+});
+
 it("expands truncated questions before offering answers, then preserves the full text", () => {
   const collapsed = detectAskSelect(load("omp--v18-10-ask-long.txt"));
   expect(collapsed?.options).toEqual([
@@ -618,6 +659,12 @@ describe("the grammar claims nothing else in the corpus", () => {
     "omp--v18-10-ask-long.txt",
     "omp--v18-10-ask-long-expanded.txt",
     "omp--v18-10-ask-revisited.txt",
+    // OMP 18.11.1 batch in the Nerd Font preset, statusline-below row under the box (pi-o-my).
+    "omp--v18-11-ask-nerd-batch.txt",
+    "omp--v18-11-ask-nerd-batch-moved.txt",
+    "omp--v18-11-ask-nerd-batch-second.txt",
+    "omp--v18-11-ask-nerd-batch-revisited.txt",
+    "omp--v18-11-ask-nerd-batch-review.txt",
   ]);
 
   it("lifts only the supported Ask states in the complete corpus", () => {
