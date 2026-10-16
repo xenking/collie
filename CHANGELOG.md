@@ -24,8 +24,8 @@ Running a crew? Update the lead first; members follow on their own. Details:
 ## [Unreleased]
 
 ### Fixed
-- **The Keys tray's Enter is tall and on the right again.** The Default pad draws its own tinted Enter in a column of its own past a 12px gap, spanning both rows, and Space is four cells wide beside the arrows. A pad that has its own Enter (a preset, or one you placed) is unchanged, and Enter is no longer a key the editor warns about. Width goes up to 4.
 - **Live speech now appears in the composer while recording.** Provisional words update the field without becoming a saved draft, remain visible while recognition finishes, and are replaced by the final transcript. ([beea9fac](https://github.com/xenking/collie/commit/beea9fac))
+- **The Keys tray's Enter is tall and on the right again.** The Default pad draws its own tinted Enter in a column of its own past a small gap, spanning both rows, and Space is four cells wide beside the arrows. A pad that has its own Enter (a preset, or one you placed) is unchanged, and Enter is no longer a key the editor warns about. Width goes up to 4.
 
 ## [1.21.3] - 2026-10-14
 

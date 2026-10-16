@@ -79,16 +79,16 @@ describe("NavTray", () => {
     expect(isBefore(right, enter)).toBe(true);
 
     // Every key is placed on the grid by CSS: its corner, and how far it spans. The board is 7
-    // columns, then a 12px spacer and the commit column, so Enter stays away from the arrows (issue #263).
+    // columns, then an 8px spacer and the commit column, so Enter stays away from the arrows (issue #263).
     const grid = esc.parentElement!;
-    expect(grid.className).toContain("grid-cols-[repeat(7,minmax(0,1fr))_12px_1.5fr]");
+    expect(grid.className).toContain("grid-cols-[repeat(7,minmax(0,1fr))_8px_1.25fr]");
     const place = (el: HTMLElement) => [el.style.gridColumn, el.style.gridRow];
     expect(place(esc)).toEqual(["1 / span 1", "1 / span 1"]);
     expect(place(ctrlC)).toEqual(["7 / span 1", "1 / span 1"]);
     expect(place(space)).toEqual(["1 / span 4", "2 / span 1"]);
     expect(place(left)).toEqual(["5 / span 1", "2 / span 1"]);
     expect(place(down)[0]).toBe(place(up)[0]);
-    // The commit column: column 9 (past the 12px spacer, which holds nothing), both rows tall.
+    // The commit column: column 9 (past the 8px spacer, which holds nothing), both rows tall.
     expect(place(enter)).toEqual(["9 / span 1", "1 / span 2"]);
     expect(enter).toHaveClass("h-auto", "self-stretch");
     // Nothing else is in the grid: 11 board keys and the one Enter.
@@ -109,7 +109,7 @@ describe("NavTray", () => {
     expect(enters).toHaveLength(1);
     expect(enters[0].style.gridColumn).toBe("2 / span 1");
     expect(enters[0].parentElement).toHaveClass("grid-cols-7");
-    expect(enters[0].parentElement!.className).not.toContain("12px");
+    expect(enters[0].parentElement!.className).not.toContain("8px");
     expect(enters[0].parentElement!.children).toHaveLength(2);
   });
 
@@ -119,6 +119,16 @@ describe("NavTray", () => {
     expect(enter.style.gridColumn).toBe("9 / span 1");
     expect(enter.style.gridRow).toBe("1 / span 1");
     expect(enter.parentElement!.style.gridTemplateRows).toBe("repeat(1, 36px)");
+    // As short as a key there, so it reaches out to the 44px floor as every key does.
+    expect(enter.className).toContain("before:-inset-y-1");
+  });
+
+  it("every board key reaches 44px by hit area: 4px above and below, 2px into each side gap; a two-row Enter needs none", () => {
+    render(<NavTray onSend={vi.fn()} />);
+    const esc = screen.getByRole("button", { name: "Esc" });
+    expect(esc.className).toContain("before:-inset-y-1");
+    expect(esc.className).toContain("before:-inset-x-[2px]");
+    expect(screen.getByRole("button", { name: "Enter" }).className).not.toContain("before:");
   });
 
   // jsdom lays out nothing, so the row heights can only be pinned by the style that produces them.

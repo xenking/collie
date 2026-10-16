@@ -66,7 +66,7 @@ import {
 // so the editor sheet draws the same board. The shipped board, the Default, is the old pad: row 1 is
 // Esc/Tab/the three modifiers/Up/quick Ctrl+C, row 2 is a Space four cells wide, then the inverted-T's
 // Left-Down-Right (Down under Up). Enter is the TRAY's, not the board's: when the board carries no
-// Enter of its own, a tall Enter stands apart on an eighth column at the right edge, past a 12px gap,
+// Enter of its own, a tall Enter stands apart on an eighth column at the right edge, past an 8px spacer,
 // spanning the first two rows. A miss on Enter confirms a prompt, a miss on an arrow is reversible
 // (issue #263), and it carries a low-opacity tint of the primary colour at rest so it reads as the
 // commit key before it is pressed. A board that places its own Enter (a preset, an edit) draws it there
@@ -344,13 +344,15 @@ export function NavTray({
   );
 
   // Tap-target idiom (DESIGN.md §6, the same move as `STRIP_TAP_TARGET` in ui/labelled-strip.tsx): a
-  // transparent `::before` extends a button's clickable box without adding drawn height. 2px top +
-  // 2px bottom exactly fills this grid's 4px row gap (`gap-1`), so a normal key's extended hit area
-  // meets its neighbour's at the gap's midpoint and never reaches into a sibling's own drawn box.
-  // 36px drawn (`h-9`) + 2 + 2 = 40px, the tap floor — Enter needs none of this, its own row-span
-  // already clears 40px on its own.
+  // transparent `::before` extends a button's clickable box without adding drawn size. The grid's
+  // gap is 4px (`gap-1`), so 2px on each side horizontally fills it to the midpoint between two keys,
+  // and 4px top and bottom reaches the next row's drawn edge and no further: a key's hit box never
+  // enters a sibling's drawn box. 36px drawn (`h-9`) + 4 + 4 = 44px tall, the tap floor; a 7-column
+  // key is 40.5px drawn at 390px with the commit column (the narrowest case), + 2 + 2 = 44px
+  // wide. The commit Enter's own two-row span clears the floor in both axes, so it wears none of
+  // this, except on a one-row board, where it is as short as a key.
   const KEY_TAP_TARGET =
-    "relative before:absolute before:inset-x-0 before:-inset-y-[2px] before:content-['']";
+    "relative before:absolute before:-inset-x-[2px] before:-inset-y-1 before:content-['']";
 
   // The board's keys. A cell is a seventh of a phone wide, so every key gets `min-w-0` and the
   // KEY_TAP_TARGET reach, exactly as the fixed pad's keys had.
@@ -411,10 +413,10 @@ export function NavTray({
       />
 
       {/* The board: 7 columns, one 36px row per used row. Every key is placed by its anchor and spans
-          its width and height; an empty cell draws nothing, so every key keeps its place. Past a 12px
+          its width and height; an empty cell draws nothing, so every key keeps its place. Past an 8px
           spacer column, the tray's own tall Enter when the board has none (see the header). */}
       <div
-        className={cn("grid gap-1", commitColumn ? "grid-cols-[repeat(7,minmax(0,1fr))_12px_1.5fr]" : "grid-cols-7")}
+        className={cn("grid gap-1", commitColumn ? "grid-cols-[repeat(7,minmax(0,1fr))_8px_1.25fr]" : "grid-cols-7")}
         style={{ gridTemplateRows: `repeat(${rows}, 36px)` }}
       >
         {board.cells.slice(0, rows * BOARD_COLS).map((key, i) =>
@@ -429,7 +431,7 @@ export function NavTray({
             ["Enter"],
             "Enter",
             false,
-            "w-full h-auto self-stretch flex-col gap-0.5",
+            cn("w-full h-auto self-stretch flex-col gap-0.5", rows < 2 && KEY_TAP_TARGET),
             "bg-primary/15 border-primary/40",
             false,
             { gridColumn: "9 / span 1", gridRow: `1 / span ${Math.min(rows, 2)}` },
