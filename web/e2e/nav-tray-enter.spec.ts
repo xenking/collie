@@ -26,7 +26,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   await installApiStub(page);
 });
 
-test("Space spans three columns and no key's label overflows its column", async ({ page }) => {
+test("Space spans four columns, Enter spans both rows and no key's label overflows its column", async ({ page }) => {
   // w1:p1 is the default fixture agent pane (`src/test/handlers.ts`), writable with no capability
   // declared false, so the Keys toggle in its composer is enabled with no further setup.
   await page.goto(`/pane/${encodeURIComponent("w1:p1")}`);
@@ -45,18 +45,76 @@ test("Space spans three columns and no key's label overflows its column", async 
   const [upBox, spaceBox] = await Promise.all([up.boundingBox(), space.boundingBox()]);
   expect(upBox).not.toBeNull();
   expect(spaceBox).not.toBeNull();
-  // Since the 1.19.0 board (ADR 0092) the default pad's Space is three cells wide, one row tall, and
-  // Enter is an ordinary cell. Three columns plus two gaps is ~3.1x one key; 2.7x is the floor a
-  // regression back to one cell (1x) or a lost span class would both still fail.
-  expect(spaceBox!.width).toBeGreaterThanOrEqual(upBox!.width * 2.7);
+  // The default pad's Space is four cells wide, one row tall (ADR 0092). Four columns plus three gaps
+  // is ~4.1x one key; 3.6x is the floor a regression to one cell (1x) or a lost span class would fail.
+  expect(spaceBox!.width).toBeGreaterThanOrEqual(upBox!.width * 3.6);
   expect(spaceBox!.height).toBeLessThanOrEqual(upBox!.height * 1.2);
+
+  // Every single-cell key buys hit area with its ::before: 2px past the border into the middle of
+  // each 4px gap, in both axes (ADR 0104). That is 44.5px wide at 390px and 40px tall, and no two
+  // reaches overlap, so a tap in a gap never lands on the other row's key. elementFromPoint proves
+  // the reach is not clipped and not doubled.
+  const hit = await page.evaluate(() => {
+    const out: Record<string, string> = {};
+    for (const n of ["Esc", "Up", "Left", "Right"]) {
+      const el = document.querySelector<HTMLElement>(`button[aria-label='${n}']`)!;
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el, "::before");
+      // The inset is from the padding box, inside the border, so the reach is the inset less the border.
+      const b = parseFloat(getComputedStyle(el).borderLeftWidth);
+      out[n] = [r.width - parseFloat(cs.left) - parseFloat(cs.right) - 2 * b, r.height - parseFloat(cs.top) - parseFloat(cs.bottom) - 2 * b].map((v) => v.toFixed(1)).join("x");
+    }
+    const left = document.querySelector("button[aria-label='Left']")!.getBoundingClientRect();
+    const probe = document.elementFromPoint(left.right + 1, left.y + left.height / 2);
+    out.rightOfLeft = probe?.getAttribute("aria-label") ?? "none";
+    return out;
+  });
+  for (const n of ["Esc", "Up", "Left", "Right"]) {
+    const [w, h] = hit[n].split("x").map(Number);
+    expect(w, `${n} hit width`).toBeGreaterThanOrEqual(43.9);
+    expect(h, `${n} hit height`).toBeGreaterThanOrEqual(39.9);
+  }
+  expect(hit.rightOfLeft, "the gap beside Left is Left's own reach").toBe("Left");
+
+  // No overlap: just outside a key's drawn edge is the key itself (its reach), and just past the
+  // middle of the gap is the neighbour. Esc over Space (rows), and Left beside Down (columns).
+  const probes = await page.evaluate(() => {
+    const [esc, gap, left, down] = ["Esc", "Space", "Left", "Down"].map((n) =>
+      document.querySelector(`button[aria-label='${n}']`)!.getBoundingClientRect(),
+    );
+    const [belowEsc, aboveSpace, rightOfLeft, leftOfDown] = [
+      [esc.x + esc.width / 2, esc.bottom + 1],
+      [esc.x + esc.width / 2, gap.y - 1],
+      [left.right + 1, left.y + left.height / 2],
+      [down.x - 1, down.y + down.height / 2],
+    ].map(([x, y]) => document.elementFromPoint(x, y)?.getAttribute("aria-label") ?? "none");
+    return { belowEsc, aboveSpace, rightOfLeft, leftOfDown };
+  });
+  expect(probes.belowEsc, "1px under Esc").toBe("Esc");
+  expect(probes.aboveSpace, "1px above Space, under Esc").toBe("Space");
+  expect(probes.rightOfLeft, "1px right of Left").toBe("Left");
+  expect(probes.leftOfDown, "1px left of Down").toBe("Down");
+
+  // The tray's own Enter stands at the right edge, past the board, and spans both rows.
+  const enterBox = await page.getByRole("button", { name: "Enter", exact: true }).boundingBox();
+  expect(enterBox).not.toBeNull();
+  expect(enterBox!.x).toBeGreaterThanOrEqual(upBox!.x + upBox!.width);
+  expect(enterBox!.height).toBeGreaterThanOrEqual(upBox!.height * 1.8);
 
   // Every key on the fixed pad, including the quick "^C": none may scroll its own content.
   const keyNames = ["Esc", "Tab", "Shift", "Ctrl", "Alt", "Up", "Ctrl+C", "Space", "Left", "Down", "Right", "Enter"];
+  // The key's CONTENT must stay inside its drawn box. The button's own scrollWidth is no test: it
+  // counts the transparent ::before that reaches the 44px tap floor (2px past each side).
+  const overflowing: string[] = [];
   for (const name of keyNames) {
-    const overflow = await page
-      .getByRole("button", { name, exact: true })
-      .evaluate((el) => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }));
-    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
+    const bad = await page.getByRole("button", { name, exact: true }).evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return [...el.querySelectorAll("*")].some((c) => {
+        const r = c.getBoundingClientRect();
+        return c.scrollWidth > c.clientWidth || r.left < box.left - 0.5 || r.right > box.right + 0.5;
+      });
+    });
+    if (bad) overflowing.push(name);
   }
+  expect(overflowing, "keys whose content overflows their box").toEqual([]);
 });

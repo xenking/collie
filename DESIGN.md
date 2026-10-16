@@ -494,6 +494,9 @@ are 17 call sites today.
 
 **44px is the floor for anything tappable.** The mark in the header is a button, so it owes
 the same floor as the gear beside it — both are `size-11`.
+One known exception: the Keys tray's single-cell keys are 44.5px wide only at 390px, fall to about
+40.8px at 360px, and are 40px tall at any width (rows meet at the middle of the gap, so a tap never
+lands on the neighbouring row), accepted for the tall Enter column ([ADR 0104](./.adr/0104-the-tray-owns-a-tall-enter-when-the-board-has-none.md)).
 
 **Buy the floor as HIT area where drawn height is expensive.** `STRIP_TAP_TARGET`
 (`ui/labelled-strip.tsx`) extends a pill's hit box with a transparent `::before` while the

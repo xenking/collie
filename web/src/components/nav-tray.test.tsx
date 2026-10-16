@@ -43,7 +43,7 @@ describe("NavTray", () => {
     expect(onSend.mock.calls).toEqual([[["1"]], [["5"]], [["9"]]]);
   });
 
-  it("the Default board is today's pad: Esc/Tab/modifiers/Up/^C over Space/Enter/arrows, Enter away from the arrows", () => {
+  it("the Default board is today's pad: Esc/Tab/modifiers/Up/^C over Space/arrows, with a tall Enter set apart at the right edge", () => {
     render(<NavTray onSend={vi.fn()} />);
 
     const esc = screen.getByRole("button", { name: "Esc" });
@@ -71,30 +71,64 @@ describe("NavTray", () => {
     expect(isBefore(alt, up)).toBe(true);
     expect(isBefore(up, ctrlC)).toBe(true);
 
-    // Row 2: Enter, a Space three cells wide, then the inverted-T's Left, Down, Right.
-    expect(isBefore(ctrlC, enter)).toBe(true);
-    expect(isBefore(enter, space)).toBe(true);
+    // Row 2: a Space four cells wide, then the inverted-T's Left, Down, Right; the tray's Enter last.
+    expect(isBefore(ctrlC, space)).toBe(true);
     expect(isBefore(space, left)).toBe(true);
     expect(isBefore(left, down)).toBe(true);
     expect(isBefore(down, right)).toBe(true);
+    expect(isBefore(right, enter)).toBe(true);
 
-    // Every key is placed on a 7-column grid by CSS: its corner, and how far it spans. Enter stays
-    // away from the arrows (issue #263): the wide Space stands between it and Left.
+    // Every key is placed on the grid by CSS: its corner, and how far it spans. The board is 7
+    // columns, then an 8px spacer and the commit column, so Enter stays away from the arrows (issue #263).
     const grid = esc.parentElement!;
-    expect(grid).toHaveClass("grid-cols-7");
+    expect(grid.className).toContain("grid-cols-[repeat(7,minmax(0,1fr))_8px_1.25fr]");
     const place = (el: HTMLElement) => [el.style.gridColumn, el.style.gridRow];
     expect(place(esc)).toEqual(["1 / span 1", "1 / span 1"]);
     expect(place(ctrlC)).toEqual(["7 / span 1", "1 / span 1"]);
-    expect(place(enter)).toEqual(["1 / span 1", "2 / span 1"]);
-    expect(place(space)).toEqual(["2 / span 3", "2 / span 1"]);
+    expect(place(space)).toEqual(["1 / span 4", "2 / span 1"]);
     expect(place(left)).toEqual(["5 / span 1", "2 / span 1"]);
     expect(place(down)[0]).toBe(place(up)[0]);
-    // Nothing else is in the grid: no spacer cells to shift anything.
+    // The commit column: column 9 (past the 8px spacer, which holds nothing), both rows tall.
+    expect(place(enter)).toEqual(["9 / span 1", "1 / span 2"]);
+    expect(enter).toHaveClass("h-auto", "self-stretch");
+    // Nothing else is in the grid: 11 board keys and the one Enter.
     expect(grid.children).toHaveLength(12);
 
     // Enter carries a low-opacity tint of the primary colour at rest — the commit-key read.
     expect(enter).toHaveClass("bg-primary/15");
     expect(enter).toHaveClass("border-primary/40");
+  });
+
+  it("a board with its own Enter draws no commit column: seven columns and exactly one Enter", () => {
+    const own = boardOf(2, [
+      [0, { kind: "chord", steps: ["Escape"] }],
+      [1, { kind: "chord", steps: ["Enter"] }],
+    ]);
+    render(<NavTray onSend={vi.fn()} board={own} />);
+    const enters = screen.getAllByRole("button", { name: "Enter" });
+    expect(enters).toHaveLength(1);
+    expect(enters[0].style.gridColumn).toBe("2 / span 1");
+    expect(enters[0].parentElement).toHaveClass("grid-cols-7");
+    expect(enters[0].parentElement!.className).not.toContain("8px");
+    expect(enters[0].parentElement!.children).toHaveLength(2);
+  });
+
+  it("the commit column spans one row on a one-row board", () => {
+    render(<NavTray onSend={vi.fn()} board={boardOf(1, [[0, { kind: "chord", steps: ["Escape"] }]])} />);
+    const enter = screen.getByRole("button", { name: "Enter" });
+    expect(enter.style.gridColumn).toBe("9 / span 1");
+    expect(enter.style.gridRow).toBe("1 / span 1");
+    expect(enter.parentElement!.style.gridTemplateRows).toBe("repeat(1, 36px)");
+    // As short as a key there, so it reaches out as every key does, to the middle of the gap.
+    expect(enter.className).toContain("before:-inset-y-[3px]");
+  });
+
+  it("every board key reaches out by hit area to the middle of the 4px gap on every side (2px past the 1px border), so no two reaches overlap; a two-row Enter needs none", () => {
+    render(<NavTray onSend={vi.fn()} />);
+    const esc = screen.getByRole("button", { name: "Esc" });
+    expect(esc.className).toContain("before:-inset-y-[3px]");
+    expect(esc.className).toContain("before:-inset-x-[3px]");
+    expect(screen.getByRole("button", { name: "Enter" }).className).not.toContain("before:");
   });
 
   // jsdom lays out nothing, so the row heights can only be pinned by the style that produces them.
@@ -139,13 +173,14 @@ describe("NavTray", () => {
     expect(onSend).toHaveBeenCalledExactlyOnceWith(["ctrl+c"]);
   });
 
-  it("no pad key can overflow its column — every key gets min-w-0 and overflow-hidden", () => {
+  it("no pad key can overflow its column — every key gets min-w-0 and a truncating label, and no overflow clip (it would cut the ::before hit area)", () => {
     render(<NavTray onSend={vi.fn()} />);
     for (const name of ["Esc", "Tab", "Up", "Ctrl+C", "Space", "Left", "Down", "Right", "Enter"]) {
       const btn = screen.getByRole("button", { name });
       expect(btn).toHaveClass("min-w-0");
-      expect(btn).toHaveClass("overflow-hidden");
+      expect(btn).not.toHaveClass("overflow-hidden");
     }
+    expect(screen.getByText("Esc")).toHaveClass("min-w-0", "truncate");
   });
 
   it("every icon key (Space, Shift, Tab, Enter, and the arrows) keeps its aria-label", () => {

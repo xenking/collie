@@ -30,6 +30,7 @@ import {
   areaCss,
   BOARD_COLS,
   DEFAULT_BOARD,
+  holdsStep,
   keyLabel,
   needsSecondTap,
   stepsWords,
@@ -61,12 +62,15 @@ import {
 // arrow press would strobe.
 //
 // The pad is the KEY BOARD (lib/key-board.ts, ADR 0092): a grid of 7 columns where a key is anchored
-// at one cell and spans 1 to 3 columns and 1 or 2 rows, placed by CSS grid (`grid-column: n / span w`)
+// at one cell and spans 1 to 4 columns and 1 or 2 rows, placed by CSS grid (`grid-column: n / span w`)
 // so the editor sheet draws the same board. The shipped board, the Default, is the old pad: row 1 is
-// Esc/Tab/the three modifiers/Up/quick Ctrl+C, row 2 is Enter, a Space three cells wide, then the
-// inverted-T's Left-Down-Right (Down under Up). Enter keeps its distance from the arrows: a miss on
-// Enter confirms a prompt, a miss on an arrow is reversible (issue #263), and it carries a
-// low-opacity tint of the primary colour at rest so it reads as the commit key before it is pressed.
+// Esc/Tab/the three modifiers/Up/quick Ctrl+C, row 2 is a Space four cells wide, then the inverted-T's
+// Left-Down-Right (Down under Up). Enter is the TRAY's, not the board's: when the board carries no
+// Enter of its own, a tall Enter stands apart on an eighth column at the right edge, past an 8px spacer,
+// spanning the first two rows. A miss on Enter confirms a prompt, a miss on an arrow is reversible
+// (issue #263), and it carries a low-opacity tint of the primary colour at rest so it reads as the
+// commit key before it is pressed. A board that places its own Enter (a preset, an edit) draws it there
+// instead, so there is never a second one.
 // A free cell draws nothing but keeps its place, and trailing free rows are not drawn. Space, Shift,
 // Tab, Enter and the arrows show icons; every other key shows its face or its own name. Everything
 // past the board — the phone-dialer digits, the labelled Ctrl presets, F1–F12 — sits behind a row of
@@ -136,7 +140,7 @@ type OpenPanel = "123" | "presets" | "fkeys" | null;
 // the fault "Ctrl C" shipped with on a 390px phone. `min-w-0` on the button (`navBtn`'s className) is
 // what lets the button itself shrink small enough for this to ever engage.
 function textLabel(s: string) {
-  return <span className="truncate">{s}</span>;
+  return <span className="min-w-0 truncate">{s}</span>;
 }
 
 // A key wider or taller than a cell sits on the grid by its anchor and spans its area, so the dock
@@ -271,12 +275,13 @@ export function NavTray({
         title={aria}
         // touch-action/select-none: without them a held button on iOS starts a text selection and
         // Android may treat the hold as a scroll gesture, both of which cancel the pointer stream.
-        // min-w-0/overflow-hidden: a grid item's default min-width is `auto` (its content's own
-        // width), which can push a key wider than its column instead of letting it shrink — this is
-        // what let "Ctrl C" spill past a 1/7 column on a 390px phone. `overflow-hidden` is the floor
-        // under `truncate` on the label itself.
+        // min-w-0: a grid item's default min-width is `auto` (its content's own width), which can
+        // push a key wider than its column instead of letting it shrink — this is what let "Ctrl C"
+        // spill past a 1/7 column on a 390px phone. The text label is `min-w-0 truncate`, so it
+        // gives way inside the key. There is NO `overflow-hidden` on the key: it would clip the
+        // `::before` that reaches the 44px tap floor (KEY_TAP_TARGET), sideways first.
         className={cn(
-          "h-9 min-w-0 overflow-hidden touch-manipulation select-none px-0 text-sm font-medium",
+          "h-9 min-w-0 touch-manipulation select-none px-0 text-sm font-medium",
           extraClassName,
           resting && restingClassName,
         )}
@@ -340,17 +345,24 @@ export function NavTray({
   );
 
   // Tap-target idiom (DESIGN.md §6, the same move as `STRIP_TAP_TARGET` in ui/labelled-strip.tsx): a
-  // transparent `::before` extends a button's clickable box without adding drawn height. 2px top +
-  // 2px bottom exactly fills this grid's 4px row gap (`gap-1`), so a normal key's extended hit area
-  // meets its neighbour's at the gap's midpoint and never reaches into a sibling's own drawn box.
-  // 36px drawn (`h-9`) + 2 + 2 = 40px, the tap floor — Enter needs none of this, its own row-span
-  // already clears 40px on its own.
+  // transparent `::before` extends a button's clickable box without adding drawn size. An absolute
+  // inset is measured from the PADDING box, inside the key's 1px border, so each inset reaches 1px
+  // less than it says. The grid's gap is 4px (`gap-1`) and every reach stops at the MIDDLE of it:
+  // 3px reaches 2px past the border, in both axes, so two neighbours' hit boxes meet and never
+  // overlap, and a tap in a gap belongs to the nearer key (an overlap would let the later-painted
+  // row win a tap under Esc, and send the Enter below it). Sideways that is a 7-column key 40.5px
+  // drawn at 390px with the commit column (the narrowest case) + 2 + 2 = 44.5px wide. Vertically,
+  // 36px (`h-9`) + 2 + 2 = 40px: rows 40px apart cannot reach 44 without overlapping, so 40px is the
+  // accepted exception (ADR 0104). The commit Enter's own two-row span clears the floor in both axes,
+  // so it wears none of this, except on a one-row board, where it is as short as a key.
+  // The key must not clip (`overflow-hidden`), or the reach is cut off at the border.
   const KEY_TAP_TARGET =
-    "relative before:absolute before:inset-x-0 before:-inset-y-[2px] before:content-['']";
+    "relative before:absolute before:-inset-x-[3px] before:-inset-y-[3px] before:content-['']";
 
   // The board's keys. A cell is a seventh of a phone wide, so every key gets `min-w-0` and the
   // KEY_TAP_TARGET reach, exactly as the fixed pad's keys had.
   const rows = usedRows(board);
+  const commitColumn = !holdsStep(board, "Enter");
 
   const modKeyBtn = (key: ModKey, cell: number) => {
     const word = key.mod === "shift" ? "Shift" : key.mod === "ctrl" ? "Ctrl" : "Alt";
@@ -406,14 +418,29 @@ export function NavTray({
       />
 
       {/* The board: 7 columns, one 36px row per used row. Every key is placed by its anchor and spans
-          its width and height; an empty cell draws nothing, so every key keeps its place. */}
+          its width and height; an empty cell draws nothing, so every key keeps its place. Past an 8px
+          spacer column, the tray's own tall Enter when the board has none (see the header). */}
       <div
-        className="grid grid-cols-7 gap-1"
+        className={cn("grid gap-1", commitColumn ? "grid-cols-[repeat(7,minmax(0,1fr))_8px_1.25fr]" : "grid-cols-7")}
         style={{ gridTemplateRows: `repeat(${rows}, 36px)` }}
       >
         {board.cells.slice(0, rows * BOARD_COLS).map((key, i) =>
           key === null ? null : key.kind === "mod" ? modKeyBtn(key, i) : chordKeyBtn(key, i),
         )}
+        {commitColumn &&
+          navBtn(
+            <span className="flex flex-col items-center gap-0.5">
+              <CornerDownLeft className="size-4" aria-hidden="true" />
+              <span className="text-[9px] font-sans font-medium uppercase tracking-wide opacity-75">Enter</span>
+            </span>,
+            ["Enter"],
+            "Enter",
+            false,
+            cn("w-full h-auto self-stretch flex-col gap-0.5", rows < 2 && KEY_TAP_TARGET),
+            "bg-primary/15 border-primary/40",
+            false,
+            { gridColumn: "9 / span 1", gridRow: `1 / span ${Math.min(rows, 2)}` },
+          )}
       </div>
 
       {/* The accordion row: 123 / Presets / F keys. At most one panel open at a time, rendered

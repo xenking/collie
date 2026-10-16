@@ -2,6 +2,9 @@
 
 Status: **Accepted** (2026-10-09)
 
+Amended in scope by: [ADR 0104](./0104-the-tray-owns-a-tall-enter-when-the-board-has-none.md) — the Default has no Enter of its
+own: the tray draws a tall one on a column at the right edge, and a key spans up to 4 columns.
+
 Related: [ADR 0018](./0018-operator-command-rows-replace-the-catalog.md) (the `keys.toml` rows replace
 the shipped Presets, and are not touched here) ·
 [ADR 0033](./0033-the-app-face-is-a-device-preference.md) (the store shape, and why a browser-side

@@ -15,6 +15,7 @@ import {
   defaultLabel,
   dropKey,
   encodeBoard,
+  holdsStep,
   keyCount,
   keyLabel,
   MAX_CODE_LENGTH,
@@ -138,30 +139,31 @@ describe("a chord key", () => {
 });
 
 describe("the default board", () => {
-  it("is today's pad in 7 columns: Space three wide, Enter set apart from the arrows", () => {
+  it("is today's pad in 7 columns: Space four wide, no Enter of its own (the tray sets one apart at the right edge)", () => {
     const at = (i: number) => DEFAULT_BOARD.cells[i];
     expect(DEFAULT_BOARD.rows).toBe(2);
     expect(DEFAULT_BOARD.cells).toHaveLength(14);
     expect(at(0)).toEqual(key("Escape"));
     expect(at(2)).toEqual({ kind: "mod", mod: "shift" });
     expect(at(6)).toEqual(key("ctrl+c"));
-    expect(at(7)).toEqual(key("Enter"));
-    expect(at(8)).toEqual({ kind: "chord", steps: ["Space"], w: 3 });
+    expect(at(7)).toEqual({ kind: "chord", steps: ["Space"], w: 4 });
     // The cells Space covers hold nothing of their own, and nothing is free: the pad is full.
+    expect(at(8)).toBeNull();
     expect(at(9)).toBeNull();
     expect(at(10)).toBeNull();
-    expect(owners(DEFAULT_BOARD).slice(7, 14)).toEqual([7, 8, 8, 8, 11, 12, 13]);
+    expect(owners(DEFAULT_BOARD).slice(7, 14)).toEqual([7, 7, 7, 7, 11, 12, 13]);
     expect(owners(DEFAULT_BOARD)).not.toContain(-1);
-    // Down sits under Up, and Space stands between Enter and the arrows (issue 263).
+    // Down sits under Up, and the board holds no Enter: the tray draws the commit key itself.
     const col = (step: string) => DEFAULT_BOARD.cells.findIndex((k) => k?.kind === "chord" && k.steps[0] === step) % BOARD_COLS;
     expect(col("Down")).toBe(col("Up"));
-    expect(Math.abs(col("Enter") - col("Left"))).toBeGreaterThan(1);
-    expect(keyCount(DEFAULT_BOARD)).toBe(12);
+    expect(holdsStep(DEFAULT_BOARD, "Enter")).toBe(false);
+    expect(keyCount(DEFAULT_BOARD)).toBe(11);
     expect(missingCore(DEFAULT_BOARD)).toEqual([]);
   });
 
   it("places a wide key with a CSS span", () => {
     expect(areaCss(8, { kind: "chord", steps: ["Space"], w: 3 })).toEqual({ gridColumn: "2 / span 3", gridRow: "2 / span 1" });
+    expect(areaCss(7, { kind: "chord", steps: ["Space"], w: 4 })).toEqual({ gridColumn: "1 / span 4", gridRow: "2 / span 1" });
     expect(areaCss(0, { kind: "chord", steps: ["Enter"], h: 2 })).toEqual({ gridColumn: "1 / span 1", gridRow: "1 / span 2" });
   });
 });
@@ -180,7 +182,7 @@ describe("areas: a key spans columns and rows", () => {
     const wide = withSize(A, 3, 2);
     expect(wide).toEqual({ kind: "chord", steps: ["a"], w: 3, h: 2 });
     expect(withSize(wide, 1, 1)).toEqual(A);
-    expect(withSize(A, 9, 9)).toEqual({ kind: "chord", steps: ["a"], w: 3, h: 2 });
+    expect(withSize(A, 9, 9)).toEqual({ kind: "chord", steps: ["a"], w: 4, h: 2 });
     const board = grid([[0, withSize(A, 3, 2)], [3, key("b")]]);
     expect(owners(board).slice(0, 14)).toEqual([0, 0, 0, 3, -1, -1, -1, 0, 0, 0, -1, -1, -1, -1]);
   });
@@ -324,7 +326,7 @@ describe("resizing", () => {
     expect(resizeKey(board, 1, 3, 1)).toMatchObject({ ok: true });
     expect(resizeKey(grid([[6, A]]), 6, 2, 1)).toEqual({ ok: false, reason: "edge" });
     expect(resizeKey(grid([[14, A]]), 14, 1, 2)).toEqual({ ok: false, reason: "edge" });
-    expect(resizeKey(board, 0, 4, 1)).toEqual({ ok: false, reason: "edge" });
+    expect(resizeKey(board, 0, 5, 1)).toEqual({ ok: false, reason: "edge" });
     expect(resizeKey(board, 9, 1, 1)).toEqual({ ok: false, reason: "edge" }); // nothing there
   });
 
@@ -368,12 +370,17 @@ describe("rows and spaces", () => {
 
 describe("the core keys", () => {
   it("names what is missing and puts it back in its own cell, else the first free one", () => {
-    let board = setCell(setCell(DEFAULT_BOARD, 0, null), 7, null);
-    expect(missingCore(board)).toEqual(["Esc", "Enter"]);
+    let board = setCell(setCell(DEFAULT_BOARD, 0, null), 11, null);
+    expect(missingCore(board)).toEqual(["Esc", "Left"]);
     board = putBackCore(board);
     expect(missingCore(board)).toEqual([]);
     expect(board.cells[0]).toEqual(key("Escape"));
-    expect(board.cells[7]).toEqual(key("Enter"));
+    expect(board.cells[11]).toEqual(key("Left"));
+
+    // Enter is never missing, and never put back: the tray draws its own when the board has none.
+    const noEnter = putBackCore(DEFAULT_BOARD);
+    expect(noEnter).toBe(DEFAULT_BOARD);
+    expect(CORE_KEYS.map((k) => k.name)).not.toContain("Enter");
 
     // Esc's cell is taken: it goes to the first free cell.
     const taken = setCell(setCell(DEFAULT_BOARD, 0, key("x")), 5, null);
@@ -391,7 +398,7 @@ describe("the core keys", () => {
   it("counts a key only when it is exactly that one step", () => {
     const board = boardOf(1, [[0, key("Escape", "Escape")]]);
     expect(missingCore(board)).toContain("Esc");
-    expect(CORE_KEYS).toHaveLength(6);
+    expect(CORE_KEYS).toHaveLength(5);
   });
 });
 
@@ -452,7 +459,7 @@ describe("the layout code", () => {
     // Sizes: schema 1 has none, schema 2 has both or neither, in range.
     expect(reason(codeOf({ v: 1, rows: 1, keys: [[0, "a", null, 2, 1]] }))).toBe("key");
     expect(reason(codeOf({ v: 2, rows: 1, keys: [[0, "a", null, 2]] }))).toBe("key");
-    expect(reason(codeOf({ v: 2, rows: 2, keys: [[0, "a", null, 4, 1]] }))).toBe("key");
+    expect(reason(codeOf({ v: 2, rows: 2, keys: [[0, "a", null, 5, 1]] }))).toBe("key");
     expect(reason(codeOf({ v: 2, rows: 2, keys: [[0, "a", null, 1, 3]] }))).toBe("key");
     expect(reason(codeOf({ v: 2, rows: 2, keys: [[0, "a", null, 1.5, 1]] }))).toBe("key");
     expect(reason(codeOf({ v: 2, rows: 2, keys: [[0, "a", null, "2", 1]] }))).toBe("key");
@@ -559,8 +566,8 @@ describe("the five presets", () => {
     }
   });
 
-  it("every preset has Space three cells wide between Enter and the arrows", () => {
-    for (const p of PRESETS) {
+  it("every preset but the Default has its own Enter and Space three cells wide between Enter and the arrows", () => {
+    for (const p of PRESETS.filter((q) => q.id !== "default")) {
       expect(p.board.cells[7]).toEqual(key("Enter"));
       expect(p.board.cells[8]).toEqual({ kind: "chord", steps: ["Space"], w: 3 });
     }
