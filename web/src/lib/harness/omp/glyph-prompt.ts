@@ -83,7 +83,7 @@ function lastNonBlank(lines: StyledLine[]): number {
  * footer is not painted that way, which is what keeps a `❯` above one of them from reading as a
  * composer.
  */
-function isStatusRow(line: StyledLine): boolean {
+export function isStatusRow(line: StyledLine): boolean {
   const text = rstrip(lineText(line));
   if (!STATUS_LEAD.test(text) || opensBox(text)) return false;
   return line.segments.some((s) => s.fg !== undefined && SEPARATOR.test(s.text.trim()));
