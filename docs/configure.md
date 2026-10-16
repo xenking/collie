@@ -267,18 +267,25 @@ You can rearrange the Keys pad. Open **Keys** and tap the pencil beside the labe
 2. Drag a key to another place, or tap it and use the four arrow buttons.
 3. Tap a dashed **+** to add a key in a free cell, or select a key and tap **Change** or **Remove**.
 
-The pad is a grid of 7 columns. A key sits on one cell and can be wider (1, 2 or 3 columns) and taller
+The pad is a grid of 7 columns. A key sits on one cell and can be wider (1 to 4 columns) and taller
 (1 or 2 rows). Select a key and tap **Width** or **Height** to resize it. It grows to the right and
 down. A size that would cover another key, or leave the pad, looks dim, and tapping it tells you which
 key is in the way. Collie never moves a second key for you. **Add row** puts a row at the bottom, up to
 eight. Changes show in the dock at once. Collie keeps your pad in this browser, so a different browser
 starts with the default pad until you share a layout into it. The default is the pad you had before,
-with the Space bar three cells wide and Enter at the left end of the second row:
+with the Space bar four cells wide and a tall Enter standing on its own at the right edge, past a small
+gap, across both rows:
 
 ```
-Esc    Tab    Shift  Ctrl   Alt    Up     ^C
-Enter  Space (3 wide)        Left   Down   Right
+Esc    Tab    Shift  Ctrl   Alt    Up     ^C     |
+Space (4 wide)               Left   Down   Right  | Enter
 ```
+
+That Enter belongs to the tray, not to the board: it is not a cell you can select, move or remove in
+the editor. While your board holds no Enter key of its own, the tray draws it there. Add an Enter key
+to the board (a preset has one) and the tray's goes away and yours stands in its place, so there is
+never a second one. Take yours out again and the tray's comes back
+([ADR 0104](../.adr/0104-the-tray-owns-a-tall-enter-when-the-board-has-none.md)).
 
 Dragging a key moves its whole area. Drop it on a key of the same size and the two swap. Drop it on
 anything else that is in the way and the target outline turns grey and dashed, a line says which key is
@@ -301,8 +308,8 @@ a second tap, and a key your multiplexer cannot send is grey.
 | Share: Import layout | Paste a layout code someone shared. Collie checks it, shows a preview and asks before it applies. |
 | Restore default | Brings back the original pad, after a preview. |
 
-Codes from earlier versions still import, with every key one cell. If Esc, Enter or an arrow is not
-on your pad, a quiet line says so, with **Put back**. The Prefix (Ctrl+B) preset sends the `Ctrl+B` prefix, so it
+Codes from earlier versions still import, with every key one cell. If Esc or an arrow is not
+on your pad, a quiet line says so, with **Put back**. Enter is never reported: the tray always has one. The Prefix (Ctrl+B) preset sends the `Ctrl+B` prefix, so it
 fits a tmux running inside the pane. The Navigation preset has Home, End, PgUp and PgDn, which Herdr
 cannot send, so they are grey on a Herdr pane
 ([ADR 0092](../.adr/0092-the-keys-pad-is-a-board-you-arrange.md)).
