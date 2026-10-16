@@ -200,11 +200,12 @@ describe("apiFrontGate: every /api/ path but the allowlist is refused without a 
     }
   });
 
-  test("the voice WebSocket's subprotocol token passes the front gate, on that path only", async () => {
+  test("a WebSocket that offers the pairing token as a subprotocol passes the front gate; a wrong one does not", async () => {
+    // A browser cannot set Authorization on a WebSocket, and a page cannot forge a Sec- header.
     const { store } = await storeWith(true);
-    const offered = { "sec-websocket-protocol": `collie.voice, collie.bearer.${TOKEN}` };
-    expect(apiFrontGate(request("GET", "/api/voice/media", offered), "/api/voice/media", config(), store)).toBeNull();
-    expect(apiFrontGate(request("GET", "/api/snapshot", offered), "/api/snapshot", config(), store)!.status).toBe(403);
+    const offered = (token: string) => ({ "sec-websocket-protocol": `collie.voice, collie.bearer.${token}` });
+    expect(apiFrontGate(request("GET", "/api/voice/media", offered(TOKEN)), "/api/voice/media", config(), store)).toBeNull();
+    expect(apiFrontGate(request("GET", "/api/voice/media", offered("not-the-token")), "/api/voice/media", config(), store)!.status).toBe(403);
   });
 
   test("a path outside /api/ is not this gate's business", async () => {
