@@ -33,11 +33,11 @@ describe("the stored key board", () => {
   });
 
   it("keeps a wide key through a reload", () => {
-    const wide = setCell(DEFAULT_BOARD, 8, null);
-    const board = setCell(wide, 8, { kind: "chord", steps: ["Space"], w: 2 });
+    const wide = setCell(DEFAULT_BOARD, 7, null);
+    const board = setCell(wide, 7, { kind: "chord", steps: ["Space"], w: 2 });
     setKeyBoard(board);
     __reloadKeyBoard();
-    expect(getKeyBoard().cells[8]).toEqual({ kind: "chord", steps: ["Space"], w: 2 });
+    expect(getKeyBoard().cells[7]).toEqual({ kind: "chord", steps: ["Space"], w: 2 });
   });
 
   it("stores nothing for the default, and Restore removes the key", () => {

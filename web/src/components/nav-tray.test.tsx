@@ -43,7 +43,7 @@ describe("NavTray", () => {
     expect(onSend.mock.calls).toEqual([[["1"]], [["5"]], [["9"]]]);
   });
 
-  it("the Default board is today's pad: Esc/Tab/modifiers/Up/^C over Space/Enter/arrows, Enter away from the arrows", () => {
+  it("the Default board is today's pad: Esc/Tab/modifiers/Up/^C over Space/arrows, with a tall Enter set apart at the right edge", () => {
     render(<NavTray onSend={vi.fn()} />);
 
     const esc = screen.getByRole("button", { name: "Esc" });
@@ -71,30 +71,54 @@ describe("NavTray", () => {
     expect(isBefore(alt, up)).toBe(true);
     expect(isBefore(up, ctrlC)).toBe(true);
 
-    // Row 2: Enter, a Space three cells wide, then the inverted-T's Left, Down, Right.
-    expect(isBefore(ctrlC, enter)).toBe(true);
-    expect(isBefore(enter, space)).toBe(true);
+    // Row 2: a Space four cells wide, then the inverted-T's Left, Down, Right; the tray's Enter last.
+    expect(isBefore(ctrlC, space)).toBe(true);
     expect(isBefore(space, left)).toBe(true);
     expect(isBefore(left, down)).toBe(true);
     expect(isBefore(down, right)).toBe(true);
+    expect(isBefore(right, enter)).toBe(true);
 
-    // Every key is placed on a 7-column grid by CSS: its corner, and how far it spans. Enter stays
-    // away from the arrows (issue #263): the wide Space stands between it and Left.
+    // Every key is placed on the grid by CSS: its corner, and how far it spans. The board is 7
+    // columns, then a 12px spacer and the commit column, so Enter stays away from the arrows (issue #263).
     const grid = esc.parentElement!;
-    expect(grid).toHaveClass("grid-cols-7");
+    expect(grid.className).toContain("grid-cols-[repeat(7,minmax(0,1fr))_12px_1.5fr]");
     const place = (el: HTMLElement) => [el.style.gridColumn, el.style.gridRow];
     expect(place(esc)).toEqual(["1 / span 1", "1 / span 1"]);
     expect(place(ctrlC)).toEqual(["7 / span 1", "1 / span 1"]);
-    expect(place(enter)).toEqual(["1 / span 1", "2 / span 1"]);
-    expect(place(space)).toEqual(["2 / span 3", "2 / span 1"]);
+    expect(place(space)).toEqual(["1 / span 4", "2 / span 1"]);
     expect(place(left)).toEqual(["5 / span 1", "2 / span 1"]);
     expect(place(down)[0]).toBe(place(up)[0]);
-    // Nothing else is in the grid: no spacer cells to shift anything.
+    // The commit column: column 9 (past the 12px spacer, which holds nothing), both rows tall.
+    expect(place(enter)).toEqual(["9 / span 1", "1 / span 2"]);
+    expect(enter).toHaveClass("h-auto", "self-stretch");
+    // Nothing else is in the grid: 11 board keys and the one Enter.
     expect(grid.children).toHaveLength(12);
 
     // Enter carries a low-opacity tint of the primary colour at rest — the commit-key read.
     expect(enter).toHaveClass("bg-primary/15");
     expect(enter).toHaveClass("border-primary/40");
+  });
+
+  it("a board with its own Enter draws no commit column: seven columns and exactly one Enter", () => {
+    const own = boardOf(2, [
+      [0, { kind: "chord", steps: ["Escape"] }],
+      [1, { kind: "chord", steps: ["Enter"] }],
+    ]);
+    render(<NavTray onSend={vi.fn()} board={own} />);
+    const enters = screen.getAllByRole("button", { name: "Enter" });
+    expect(enters).toHaveLength(1);
+    expect(enters[0].style.gridColumn).toBe("2 / span 1");
+    expect(enters[0].parentElement).toHaveClass("grid-cols-7");
+    expect(enters[0].parentElement!.className).not.toContain("12px");
+    expect(enters[0].parentElement!.children).toHaveLength(2);
+  });
+
+  it("the commit column spans one row on a one-row board", () => {
+    render(<NavTray onSend={vi.fn()} board={boardOf(1, [[0, { kind: "chord", steps: ["Escape"] }]])} />);
+    const enter = screen.getByRole("button", { name: "Enter" });
+    expect(enter.style.gridColumn).toBe("9 / span 1");
+    expect(enter.style.gridRow).toBe("1 / span 1");
+    expect(enter.parentElement!.style.gridTemplateRows).toBe("repeat(1, 36px)");
   });
 
   // jsdom lays out nothing, so the row heights can only be pinned by the style that produces them.

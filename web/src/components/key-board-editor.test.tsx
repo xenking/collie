@@ -8,6 +8,8 @@ import { __reloadKeyBoard, getKeyBoard, KEY_BOARD_STORAGE_KEY, setKeyBoard } fro
 const step = (...steps: string[]): BoardKey => ({ kind: "chord", steps });
 /** The default pad with one key taken out, so there is a free cell to work with. */
 const withoutKey = (cell: number): KeyBoard => setCell(DEFAULT_BOARD, cell, null);
+/** The pad with its own Enter (cell 7) and a Space three wide (cell 8): the mechanics tests' board, full like the Default. */
+const PAD_WITH_ENTER: KeyBoard = setCell(setCell(setCell(DEFAULT_BOARD, 7, null), 7, step("Enter")), 8, { kind: "chord", steps: ["Space"], w: 3 });
 
 function open(props: { onClose?: () => void; unsupportedKeys?: readonly string[] } = {}) {
   const onClose = props.onClose ?? vi.fn();
@@ -36,10 +38,12 @@ describe("KeyBoardEditor: the sheet", () => {
     const dialog = screen.getByRole("dialog", { name: "Edit keys" });
     expect(dialog.querySelector("div[tabindex='-1']")).toHaveClass("h-[85dvh]");
     const board = within(screen.getByRole("group", { name: "Key board" }));
-    // Twelve keys cover all fourteen cells, so the default pad has no free cell and no "+".
-    expect(board.getAllByRole("button")).toHaveLength(12);
+    // Eleven keys cover all fourteen cells, so the default pad has no free cell and no "+". Enter is not
+    // among them: the tray draws it itself.
+    expect(board.getAllByRole("button")).toHaveLength(11);
     expect(board.getByRole("button", { name: "Esc, row 1, column 1" })).toBeInTheDocument();
-    expect(board.getByRole("button", { name: "Space, row 2, column 2" })).toBeInTheDocument();
+    expect(board.getByRole("button", { name: "Space, row 2, column 1" })).toBeInTheDocument();
+    expect(board.queryByRole("button", { name: "Enter, row 2, column 1" })).toBeNull();
     expect(board.queryByRole("button", { name: /^Add a key/ })).toBeNull();
   });
 
@@ -65,6 +69,7 @@ describe("KeyBoardEditor: the sheet", () => {
 
 describe("KeyBoardEditor: moving keys", () => {
   it("moves a selected key with the arrow buttons, swapping with a key of its own size", async () => {
+    setKeyBoard(PAD_WITH_ENTER);
     const { user } = open();
     await user.click(keyAt("Esc, row 1, column 1"));
     expect(screen.getByRole("button", { name: "Move left" })).toBeDisabled();
@@ -92,7 +97,7 @@ describe("KeyBoardEditor: moving keys", () => {
   });
 
   it("moves a wide key by its whole area, and its arrow stays off where the area does not fit", async () => {
-    setKeyBoard(setCell(addRow(DEFAULT_BOARD), 16, step("x")));
+    setKeyBoard(setCell(addRow(PAD_WITH_ENTER), 16, step("x")));
     const { user } = open();
     await user.click(keyAt("Space, row 2, column 2"));
     // Row 3 holds x under the wide key's middle, so the whole area does not fit there.
@@ -151,7 +156,7 @@ describe("KeyBoardEditor: moving keys", () => {
   });
 
   it("drags a wide key by the end the finger holds: the area lands where the grab point is", () => {
-    setKeyBoard(addRow(DEFAULT_BOARD));
+    setKeyBoard(addRow(PAD_WITH_ENTER));
     open();
     layOut();
     const space = keyAt("Space, row 2, column 2");
@@ -165,7 +170,7 @@ describe("KeyBoardEditor: moving keys", () => {
   });
 
   it("pulls a dragged wide key back inside the board when the finger is at the edge", () => {
-    setKeyBoard(addRow(DEFAULT_BOARD));
+    setKeyBoard(addRow(PAD_WITH_ENTER));
     open();
     layOut();
     const space = keyAt("Space, row 2, column 2");
@@ -176,6 +181,7 @@ describe("KeyBoardEditor: moving keys", () => {
   });
 
   it("refuses a drop onto a key of another size: the outline says so, the key goes back, nothing moves", () => {
+    setKeyBoard(PAD_WITH_ENTER);
     open();
     layOut();
     const enter = keyAt("Enter, row 2, column 1");
@@ -186,7 +192,7 @@ describe("KeyBoardEditor: moving keys", () => {
     expect(outline).toHaveAttribute("data-drop", "refused");
     expect(slot("key-status")).toHaveTextContent(/^Move Space first, it is in the way\.$/);
     act(() => pointer("pointerup", 110, 62));
-    expect(getKeyBoard()).toBe(DEFAULT_BOARD);
+    expect(getKeyBoard()).toBe(PAD_WITH_ENTER);
     expect(document.querySelector("[data-slot='drop-outline']")).toBeNull();
     expect(slot("key-status")).toHaveTextContent("it is in the way");
   });
@@ -292,11 +298,11 @@ describe("KeyBoardEditor: adding, changing, removing", () => {
 
   it("changing a wide key keeps its width", async () => {
     const { user } = open();
-    await user.click(keyAt("Space, row 2, column 2"));
+    await user.click(keyAt("Space, row 2, column 1"));
     await user.click(screen.getByRole("button", { name: "Change" }));
     await user.click(screen.getByRole("button", { name: "Ctrl" }));
     await user.click(screen.getByRole("button", { name: "Save key" }));
-    expect(getKeyBoard().cells[8]).toEqual({ kind: "chord", steps: ["ctrl+Space"], w: 3 });
+    expect(getKeyBoard().cells[7]).toEqual({ kind: "chord", steps: ["ctrl+Space"], w: 4 });
   });
 
   it("a sticky modifier opens the builder on its own kind, and can become another modifier", async () => {
@@ -325,7 +331,7 @@ describe("KeyBoardEditor: adding, changing, removing", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("Remove empties the cell and says so quietly when Esc, Enter or an arrow is gone", async () => {
+  it("Remove empties the cell and says so quietly when Esc or an arrow is gone", async () => {
     const { user } = open();
     expect(coreLine()).toHaveTextContent("");
     const heightBefore = coreLine().className;
@@ -336,13 +342,22 @@ describe("KeyBoardEditor: adding, changing, removing", () => {
     expect(coreLine().className).toBe(heightBefore);
     expect(coreLine().className).toContain("h-5");
 
-    await user.click(keyAt("Enter, row 2, column 1"));
+    await user.click(keyAt("Left, row 2, column 5"));
     await user.click(screen.getByRole("button", { name: "Remove" }));
-    expect(coreLine()).toHaveTextContent("Esc, Enter are not on your pad.");
+    expect(coreLine()).toHaveTextContent("Esc, Left are not on your pad.");
 
     await user.click(screen.getByRole("button", { name: "Put back" }));
     expect(getKeyBoard().cells[0]).toEqual(step("Escape"));
-    expect(getKeyBoard().cells[7]).toEqual(step("Enter"));
+    expect(getKeyBoard().cells[11]).toEqual(step("Left"));
+    expect(coreLine()).toHaveTextContent("");
+  });
+
+  it("never names Enter as missing: a board without one gets the tray's own", async () => {
+    setKeyBoard(PAD_WITH_ENTER);
+    const { user } = open();
+    await user.click(keyAt("Enter, row 2, column 1"));
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    expect(getKeyBoard().cells[7]).toBeNull();
     expect(coreLine()).toHaveTextContent("");
   });
 
@@ -361,8 +376,9 @@ describe("KeyBoardEditor: width and height", () => {
     const { user } = open();
     expect(size("Width", 1)).toBeDisabled();
     expect(size("Height", 2)).toBeDisabled();
-    await user.click(keyAt("Space, row 2, column 2"));
-    expect(size("Width", 3)).toHaveAttribute("aria-pressed", "true");
+    await user.click(keyAt("Space, row 2, column 1"));
+    expect(size("Width", 4)).toHaveAttribute("aria-pressed", "true");
+    expect(size("Width", 3)).toHaveAttribute("aria-pressed", "false");
     expect(size("Width", 1)).toHaveAttribute("aria-pressed", "false");
     expect(size("Height", 1)).toHaveAttribute("aria-pressed", "true");
     expect(toolbar().className).toContain("h-[202px]");
@@ -370,27 +386,31 @@ describe("KeyBoardEditor: width and height", () => {
 
   it("shrinks a wide key, and grows it back over the cells it left", async () => {
     const { user } = open();
-    await user.click(keyAt("Space, row 2, column 2"));
+    await user.click(keyAt("Space, row 2, column 1"));
     await user.click(size("Width", 1));
-    expect(getKeyBoard().cells[8]).toEqual(step("Space"));
-    // Cells 9 and 10 are free now, so the plus shows there.
+    expect(getKeyBoard().cells[7]).toEqual(step("Space"));
+    // Cells 8 to 10 are free now, so the plus shows there.
     expect(screen.getByRole("button", { name: "Add a key, row 2, column 3" })).toBeInTheDocument();
     await user.click(size("Width", 2));
-    expect(getKeyBoard().cells[8]).toEqual({ kind: "chord", steps: ["Space"], w: 2 });
+    expect(getKeyBoard().cells[7]).toEqual({ kind: "chord", steps: ["Space"], w: 2 });
+    expect(screen.getByRole("button", { name: "Add a key, row 2, column 3" })).toBeInTheDocument();
+    await user.click(size("Width", 4));
+    expect(getKeyBoard().cells[7]).toEqual({ kind: "chord", steps: ["Space"], w: 4 });
     expect(screen.queryByRole("button", { name: "Add a key, row 2, column 3" })).toBeNull();
   });
 
   it("will not grow over another key: the size looks off, and a tap says which key is in the way", async () => {
+    setKeyBoard(PAD_WITH_ENTER);
     const { user } = open();
     await user.click(keyAt("Esc, row 1, column 1"));
     const wider = size("Width", 2);
     expect(wider).toHaveAttribute("aria-disabled", "true");
     await user.click(wider);
     expect(slot("key-status")).toHaveTextContent("Move Tab first, it is in the way.");
-    expect(getKeyBoard()).toBe(DEFAULT_BOARD);
+    expect(getKeyBoard()).toBe(PAD_WITH_ENTER);
     await user.click(size("Height", 2));
     expect(slot("key-status")).toHaveTextContent("Move ⏎ first, it is in the way.");
-    expect(getKeyBoard()).toBe(DEFAULT_BOARD);
+    expect(getKeyBoard()).toBe(PAD_WITH_ENTER);
   });
 
   it("will not grow past the edge of the board", async () => {
@@ -433,7 +453,7 @@ describe("KeyBoardEditor: rows", () => {
     expect(screen.getByRole("button", { name: "Remove row" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Add row" }));
     expect(getKeyBoard().rows).toBe(3);
-    expect(within(screen.getByRole("group", { name: "Key board" })).getAllByRole("button")).toHaveLength(19);
+    expect(within(screen.getByRole("group", { name: "Key board" })).getAllByRole("button")).toHaveLength(18);
     expect(screen.getByRole("button", { name: "Remove row" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Remove row" }));
     expect(getKeyBoard().rows).toBe(2);
@@ -562,7 +582,7 @@ describe("KeyBoardEditor: a bad stored layout", () => {
     localStorage.setItem(KEY_BOARD_STORAGE_KEY, "{not json");
     __reloadKeyBoard();
     open();
-    expect(within(screen.getByRole("group", { name: "Key board" })).getAllByRole("button")).toHaveLength(12);
+    expect(within(screen.getByRole("group", { name: "Key board" })).getAllByRole("button")).toHaveLength(11);
   });
 
   it("keeps working on a board with many custom keys", () => {

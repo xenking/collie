@@ -32,7 +32,7 @@ answer costs everyone the editor to protect against one mistake.
 
 ## Decision
 
-**The pad is data: a board of 7 columns where a key is anchored at one cell and spans 1 to 3 columns
+**The pad is data: a board of 7 columns where a key is anchored at one cell and spans 1 to 4 columns
 and 1 or 2 rows.** It starts as today's pad (the Default). `web/src/lib/key-board.ts` is the pure
 model: the chord grammar, the areas, the moves, the five presets and the code.
 `web/src/lib/key-board-store.ts` keeps the stored copy under `collie:key-board:v1`, in `localStorage`,
@@ -51,7 +51,7 @@ checks the whole area, and none of them moves a second key to make room:
   turns dashed and grey, the status line says "Move ^W first, it is in the way", and the key goes back.
 - An arrow skips keys in the way and lands on the next position where the area fits (or a same-size
   swap). With none, it stays off.
-- The toolbar's Width 1 to 3 and Height 1 or 2 resize the selected key right and down. A size that would
+- The toolbar's Width 1 to 4 and Height 1 or 2 resize the selected key right and down. A size that would
   cover another key or leave the board looks off, and tapping it names the blocker on the same status
   line. Nothing moves.
 - A "+" shows on free cells only, and a key added there is one cell. A key that is changed keeps its
@@ -85,7 +85,7 @@ one tap, as the Presets row does, so the Default does not get slower. A sequence
 is not that key, and asks. While composing, the strip's Send is the review, as before. A step the
 multiplexer refuses (`unsupportedKeys`) greys the whole key, as it greyed a pad button.
 
-**Losing Esc is made loud, not impossible.** Removing Esc, Enter or an arrow shows one quiet reserved
+**Losing Esc is made loud, not impossible.** Removing Esc or an arrow shows one quiet reserved
 line, "Esc is not on your pad. Put back". Restore default and every preset bring them back. Nothing
 else is locked.
 
@@ -106,17 +106,20 @@ did, every key one cell. A build that stored `v: 1` and a build that wrote `v: 2
 only forwards: the older build treats a `v: 2` value as the Default (a "newer schema" is not read),
 which is the same fallback every other bad value gets.
 
-**The Default changes shape slightly.** The old pad set a tall Enter apart on an eighth column. Seven
-columns have no room for that without moving a key of row 1, so Enter takes the far left of row 2 and
-a three-cell Space stands between it and the arrows (Left, Down, Right under Up). Issue 263's reasoning
-holds: a miss on an arrow is reversible, a miss on Enter confirms a prompt, and no arrow is beside it.
+**The Default keeps the old pad's tall Enter.** The tray, not the board, owns a commit key: when the
+board holds no lone Enter, the tray draws its own, tall and tinted, in an eighth column past a 12px
+gap, spanning the first two rows. Nothing of row 1 moves, Space is four cells wide beside the arrows
+(Left, Down, Right under Up), and Issue 263's reasoning holds: a miss on an arrow is reversible, a miss
+on Enter confirms a prompt, and a gap separates them. A board that places its own Enter (a preset, or
+an edit that adds one) draws it there, on seven columns, and the tray adds nothing; so Enter is never
+missing and never doubled, and it is not a core key the editor warns about.
 
 ```
-Esc    Tab    Shift  Ctrl   Alt    Up     ^C
-Enter  Space (3 wide)        Left   Down   Right
+Esc    Tab    Shift  Ctrl   Alt    Up     ^C     |
+Space (4 wide)              Left   Down   Right  | Enter
 ```
 
-Every preset keeps that frame (Esc, Up, Enter, the wide Space and the arrows in the same cells), so
+Every preset but the Default keeps its own frame (Esc, Up, Enter, a three-cell Space and the arrows in the same cells), so
 the thumb's places do not change when a preset does. Where a preset names more keys than three rows
 hold, it takes a fourth row (Vim, Navigation), or leaves the sticky modifiers to the Default
 (Claude Code keeps Ctrl, tmux drops all three).

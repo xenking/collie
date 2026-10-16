@@ -43,11 +43,11 @@ const CODE_PREFIX_V1 = "collie-keys:1:";
 /** The schema number written into storage and into the code's JSON. Schema 1 (single-cell keys) is still read. */
 export const SCHEMA = 2;
 /** A key spans at most this many columns and this many rows. */
-export const MAX_W = 3;
+export const MAX_W = 4;
 export const MAX_H = 2;
 
 /** A key's size in cells. Absent means 1. */
-export type KeyWidth = 1 | 2 | 3;
+export type KeyWidth = 1 | 2 | 3 | 4;
 export type KeyHeight = 1 | 2;
 
 export interface ModKey {
@@ -260,10 +260,10 @@ type ModDraft = { -readonly [K in keyof ModKey]: ModKey[K] };
 type ChordDraft = { -readonly [K in keyof ChordKey]: ChordKey[K] };
 
 /** The stored width for a number of columns: absent for 1, so a one-cell key stays plain. */
-const widthOf = (w: number): KeyWidth | undefined => (w === 2 ? 2 : w >= 3 ? 3 : undefined);
+const widthOf = (w: number): KeyWidth | undefined => (w === 2 ? 2 : w === 3 ? 3 : w >= 4 ? 4 : undefined);
 const heightOf = (h: number): KeyHeight | undefined => (h >= 2 ? 2 : undefined);
 
-/** The same key at another size. A size outside 1 to 3 by 1 to 2 is clamped into it. */
+/** The same key at another size. A size outside 1 to 4 by 1 to 2 is clamped into it. */
 export function withSize(key: BoardKey, w: number, h: number): BoardKey {
   const width = widthOf(w);
   const height = heightOf(h);
@@ -432,14 +432,14 @@ export function resizeKey(board: KeyBoard, anchor: number, w: number, h: number)
 /**
  * Today's pad as a board: the Default, and what "Restore default" restores.
  *
- * Row 1 is Esc, Tab, the three modifiers, Up and the quick Ctrl+C, as before. Row 2 is Enter, a Space
- * three cells wide, then Left, Down and Right under Up. The old pad set a tall Enter apart on an
- * eighth column; seven columns have no room for that without moving a key of row 1, so Enter takes
- * the far left of row 2, with the wide Space between it and the arrows: a miss on an arrow is
- * reversible, a miss on Enter confirms a prompt (issue 263).
+ * Row 1 is Esc, Tab, the three modifiers, Up and the quick Ctrl+C. Row 2 is a Space four cells wide,
+ * then Left, Down and Right under Up. Enter is not on it: the tray sets a tall Enter apart on its own
+ * column at the right edge (nav-tray.tsx), as the fork's pad always had, whenever the board holds no
+ * Enter of its own. A miss on an arrow is reversible, a miss on Enter confirms a prompt (issue 263),
+ * so the commit key stands a gap away from the arrows.
  *
- *     Esc  Tab  Shift Ctrl Alt  Up   ^C
- *     Enter  Space (3 wide)    Left Down Right
+ *     Esc  Tab  Shift Ctrl Alt  Up   ^C   ┃
+ *     Space (4 wide)      Left Down Right ┃ Enter
  */
 export const DEFAULT_BOARD: KeyBoard = boardOf(2, [
   [0, chord("Escape")],
@@ -449,24 +449,24 @@ export const DEFAULT_BOARD: KeyBoard = boardOf(2, [
   [4, mod("alt")],
   [5, chord("Up")],
   [6, chord("ctrl+c")],
-  [7, chord("Enter")],
-  [8, { ...chord("Space"), w: 3 }],
+  [7, { ...chord("Space"), w: 4 }],
   [11, chord("Left")],
   [12, chord("Down")],
   [13, chord("Right")],
 ]);
 
-/** The keys whose loss is worth a word: a phone has no other Esc, Enter or arrows. */
+/** The keys whose loss is worth a word: a phone has no other Esc or arrows. Enter is never lost: the
+ *  tray draws its own whenever the board has none. */
 export const CORE_KEYS: readonly { readonly name: string; readonly step: string; readonly home: number }[] = [
   { name: "Esc", step: "Escape", home: 0 },
-  { name: "Enter", step: "Enter", home: 7 },
   { name: "Up", step: "Up", home: 5 },
   { name: "Left", step: "Left", home: 11 },
   { name: "Down", step: "Down", home: 12 },
   { name: "Right", step: "Right", home: 13 },
 ];
 
-const holdsStep = (board: KeyBoard, step: string): boolean =>
+/** Whether the board carries a key that is exactly this one step. */
+export const holdsStep = (board: KeyBoard, step: string): boolean =>
   board.cells.some((k) => k !== null && k.kind === "chord" && k.steps.length === 1 && k.steps[0] === step);
 
 /** The names of the core keys the board does not carry. Empty is the usual answer. */

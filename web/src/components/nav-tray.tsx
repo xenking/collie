@@ -30,6 +30,7 @@ import {
   areaCss,
   BOARD_COLS,
   DEFAULT_BOARD,
+  holdsStep,
   keyLabel,
   needsSecondTap,
   stepsWords,
@@ -61,12 +62,15 @@ import {
 // arrow press would strobe.
 //
 // The pad is the KEY BOARD (lib/key-board.ts, ADR 0092): a grid of 7 columns where a key is anchored
-// at one cell and spans 1 to 3 columns and 1 or 2 rows, placed by CSS grid (`grid-column: n / span w`)
+// at one cell and spans 1 to 4 columns and 1 or 2 rows, placed by CSS grid (`grid-column: n / span w`)
 // so the editor sheet draws the same board. The shipped board, the Default, is the old pad: row 1 is
-// Esc/Tab/the three modifiers/Up/quick Ctrl+C, row 2 is Enter, a Space three cells wide, then the
-// inverted-T's Left-Down-Right (Down under Up). Enter keeps its distance from the arrows: a miss on
-// Enter confirms a prompt, a miss on an arrow is reversible (issue #263), and it carries a
-// low-opacity tint of the primary colour at rest so it reads as the commit key before it is pressed.
+// Esc/Tab/the three modifiers/Up/quick Ctrl+C, row 2 is a Space four cells wide, then the inverted-T's
+// Left-Down-Right (Down under Up). Enter is the TRAY's, not the board's: when the board carries no
+// Enter of its own, a tall Enter stands apart on an eighth column at the right edge, past a 12px gap,
+// spanning the first two rows. A miss on Enter confirms a prompt, a miss on an arrow is reversible
+// (issue #263), and it carries a low-opacity tint of the primary colour at rest so it reads as the
+// commit key before it is pressed. A board that places its own Enter (a preset, an edit) draws it there
+// instead, so there is never a second one.
 // A free cell draws nothing but keeps its place, and trailing free rows are not drawn. Space, Shift,
 // Tab, Enter and the arrows show icons; every other key shows its face or its own name. Everything
 // past the board — the phone-dialer digits, the labelled Ctrl presets, F1–F12 — sits behind a row of
@@ -351,6 +355,7 @@ export function NavTray({
   // The board's keys. A cell is a seventh of a phone wide, so every key gets `min-w-0` and the
   // KEY_TAP_TARGET reach, exactly as the fixed pad's keys had.
   const rows = usedRows(board);
+  const commitColumn = !holdsStep(board, "Enter");
 
   const modKeyBtn = (key: ModKey, cell: number) => {
     const word = key.mod === "shift" ? "Shift" : key.mod === "ctrl" ? "Ctrl" : "Alt";
@@ -406,14 +411,29 @@ export function NavTray({
       />
 
       {/* The board: 7 columns, one 36px row per used row. Every key is placed by its anchor and spans
-          its width and height; an empty cell draws nothing, so every key keeps its place. */}
+          its width and height; an empty cell draws nothing, so every key keeps its place. Past a 12px
+          spacer column, the tray's own tall Enter when the board has none (see the header). */}
       <div
-        className="grid grid-cols-7 gap-1"
+        className={cn("grid gap-1", commitColumn ? "grid-cols-[repeat(7,minmax(0,1fr))_12px_1.5fr]" : "grid-cols-7")}
         style={{ gridTemplateRows: `repeat(${rows}, 36px)` }}
       >
         {board.cells.slice(0, rows * BOARD_COLS).map((key, i) =>
           key === null ? null : key.kind === "mod" ? modKeyBtn(key, i) : chordKeyBtn(key, i),
         )}
+        {commitColumn &&
+          navBtn(
+            <span className="flex flex-col items-center gap-0.5">
+              <CornerDownLeft className="size-4" aria-hidden="true" />
+              <span className="text-[9px] font-sans font-medium uppercase tracking-wide opacity-75">Enter</span>
+            </span>,
+            ["Enter"],
+            "Enter",
+            false,
+            "w-full h-auto self-stretch flex-col gap-0.5",
+            "bg-primary/15 border-primary/40",
+            false,
+            { gridColumn: "9 / span 1", gridRow: `1 / span ${Math.min(rows, 2)}` },
+          )}
       </div>
 
       {/* The accordion row: 123 / Presets / F keys. At most one panel open at a time, rendered

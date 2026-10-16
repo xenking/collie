@@ -26,7 +26,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   await installApiStub(page);
 });
 
-test("Space spans three columns and no key's label overflows its column", async ({ page }) => {
+test("Space spans four columns, Enter spans both rows and no key's label overflows its column", async ({ page }) => {
   // w1:p1 is the default fixture agent pane (`src/test/handlers.ts`), writable with no capability
   // declared false, so the Keys toggle in its composer is enabled with no further setup.
   await page.goto(`/pane/${encodeURIComponent("w1:p1")}`);
@@ -45,11 +45,16 @@ test("Space spans three columns and no key's label overflows its column", async 
   const [upBox, spaceBox] = await Promise.all([up.boundingBox(), space.boundingBox()]);
   expect(upBox).not.toBeNull();
   expect(spaceBox).not.toBeNull();
-  // Since the 1.19.0 board (ADR 0092) the default pad's Space is three cells wide, one row tall, and
-  // Enter is an ordinary cell. Three columns plus two gaps is ~3.1x one key; 2.7x is the floor a
-  // regression back to one cell (1x) or a lost span class would both still fail.
-  expect(spaceBox!.width).toBeGreaterThanOrEqual(upBox!.width * 2.7);
+  // The default pad's Space is four cells wide, one row tall (ADR 0092). Four columns plus three gaps
+  // is ~4.1x one key; 3.6x is the floor a regression to one cell (1x) or a lost span class would fail.
+  expect(spaceBox!.width).toBeGreaterThanOrEqual(upBox!.width * 3.6);
   expect(spaceBox!.height).toBeLessThanOrEqual(upBox!.height * 1.2);
+
+  // The tray's own Enter stands at the right edge, past the board, and spans both rows.
+  const enterBox = await page.getByRole("button", { name: "Enter", exact: true }).boundingBox();
+  expect(enterBox).not.toBeNull();
+  expect(enterBox!.x).toBeGreaterThanOrEqual(upBox!.x + upBox!.width);
+  expect(enterBox!.height).toBeGreaterThanOrEqual(upBox!.height * 1.8);
 
   // Every key on the fixed pad, including the quick "^C": none may scroll its own content.
   const keyNames = ["Esc", "Tab", "Shift", "Ctrl", "Alt", "Up", "Ctrl+C", "Space", "Left", "Down", "Right", "Enter"];
