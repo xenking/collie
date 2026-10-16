@@ -61,5 +61,12 @@ stays visibly wider than a key and a gap wider than the keys' own stands between
   rule above, not a gap.
 - Nothing is stored for the Default, so a person on it gets the new one. A person who had edited the
   1.21 Default has a stored board that holds an Enter: it keeps it and draws no commit column.
+- **Narrow phones: the 44px floor is not met sideways below 390px, and that is accepted.** At a 390px
+  viewport every single-cell key's hit area is 44.5px or more wide, and 44px tall at any width. Below
+  that the seven board tracks shrink with the screen: about 42.7px at 375px and about 40.8px at 360px.
+  That is under DESIGN.md section 6's 44px floor and well above the WCAG 2.2 AA minimum of 24px
+  (success criterion 2.5.8). The owner chose the tall right-hand Enter over two width-dependent layouts.
+  With seven board columns, the Enter column and the gaps, 44px is not reachable at 360px except by
+  putting Enter back inside the board, which is the layout this ADR replaces.
 - Reopen this if a second key wants to be set apart the same way (a general "outside the board" area
   would then be the better model), or if the editor must let a person place the tray's Enter.
