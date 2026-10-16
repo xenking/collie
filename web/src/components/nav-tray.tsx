@@ -347,15 +347,17 @@ export function NavTray({
   // Tap-target idiom (DESIGN.md §6, the same move as `STRIP_TAP_TARGET` in ui/labelled-strip.tsx): a
   // transparent `::before` extends a button's clickable box without adding drawn size. An absolute
   // inset is measured from the PADDING box, inside the key's 1px border, so each inset reaches 1px
-  // less than it says. The grid's gap is 4px (`gap-1`): 3px sideways reaches 2px past the border,
-  // the middle of the gap, and 5px above and below reaches 4px, the neighbour's own edge and no
-  // further, so a key's hit box never enters a sibling's drawn box. Drawn 36px (`h-9`) + 4 + 4 = 44px
-  // tall, the tap floor; a 7-column key is 40.5px drawn at 390px with the commit column (the
-  // narrowest case), + 2 + 2 = 44.5px wide. The commit Enter's own two-row span clears the floor in
-  // both axes, so it wears none of this, except on a one-row board, where it is as short as a key.
+  // less than it says. The grid's gap is 4px (`gap-1`) and every reach stops at the MIDDLE of it:
+  // 3px reaches 2px past the border, in both axes, so two neighbours' hit boxes meet and never
+  // overlap, and a tap in a gap belongs to the nearer key (an overlap would let the later-painted
+  // row win a tap under Esc, and send the Enter below it). Sideways that is a 7-column key 40.5px
+  // drawn at 390px with the commit column (the narrowest case) + 2 + 2 = 44.5px wide. Vertically,
+  // 36px (`h-9`) + 2 + 2 = 40px: rows 40px apart cannot reach 44 without overlapping, so 40px is the
+  // accepted exception (ADR 0104). The commit Enter's own two-row span clears the floor in both axes,
+  // so it wears none of this, except on a one-row board, where it is as short as a key.
   // The key must not clip (`overflow-hidden`), or the reach is cut off at the border.
   const KEY_TAP_TARGET =
-    "relative before:absolute before:-inset-x-[3px] before:-inset-y-[5px] before:content-['']";
+    "relative before:absolute before:-inset-x-[3px] before:-inset-y-[3px] before:content-['']";
 
   // The board's keys. A cell is a seventh of a phone wide, so every key gets `min-w-0` and the
   // KEY_TAP_TARGET reach, exactly as the fixed pad's keys had.

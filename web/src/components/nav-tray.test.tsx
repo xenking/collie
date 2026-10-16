@@ -119,14 +119,14 @@ describe("NavTray", () => {
     expect(enter.style.gridColumn).toBe("9 / span 1");
     expect(enter.style.gridRow).toBe("1 / span 1");
     expect(enter.parentElement!.style.gridTemplateRows).toBe("repeat(1, 36px)");
-    // As short as a key there, so it reaches out to the 44px floor as every key does.
-    expect(enter.className).toContain("before:-inset-y-[5px]");
+    // As short as a key there, so it reaches out as every key does, to the middle of the gap.
+    expect(enter.className).toContain("before:-inset-y-[3px]");
   });
 
-  it("every board key reaches 44px by hit area: 4px above and below, 2px into each side gap, past the 1px border; a two-row Enter needs none", () => {
+  it("every board key reaches out by hit area to the middle of the 4px gap on every side (2px past the 1px border), so no two reaches overlap; a two-row Enter needs none", () => {
     render(<NavTray onSend={vi.fn()} />);
     const esc = screen.getByRole("button", { name: "Esc" });
-    expect(esc.className).toContain("before:-inset-y-[5px]");
+    expect(esc.className).toContain("before:-inset-y-[3px]");
     expect(esc.className).toContain("before:-inset-x-[3px]");
     expect(screen.getByRole("button", { name: "Enter" }).className).not.toContain("before:");
   });

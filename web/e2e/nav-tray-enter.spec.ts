@@ -50,9 +50,10 @@ test("Space spans four columns, Enter spans both rows and no key's label overflo
   expect(spaceBox!.width).toBeGreaterThanOrEqual(upBox!.width * 3.6);
   expect(spaceBox!.height).toBeLessThanOrEqual(upBox!.height * 1.2);
 
-  // Every single-cell key reaches the 44px floor by hit area (DESIGN.md section 6): the ::before
-  // reaches 2px into each side gap and 4px above and below, past the 1px border. elementFromPoint proves the reach is not
-  // clipped (an overflow clip on the key would cut it).
+  // Every single-cell key buys hit area with its ::before: 2px past the border into the middle of
+  // each 4px gap, in both axes (ADR 0104). That is 44.5px wide at 390px and 40px tall, and no two
+  // reaches overlap, so a tap in a gap never lands on the other row's key. elementFromPoint proves
+  // the reach is not clipped and not doubled.
   const hit = await page.evaluate(() => {
     const out: Record<string, string> = {};
     for (const n of ["Esc", "Up", "Left", "Right"]) {
@@ -71,9 +72,28 @@ test("Space spans four columns, Enter spans both rows and no key's label overflo
   for (const n of ["Esc", "Up", "Left", "Right"]) {
     const [w, h] = hit[n].split("x").map(Number);
     expect(w, `${n} hit width`).toBeGreaterThanOrEqual(43.9);
-    expect(h, `${n} hit height`).toBeGreaterThanOrEqual(43.9);
+    expect(h, `${n} hit height`).toBeGreaterThanOrEqual(39.9);
   }
   expect(hit.rightOfLeft, "the gap beside Left is Left's own reach").toBe("Left");
+
+  // No overlap: just outside a key's drawn edge is the key itself (its reach), and just past the
+  // middle of the gap is the neighbour. Esc over Space (rows), and Left beside Down (columns).
+  const probes = await page.evaluate(() => {
+    const [esc, gap, left, down] = ["Esc", "Space", "Left", "Down"].map((n) =>
+      document.querySelector(`button[aria-label='${n}']`)!.getBoundingClientRect(),
+    );
+    const [belowEsc, aboveSpace, rightOfLeft, leftOfDown] = [
+      [esc.x + esc.width / 2, esc.bottom + 1],
+      [esc.x + esc.width / 2, gap.y - 1],
+      [left.right + 1, left.y + left.height / 2],
+      [down.x - 1, down.y + down.height / 2],
+    ].map(([x, y]) => document.elementFromPoint(x, y)?.getAttribute("aria-label") ?? "none");
+    return { belowEsc, aboveSpace, rightOfLeft, leftOfDown };
+  });
+  expect(probes.belowEsc, "1px under Esc").toBe("Esc");
+  expect(probes.aboveSpace, "1px above Space, under Esc").toBe("Space");
+  expect(probes.rightOfLeft, "1px right of Left").toBe("Left");
+  expect(probes.leftOfDown, "1px left of Down").toBe("Down");
 
   // The tray's own Enter stands at the right edge, past the board, and spans both rows.
   const enterBox = await page.getByRole("button", { name: "Enter", exact: true }).boundingBox();
