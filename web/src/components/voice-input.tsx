@@ -1,3 +1,4 @@
+import { mounted } from "@/lib/base-path";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { KeyboardEvent, MutableRefObject, PointerEvent } from "react";
 import { Loader2, Mic, RotateCcw } from "lucide-react";
@@ -204,7 +205,7 @@ class PcmPlayer {
 }
 
 function websocketUrl(paneId: string, session?: string): string {
-  const url = new URL("/api/voice/media", window.location.href);
+  const url = new URL(mounted("/api/voice/media"), window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("pane", paneId);
   if (session) url.searchParams.set("session", session);
@@ -335,6 +336,8 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
     bufferedAudioRef.current = [];
     nextAudioRef.current = null;
     settleHandoff(false);
+    // A fatal error ends the turn for good: even after a handoff the bridge must drop its remote hold.
+    handedOffRef.current = false;
     releaseRemote();
     stopCapture(captureRef);
     playerRef.current.stop();

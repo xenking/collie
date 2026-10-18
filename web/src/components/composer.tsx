@@ -695,7 +695,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const phoneUsable = phoneUse === "phone";
   const micShown = stt !== null || phoneUsable;
   const micAvailable = phoneUsable || stt?.available === true;
-  const voiceEnabled = useVoiceCapability();
+  // The voice socket resolves the pane on THIS bridge; a crew peer's pane id can collide with a local one, so a peer pane keeps the clip recorder.
+  const voiceEnabled = useVoiceCapability() && isLead(scope);
   const [voiceRecordingMode, setVoiceRecordingMode] = useState<api.VoiceRecordingMode | null>(null);
   const handsFree = useHandsFree();
   // The microphone is armed state, and it obeys the same rules as "Type into terminal": it dies on a

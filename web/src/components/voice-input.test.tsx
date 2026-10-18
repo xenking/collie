@@ -1,3 +1,4 @@
+import { resetBasePathForTests } from "@/lib/base-path";
 import { StrictMode, useState } from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterAll } from "vitest";
@@ -29,9 +30,11 @@ class FakeSocket {
   onclose: (() => void) | null = null;
 
   readonly protocols: string[] | undefined;
+  readonly url: string;
 
-  constructor(_url: string, protocols?: string[]) {
+  constructor(url: string, protocols?: string[]) {
     this.protocols = protocols;
+    this.url = url;
     FakeSocket.instances.push(this);
     if (FakeSocket.autoReady) queueMicrotask(() => this.emit(FakeSocket.readyMessage));
   }
@@ -579,6 +582,42 @@ describe("VoiceInput", () => {
       __resetOperatorCommands();
       if (secureContext) Object.defineProperty(globalThis, "isSecureContext", secureContext);
       else Reflect.deleteProperty(globalThis, "isSecureContext");
+    }
+  });
+
+  it("releases the remote hold when a fatal error arrives after the handoff", async () => {
+    FakeSocket.readyMessage = { kind: "ready", replySpeech: true };
+    try {
+      const onError = vi.fn();
+      render(<VoiceInput replySpeechSupported recordingMode="toggle" paneId="w1:p6" showControl disabled={false} onTranscript={vi.fn(async () => true)} onVoiceStateChange={vi.fn()} onError={onError} />);
+      const button = await startVoice();
+      fireEvent.click(button);
+      FakeSocket.instances[0]?.emit({ kind: "voice-state", generation: 1, phase: "working" });
+      FakeSocket.instances[0]?.emit({ kind: "final", generation: 1, text: "Привет" });
+      await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"handoff","generation":1}'));
+      FakeSocket.instances[0]?.emit({ kind: "handoff-ready", generation: 1, accepted: true });
+      await waitFor(() => expect(FakeSocket.instances[0]?.send).not.toHaveBeenCalledWith('{"kind":"release"}'));
+      FakeSocket.instances[0]?.emit({ kind: "error", message: "Soniox TTS failed" });
+      await waitFor(() => expect(FakeSocket.instances[0]?.send).toHaveBeenCalledWith('{"kind":"release"}'));
+      expect(onError).toHaveBeenCalledWith("Soniox TTS failed");
+    } finally {
+      FakeSocket.readyMessage = { kind: "ready" };
+    }
+  });
+
+  it("connects below the mount path when Collie is served under /collie/", async () => {
+    const meta = document.createElement("meta");
+    meta.name = "collie-base";
+    meta.content = "/collie/";
+    document.head.append(meta);
+    resetBasePathForTests();
+    try {
+      render(<VoiceInput replySpeechSupported={false} recordingMode="toggle" paneId="w1:p5" showControl disabled={false} onTranscript={vi.fn(async () => true)} onVoiceStateChange={vi.fn()} onError={vi.fn()} />);
+      await startVoice();
+      expect(new URL(FakeSocket.instances[0]!.url).pathname).toBe("/collie/api/voice/media");
+    } finally {
+      meta.remove();
+      resetBasePathForTests();
     }
   });
 

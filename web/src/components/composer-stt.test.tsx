@@ -184,6 +184,16 @@ describe("Composer — the record button is drawn only when there is a microphon
     expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
   });
 
+  it("keeps the clip recorder on a crew peer's pane: the voice socket would resolve the pane on this bridge", async () => {
+    server.use(
+      configHandler({ push: false, vapidPublicKey: "", voice: true, stt: CONFIG_WITH_STT.stt }),
+      http.get("/api/voice/preferences", () => HttpResponse.json({ recordingMode: "toggle" })),
+    );
+    renderComposer({ scope: { host: "peer-a" } });
+    expect(await screen.findByRole("button", { name: /record a voice message/i })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /start voice input/i })).toBeNull();
+  });
+
   it("renders no microphone in an insecure context, even with a provider configured", async () => {
     // The guard #115 forgot: over plain HTTP `navigator.mediaDevices` is simply absent, so a button
     // would render and do nothing. Nothing on the phone fixes that, so it is hidden, not disabled.

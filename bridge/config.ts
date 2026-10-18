@@ -649,6 +649,13 @@ export function holdPrivateFile(path: string, repairAcl = false): PrivateFileVer
   return tightenPrivateFile(path, diskFilePerms, repairAcl);
 }
 
+/** The OMP voice daemon's token file: a leading `~/` is the home folder, as a service env file never expands it. */
+function voiceTokenFile(raw: string | undefined, home: string): string {
+  const value = (raw ?? "").trim();
+  if (value === "") return join(home, ".config", "omp-voice-control", "token");
+  return value.startsWith("~/") ? join(home, value.slice(2)) : value;
+}
+
 export function loadConfig(env: Environment = process.env): Config {
   const stateDir = resolveStateDir(env);
 
@@ -722,7 +729,7 @@ export function loadConfig(env: Environment = process.env): Config {
     sonioxApiKey: (env.SONIOX_API_KEY ?? "").trim(),
     sonioxTtsVoice: (env.SONIOX_TTS_VOICE ?? "Adrian").trim() || "Adrian",
     voiceControlUrl: (env.OMP_VOICE_CONTROL_URL ?? "http://127.0.0.1:49371/speech").trim(),
-    voiceControlTokenFile: (env.OMP_VOICE_CONTROL_TOKEN_FILE ?? join(homedir(), ".config", "omp-voice-control", "token")).trim(),
+    voiceControlTokenFile: voiceTokenFile(env.OMP_VOICE_CONTROL_TOKEN_FILE, homedir()),
     stateDir,
     multiSession: envBool("COLLIE_MULTI_SESSION", true, env),
     surfaceShadow: envBool("COLLIE_SURFACE_SHADOW", false, env),
