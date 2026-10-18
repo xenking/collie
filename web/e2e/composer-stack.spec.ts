@@ -108,6 +108,10 @@ test("the empty box and one or two lines stay the one-row box; three lines stack
   const boxRect = await rect(box(page));
   expect(boxRect.y + boxRect.height - (p1.y + p1.height)).toBeLessThan(6);
   expect((await rect(field(page))).width).toBeGreaterThan(fieldAtTwo.width + 30);
+  // Stacking does not grow the box to speak of: it is the three-line field plus its padding and
+  // border, give or take the pixel by which a face with a tighter line height leaves the field (3 x
+  // line + 12) under the 76px column.
+  expect(boxRect.height).toBeLessThanOrEqual((await rect(field(page))).height + 12);
   await shot(page, "three-lines", testInfo);
 });
 

@@ -680,7 +680,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   });
   // A tall draft frees the room beside it: the attach and primary buttons stand in a column then
   // (ADR 0057, amended 2026-10-19). Measured on the text the field shows, so a voice caption counts.
-  const stacked = useStackedActions(inputRef, direct.active ? direct.value : voicePreview ?? input);
+  const buttonsRef = useRef<HTMLDivElement>(null);
+  const stacked = useStackedActions(inputRef, buttonsRef, direct.active ? direct.value : voicePreview ?? input);
 
   // ── VOICE (ADR 0029) ──────────────────────────────────────────────────────────────────────────
   //
@@ -2181,19 +2182,23 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               and keeps its caret; DESIGN.md §2). Resting, it is the row it always was: attach, then
               the primary action, `gap-1`. When the draft is tall (3+ lines, `useStackedActions`) it is
               a column, attach over the primary action, the primary action still at the bottom edge
-              where a thumb is, and the field keeps the width the second button gave back. `gap-2`
-              in the column, not `gap-1`: the two 36px faces each reach 4px out (TOOLBAR_TAP_TARGET),
-              and 36 + 8 + 36 is the spacing at which those two reaches meet without crossing.
+              where a thumb is, and the field keeps the width the second button gave back. The gap
+              is `gap-1` in both layouts, as it always was between these two: the column is then
+              36 + 4 + 36 = 76px tall, or 84 with the 44px voice control, never taller than the
+              three-line field that stacked it (84), so stacking does not grow the box. The two
+              4px hit-area reaches (TOOLBAR_TAP_TARGET) overlap in that gap exactly as they do in
+              the row, and the later control, the primary action, wins the overlap.
               Mirrored (`hand="left"`) the row reverses with the box, so Send keeps the outer edge;
               a column has no left and right, so the reversal is dropped there. The picker is
               absolutely positioned and this group is NOT `relative`, so it still anchors to the box
               and opens above the whole shape in either layout. */}
           <div
+            ref={buttonsRef}
             data-slot="composer-buttons"
             data-stacked={stacked ? "true" : "false"}
             className={cn(
-              "flex shrink-0 self-end",
-              stacked ? "flex-col items-center gap-2" : cn("items-end gap-1", hand === "left" && "flex-row-reverse"),
+              "flex shrink-0 gap-1 self-end",
+              stacked ? "flex-col items-center" : cn("items-end", hand === "left" && "flex-row-reverse"),
             )}
           >
             <Button

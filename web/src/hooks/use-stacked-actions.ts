@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 
 import { hasResizeObserver } from "@/lib/env";
@@ -10,19 +10,39 @@ import { hasResizeObserver } from "@/lib/env";
 export const STACK_AT_LINES = 3;
 
 /**
- * The line count at or under which a stacked composer lets its buttons back into the row, measured
- * at the STACKED width. It is lower than {@link STACK_AT_LINES} minus one on purpose, and that gap is
- * the whole of the hysteresis: stacking frees a button's width, so the same draft wraps to fewer
+ * The line count at or under which a stacked composer may let its buttons back into the row,
+ * measured at the STACKED width. It is lower than {@link STACK_AT_LINES} minus one on purpose, and
+ * that gap is the hysteresis: stacking frees a button's width, so the same draft wraps to fewer
  * lines. If the box un-stacked at two lines it would narrow the field, wrap the draft to three, and
- * stack again, for ever. A draft of one line at the stacked width wraps to at most two at the
- * unstacked one (the width the row gives back is under one line's worth), so it can never meet
- * {@link STACK_AT_LINES}; the two states cannot chase each other.
+ * stack again, for ever. A one-line draft at the stacked width is at most `ratio` lines at the row's,
+ * where `ratio` is how much wider the stacked field is, so while that stays under
+ * {@link RELEASE_MAX_WIDTH_RATIO} it cannot reach {@link STACK_AT_LINES}.
  */
 export const UNSTACK_AT_LINES = 1;
 
-/** The next state from the last one and the visual line count the field reads at its current width. */
-export function nextStacked(stacked: boolean, lines: number): boolean {
-  return stacked ? lines > UNSTACK_AT_LINES : lines >= STACK_AT_LINES;
+/**
+ * The widest the stacked field may be, as a multiple of its width in the row, for the column to let
+ * go of a one-line draft. The width a column frees is fixed (the attach button and a gap, about 40px),
+ * so on an ordinary phone the ratio is about 1.2. When the primary action is a long translated word
+ * and the row leaves the field a sliver, the same 40px is most of its width: a short draft is one
+ * line in the column and could be three in the row, and releasing it would flip the box for ever.
+ * Past this ratio the column holds until the draft is empty or sent. 1.5 keeps a one-line draft to
+ * two lines in the row, even counting the space a long word wastes at a line's end.
+ */
+export const RELEASE_MAX_WIDTH_RATIO = 1.5;
+
+/** What the field reads now: how many lines, whether it is empty, and how much wider it stands stacked than it would in the row (1 when unmeasurable). */
+export interface StackReading {
+  readonly lines: number;
+  readonly empty: boolean;
+  readonly widthRatio: number;
+}
+
+/** The next state from the last one and what the field reads at its current width. */
+export function nextStacked(stacked: boolean, reading: StackReading): boolean {
+  if (reading.empty) return false;
+  if (!stacked) return reading.lines >= STACK_AT_LINES;
+  return reading.lines > UNSTACK_AT_LINES || reading.widthRatio > RELEASE_MAX_WIDTH_RATIO;
 }
 
 // What a `line-height: normal` field measures when the engine hands back the keyword instead of a
@@ -51,15 +71,35 @@ export function draftLines(field: HTMLTextAreaElement): number {
  * of in the row. Measured after layout on every draft change, and again whenever the field's own box
  * changes size (a rotation, a keyboard, a draft-size setting), so the state is settled before paint.
  * It only ever drives a class: nothing remounts, so the field keeps its caret.
+ *
+ * The widths come from the DOM, not from a constant: the row's group width is remembered while the
+ * buttons are in the row, and what the column frees is that less the column's group width, so a
+ * primary action that is a long word is accounted for ({@link RELEASE_MAX_WIDTH_RATIO}).
  */
-export function useStackedActions(field: RefObject<HTMLTextAreaElement | null>, draft: string): boolean {
+export function useStackedActions(
+  field: RefObject<HTMLTextAreaElement | null>,
+  group: RefObject<HTMLElement | null>,
+  draft: string,
+): boolean {
   const [stacked, setStacked] = useState(false);
+  const rowGroupWidth = useRef(0);
+  // Read by `measure` and not a dependency of it, so the observer below is not torn down and
+  // re-armed on every keystroke.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const measure = useCallback(() => {
     const el = field.current;
-    if (el === null) return;
-    const lines = draftLines(el);
-    setStacked((was) => nextStacked(was, lines));
-  }, [field]);
+    const buttons = group.current;
+    if (el === null || buttons === null) return;
+    const inColumn = buttons.dataset.stacked === "true";
+    if (!inColumn) rowGroupWidth.current = buttons.offsetWidth;
+    const reading: StackReading = {
+      lines: draftLines(el),
+      empty: draftRef.current.length === 0,
+      widthRatio: inColumn ? stackedWidthRatio(el, rowGroupWidth.current - buttons.offsetWidth) : 1,
+    };
+    setStacked((was) => nextStacked(was, reading));
+  }, [field, group]);
   useLayoutEffect(measure, [measure, draft]);
   useEffect(() => {
     const el = field.current;
@@ -69,4 +109,14 @@ export function useStackedActions(field: RefObject<HTMLTextAreaElement | null>, 
     return () => observer.disconnect();
   }, [field, measure]);
   return stacked;
+}
+
+/** The stacked field's content width over what it would be in the row, `freed` px narrower; 1 when nothing is measured. */
+function stackedWidthRatio(field: HTMLTextAreaElement, freed: number): number {
+  const style = getComputedStyle(field);
+  const padding = (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
+  const stackedWidth = field.clientWidth - padding;
+  const rowWidth = stackedWidth - freed;
+  if (!(stackedWidth > 0) || freed <= 0) return 1;
+  return rowWidth > 0 ? stackedWidth / rowWidth : Number.POSITIVE_INFINITY;
 }

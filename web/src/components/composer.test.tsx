@@ -4439,6 +4439,20 @@ describe("Composer — a tall draft stacks attach over the primary action", () =
   const draft = (lines: number) => "x".repeat(NARROW * (lines - 1) + 1);
 
   beforeEach(() => {
+    // Widths, for the ratio the column reads: 8px a character, the group 40px narrower stacked.
+    Object.defineProperty(HTMLTextAreaElement.prototype, "clientWidth", {
+      configurable: true,
+      get(this: HTMLTextAreaElement) {
+        const wide = this.parentElement?.querySelector<HTMLElement>('[data-slot="composer-buttons"]')?.dataset.stacked === "true";
+        return (wide ? WIDE : NARROW) * 8;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.dataset.slot === "composer-buttons" ? (this.dataset.stacked === "true" ? 36 : 76) : 0;
+      },
+    });
     Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
       configurable: true,
       get(this: HTMLTextAreaElement) {
@@ -4450,6 +4464,8 @@ describe("Composer — a tall draft stacks attach over the primary action", () =
 
   afterEach(() => {
     Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight");
+    Reflect.deleteProperty(HTMLTextAreaElement.prototype, "clientWidth");
+    Reflect.deleteProperty(HTMLElement.prototype, "offsetWidth");
   });
 
   /** The composer, its field wearing the line height and padding the stylesheet gives it (jsdom has no stylesheet). */
@@ -4485,8 +4501,8 @@ describe("Composer — a tall draft stacks attach over the primary action", () =
     await waitFor(() => expect(stackedNow()).toBe(true));
     expect(group().className).toMatch(/(?:^|\s)flex-col(?=\s|$)/);
     expect(group().className).toMatch(/(?:^|\s)self-end(?=\s|$)/);
-    // 36px faces whose 4px reaches meet in the middle of the gap, and cross nowhere.
-    expect(group().className).toMatch(/(?:^|\s)gap-2(?=\s|$)/);
+    // The gap is the row's own, so the column is never taller than the three-line field that stacked it.
+    expect(group().className).toMatch(/(?:^|\s)gap-1(?=\s|$)/);
     const buttons = [...group().querySelectorAll("button")].map((b) => b.getAttribute("aria-label"));
     expect(buttons).toEqual(["Attach file", "Send"]);
   });

@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-22
+- **Amended in scope by:** [ADR 0111](./0111-a-tall-draft-stacks-the-composer-buttons.md), the buttons stand in a column beside a tall draft
 - **Shipped in:** pending (target 1.12.0)
 - **Trail:** `web/src/components/composer.tsx` · `web/src/components/ui/chat/chat-input.tsx` ·
   `web/src/components/actions-row.tsx` · `web/src/components/ui/anchored-menu.tsx` ·
@@ -116,29 +117,3 @@ replaces decisions 1, 3 and 4 above where they differ; the rest stands.
 Everything else is unchanged: Ctrl/Cmd+Enter sends and a bare Enter is a newline, the locked look,
 the picker anchored to the box, the mic, Send and confirm swap, the draft preview, IME and
 paste-a-file.
-
-## Amended 2026-10-19
-
-A dictated message runs to many lines, and beside it stands a 36px attach button over empty room
-under the field's right edge. **When the draft is tall, attach and the primary action stand in a
-column, attach over the primary action, and the field keeps the width the second button gave back.**
-The rest stands.
-
-1. **One group, one class.** Attach, the picker and the primary action's branches (voice control,
-   answer-the-dialog, really-send, mic, Send) sit in one always-rendered `data-slot="composer-buttons"`
-   element. Stacking changes its classes only (`flex-col items-center gap-2`, else `items-end gap-1`,
-   reversed under `hand="left"`). Nothing remounts, the field is not touched, the caret and focus stay
-   (DESIGN.md §2). The picker is absolute and the group is not `relative`, so it still anchors to the box.
-2. **The default does not move.** An empty box, one line and two lines stay the 44px row. Stacking
-   by default was considered and declined: the column is 36 + 8 + 36 tall, so an empty box would
-   stand at 76px instead of 44, a state that moves content on every empty composer.
-3. **Three lines stack; one line unstacks.** The line count is the field's scroll height less its
-   padding over its computed line height (the operator's draft size included), read after layout on
-   every draft change and on every resize of the field (`hooks/use-stacked-actions.ts`). It enters at
-   three or more lines at the row's width and leaves at one line or an empty draft at the column's.
-   The gap is the point: the column is wider for the field, so the same text wraps to fewer lines,
-   and a rule that left at two would narrow the field, wrap to three and stack again, for ever. A
-   draft of one line at the column's width is at most two at the row's, so the two thresholds cannot
-   meet. A draft at the field's cap scrolls inside it and stays stacked.
-4. **The column's gap is `gap-2`.** Each 36px face reaches 4px out (`TOOLBAR_TAP_TARGET`); 36 + 8 + 36
-   is the spacing at which the two reaches meet without crossing.
