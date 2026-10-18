@@ -194,7 +194,7 @@ export function realPorts(options: RealOptions = {}): LabPorts {
     },
     async preflight(spec: HarnessSpec, dirs: RunDirs): Promise<void> {
       if (resolveTmuxBinary("") === null) throw new LabDeferred("no tmux binary on this machine");
-      if (Bun.which("npm") === null) throw new LabDeferred("no npm on PATH");
+      if ((env[`COLLIE_LAB_BIN_${spec.id.toUpperCase()}`] ?? "") === "" && Bun.which("npm") === null) throw new LabDeferred("no npm on PATH");
       if (Bun.which("git") === null) throw new LabDeferred("no git on PATH");
       makeProject(dirs.project);
       // The folders, the config files and the login are made here, before the claim: a login that is not

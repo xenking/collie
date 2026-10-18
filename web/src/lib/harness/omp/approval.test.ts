@@ -562,3 +562,13 @@ describe("the decision-row approval dialog (omp 18.11.3)", () => {
     expect(model(text.replace("Deny", "Nope"))).toBeNull();
   });
 });
+
+describe("the widget rows under the status row (pi-o-my's belowStatus slot)", () => {
+  it("steps over exactly as many rows as the slot can hold", () => {
+    const base = splitLines(parseAnsi(readFileSync(join(PANES_DIR, "omp--v18-11-3-below-status-idle.txt"), "utf8")));
+    const statusAt = base.findLastIndex((row) => lineText(row).trimStart().startsWith("\u{F0D57}") || lineText(row).includes("·"));
+    const widget = (n: number) => [...base.slice(0, statusAt + 1), ...Array.from({ length: n }, (_, i) => splitLines(parseAnsi(`widget ${i}`))[0]!)];
+    expect(ompAdapter.composerReady?.(widget(12))).toBe(true);
+    expect(ompAdapter.composerReady?.(widget(13))).toBe(false);
+  });
+});

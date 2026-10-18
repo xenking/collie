@@ -108,7 +108,7 @@ const BARE_PROMPT = /^[❯›]$/;
  */
 export function withoutStatusTail(lines: StyledLine[]): StyledLine[] {
   const end = lastNonBlank(lines);
-  for (let up = end; up >= 0 && end - up < MAX_BELOW_STATUS_ROWS; up--) {
+  for (let up = end; up >= 0 && end - up <= MAX_BELOW_STATUS_ROWS; up--) {
     if (isBlank(lineText(lines[up]!))) return lines;
     if (isStatusRow(lines[up]!)) {
       // Under a dialog's closing border the status row is chrome of the dialog's screen, not of a composer.
