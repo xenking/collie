@@ -107,6 +107,7 @@ import {
   glyphComposerPrompt,
   locateGlyphComposer,
   stripGlyphChrome,
+  withoutStatusTail,
 } from "./glyph-prompt";
 import { ompOpaqueDraft, ompReplyChunks } from "./reply-chunks";
 import {
@@ -154,7 +155,9 @@ import { detectSwitchPickerRegion } from "./switch";
  * a contract Claude's `/model` picker is pinned against. The unread-dialog card (`cancelKey` below)
  * delivers the way out, and `composerReady` already delivers the safety half.
  */
-export function ompBuildBlocks(lines: StyledLine[]): Block[] {
+export function ompBuildBlocks(screen: StyledLine[]): Block[] {
+  // The status row and the widget rows under a dialog are chrome of the patched omp, not of the dialog.
+  const lines = withoutStatusTail(screen);
   // The four lifted screens never share a tail: each is anchored on its own bottom border and footer.
   const lifted =
     detectResumePickerRegion(lines) ??
@@ -168,7 +171,7 @@ export function ompBuildBlocks(lines: StyledLine[]): Block[] {
     blocks.push({ kind: "prompt-select", prompt: lifted.model, lines: lines.slice(lifted.startLine) });
     return blocks;
   }
-  return [{ kind: "raw", lines: decorateOmpDisplay(stripChrome(lines)) }];
+  return [{ kind: "raw", lines: decorateOmpDisplay(stripChrome(screen)) }];
 }
 
 export function extractStatusLines(lines: StyledLine[]): StyledLine[] {
@@ -248,7 +251,7 @@ export const ompAdapter: HarnessAdapter = {
   // omp's answer is positive evidence: its own key-hint footer, naming its way out, at the buffer tail
   // (modal.ts). A composer never has that, so the ZWJ pane shows no card.
   cancelKey: "Escape",
-  modalOnScreen: ompModalOnScreen,
+  modalOnScreen: (lines) => ompModalOnScreen(withoutStatusTail(lines)),
   // …and the exact on-screen draft region the destructive pre-clear is bound to on the wire: the
   // box's bottom prompt row or all of the rule composer's prompt rows. The box scanner declines when
   // a long palette pushes that row out of range; the rule region ends one status row from the tail.

@@ -89,13 +89,46 @@ export function isStatusRow(line: StyledLine): boolean {
   return line.segments.some((s) => s.fg !== undefined && SEPARATOR.test(s.text.trim()));
 }
 
+/**
+ * The most rows pi-o-my's patched omp draws under the status row: its `belowStatus` widget slot holds one
+ * clipped row per line of every extension widget, ten lines each (omp/patches/below-status-widget-*.patch).
+ */
+const MAX_BELOW_STATUS_ROWS = 12;
+const DIALOG_BOTTOM = /^╰─+╯$/;
+
+/**
+ * The screen without the rows that patched omp draws under it: the widget rows under the status row
+ * (`Matt [prototype]` and the like, plain text, no blank row between them and the status row), and, when
+ * the status row stands under a dialog's closing border, the status row too. Every reader here takes
+ * the status row as the last non-blank row of a composer, or the border as the last row of a dialog;
+ * without this a single widget row turned every composer and every dialog on the screen into one the
+ * readers declined (omp 18.11.3, captured with the Matt row). The slice is a prefix, so every row index
+ * the readers find is also an index of `lines`. Returns `lines` itself when nothing stands there.
+ */
+export function withoutStatusTail(lines: StyledLine[]): StyledLine[] {
+  const end = lastNonBlank(lines);
+  for (let up = end; up >= 0 && end - up < MAX_BELOW_STATUS_ROWS; up--) {
+    if (isBlank(lineText(lines[up]!))) return lines;
+    if (isStatusRow(lines[up]!)) {
+      // Under a dialog's closing border the status row is chrome of the dialog's screen, not of a composer.
+      let above = up - 1;
+      while (above >= 0 && isBlank(lineText(lines[above]!))) above--;
+      if (above >= 0 && DIALOG_BOTTOM.test(rstrip(lineText(lines[above]!)))) return lines.slice(0, above + 1);
+      return up === end ? lines : lines.slice(0, up + 1);
+    }
+    // A widget row is plain text: a row that opens a box (a dialog's border, a rule) is not one.
+    if (opensBox(rstrip(lineText(lines[up]!)))) return lines;
+  }
+  return lines;
+}
+
 function ruleColour(line: StyledLine): string | undefined {
   return line.segments.find((s) => s.text.trim() !== "")?.fg;
 }
 
 /** Locate omp's `claude`-shaped composer at the buffer tail, or null. */
 export function locateClaudeComposer(lines: StyledLine[]): GlyphComposer | null {
-  const status = lastNonBlank(lines);
+  const status = lastNonBlank(withoutStatusTail(lines));
   if (status < 3 || !isStatusRow(lines[status]!)) return null;
   const bottom = status - 1;
   if (!BOTTOM_RULE.test(rstrip(lineText(lines[bottom]!)))) return null;
@@ -117,7 +150,7 @@ export function locateClaudeComposer(lines: StyledLine[]): GlyphComposer | null 
 
 /** Locate omp's `borderless` composer at the buffer tail, or null. */
 export function locateBorderlessComposer(lines: StyledLine[]): GlyphComposer | null {
-  const status = lastNonBlank(lines);
+  const status = lastNonBlank(withoutStatusTail(lines));
   if (status < 1 || !isStatusRow(lines[status]!)) return null;
 
   const promptEnd = status - 1;
@@ -169,7 +202,8 @@ export function stripGlyphChrome(lines: StyledLine[], composer: GlyphComposer): 
 }
 
 export function extractGlyphStatusLines(lines: StyledLine[], composer: GlyphComposer): StyledLine[] {
-  return composer.status === null ? [] : [lines[composer.status]!];
+  // The status row and the widget rows under it: the strip shows what omp drew there.
+  return composer.status === null ? [] : lines.slice(composer.status, lastNonBlank(lines) + 1);
 }
 
 export function glyphComposerPrompt(lines: StyledLine[], composer: GlyphComposer): string | null {

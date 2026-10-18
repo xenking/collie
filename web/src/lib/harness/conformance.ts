@@ -557,10 +557,18 @@ export function describeAdapterConformance(
      *  to "a region exists exactly when the composer is ready": the sweep goes out unbound there,
      *  and the list says so in the test output rather than in a silent null. */
     unboundComposerFixtures?: string[];
+    /** How many rows at a screen's tail are the harness's own chrome that always stands last (a status
+     *  row and the widget rows under it): output that scrolls in lands ABOVE them, never below. */
+    tailChrome?: (lines: StyledLine[]) => number;
   },
 ): void {
   const { ownFixtures, foreignFixtures, neutralFixtures } = opts;
   const unbound = opts.unboundComposerFixtures ?? [];
+  /** The screen with `output` scrolled in under the dialog, above the chrome that always stands last. */
+  const scrollIn = (lines: StyledLine[], output: StyledLine[]): StyledLine[] => {
+    const chrome = Math.min(opts.tailChrome?.(lines) ?? 0, lines.length);
+    return [...lines.slice(0, lines.length - chrome), ...output, ...lines.slice(lines.length - chrome)];
+  };
 
   describe(`HarnessAdapter conformance — ${adapter.agent}`, () => {
     describe("conservative detection (fail-closed on foreign + neutral buffers)", () => {
@@ -657,7 +665,7 @@ export function describeAdapterConformance(
 
       for (const name of ownFixtures) {
         it(`${name}: does NOT lift once ordinary output scrolls below it`, () => {
-          const scrolled = [...loadLines(name), ...trailingOutput()];
+          const scrolled = scrollIn(loadLines(name), trailingOutput());
           // A notice card (`MenuModel.liveBox`, ADR 0109) is exempt here. It lifts only with the live
           // input box under it, whose status rows cannot be told from output walked as status rows. Its
           // binding region runs through the box's bottom edge, so the bridge binds the tap only while

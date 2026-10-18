@@ -1,7 +1,7 @@
 // The real hands of a lab run (M56 spec 10): npm, git, a throwaway tmux, the walk, the protocol.
 // run.ts holds the order of the steps. This file does the work, so a test of the order needs none of it.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { resolveTmuxBinary } from "../../../bridge/mux/tmux/exec";
 import { gateFor } from "../../../bridge/surface/key-gate";
@@ -205,6 +205,18 @@ export function realPorts(options: RealOptions = {}): LabPorts {
     async install(spec, dirs, version, log): Promise<string> {
       mkdirSync(dirs.bin, { recursive: true });
       const base = { ...serverEnv(env), npm_config_update_notifier: "false", npm_config_fund: "false" };
+      // `COLLIE_LAB_BIN_<ID>` names a binary to run in place of the npm install: the person's own runtime, patched
+      // or not. It must print the version the lab was asked for; the lab changes nothing in it.
+      const own = env[`COLLIE_LAB_BIN_${spec.id.toUpperCase()}`];
+      if (own !== undefined && own !== "") {
+        mkdirSync(dirname(binaryPath(dirs, spec)), { recursive: true });
+        symlinkSync(own, binaryPath(dirs, spec));
+        const printed = await run([binaryPath(dirs, spec), "--version"], dirs.root, { ...base, ...spec.env(dirs) }, 30_000);
+        const found = VERSION_IN_TEXT.exec(printed.out)?.[0];
+        if (found !== version) throw new LabInfraError(`${own} prints ${found ?? "no version"}, and the lab asked for ${version}`);
+        log(`using ${own} for ${spec.id}; it prints ${found}`);
+        return found;
+      }
       const result = await run(["npm", "install", "--prefix", dirs.bin, "--no-audit", "--no-fund", "--no-save", `${spec.npm}@${version}`], dirs.bin, base, INSTALL_TIMEOUT_MS);
       if (result.code !== 0) throw new LabInfraError(`npm install ${spec.npm}@${version} exited ${String(result.code)}: ${result.out.trim().split("\n").slice(-3).join(" ")}`);
       const printed = await run([binaryPath(dirs, spec), "--version"], dirs.root, { ...base, ...spec.env(dirs) }, 30_000);
