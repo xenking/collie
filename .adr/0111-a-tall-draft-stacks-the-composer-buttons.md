@@ -40,9 +40,11 @@ lines are exactly the row they were.**
    field, so the same text wraps to fewer lines; a rule that left at two lines would narrow the
    field, wrap to three, and stack again, for ever. A one-line draft at the column's width is at most
    two lines at the row's while the column is under 1.5 times as wide as the row would leave the field.
-   That ratio is measured, not assumed: the row group's width is remembered while the buttons are in
-   the row, and what the column frees is that less the column's own width. When a long translated word
-   as the primary action leaves the row a sliver of field, the ratio passes 1.5 and the column holds
+   That ratio is measured, not assumed, and from the buttons as they stand on every reading: the row
+   would hold every button side by side with the gap between them, the column holds the widest, and the
+   difference is what the column freed. A primary action that changes while stacked (a long translated
+   word in place of Send) is therefore in the sum at once, with no width remembered from an earlier
+   layout. When such a word leaves the row a sliver of field, the ratio passes 1.5 and the column holds
    until the draft is empty.
 5. **The gap is `gap-1`, as in the row.** The column is 76px tall, or 84 with the 44px voice control,
    never taller than the three-line field (84) that stacked it, so stacking does not grow the box. The

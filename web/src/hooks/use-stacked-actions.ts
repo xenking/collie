@@ -109,6 +109,11 @@ export function useStackedActions(
   return stacked;
 }
 
+/** The open picker's panel is absolute and its dismiss backdrop is fixed: neither takes a place in either layout, and the backdrop is as wide as the screen. */
+function inFlow(el: Element): boolean {
+  return !["absolute", "fixed"].includes(getComputedStyle(el).position);
+}
+
 /**
  * How much wider the stacked field is than it would be in the row. What the column frees is read off
  * the buttons as they stand now, so a primary action that changes while stacked is accounted for:
@@ -119,8 +124,7 @@ function stackedWidthRatio(field: HTMLTextAreaElement, group: HTMLElement): numb
   const style = getComputedStyle(field);
   const padding = (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
   const stackedWidth = field.clientWidth - padding;
-  // The picker is absolutely positioned and takes no place in either layout.
-  const widths = [...group.children].filter((el) => getComputedStyle(el).position !== "absolute").map((el) => el instanceof HTMLElement ? el.offsetWidth : 0);
+  const widths = [...group.children].filter(inFlow).map((el) => el instanceof HTMLElement ? el.offsetWidth : 0);
   const gap = Number.parseFloat(getComputedStyle(group).columnGap) || 0;
   const freed = widths.reduce((sum, w) => sum + w, 0) + gap * Math.max(0, widths.length - 1) - Math.max(0, ...widths);
   if (!(stackedWidth > 0) || !(freed > 0)) return 1;

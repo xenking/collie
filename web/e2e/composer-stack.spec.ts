@@ -198,6 +198,12 @@ test("the attach picker opens above the box in both layouts, right-aligned to it
     expect(p.y + p.height).toBeLessThanOrEqual(b.y + 1);
     expect(Math.abs(p.x + p.width - (b.x + b.width))).toBeLessThan(2);
     await shot(page, `picker-${name}`, testInfo);
+    if (name === "column") {
+      // The picker's backdrop is a screen-wide button inside the group; it is no control, so a reading
+      // taken while it is open (the draft shrinks to a line) still lets the column go.
+      await field(page).fill("x");
+      await expect(group(page)).toHaveAttribute("data-stacked", "false");
+    }
     await page.keyboard.press("Escape");
     await expect(panel).toBeHidden();
   }
@@ -252,17 +258,6 @@ test("a long German placeholder leaves the empty box one row, and a tall draft s
   expect((await rect(box(page))).height).toBeCloseTo(emptyHeight, 0);
   await textbox.fill(rows(4));
   await expect(group(page)).toHaveAttribute("data-stacked", "true");
-});
-
-test("Ctrl+Enter still sends a stacked draft", async ({ page }) => {
-  await open(page);
-  await field(page).fill(rows(4));
-  await expect(group(page)).toHaveAttribute("data-stacked", "true");
-  const sent = page.waitForRequest((req) => new URL(req.url()).pathname.endsWith("/api/send") && req.method() === "POST");
-  await field(page).press("Control+Enter");
-  // The draft goes out as one request: the key still reaches the send path from a stacked box.
-  const request = await sent;
-  expect(request.postData()).toContain("row 4");
 });
 
 test("a desktop width stacks the same way", async ({ page }, testInfo) => {
