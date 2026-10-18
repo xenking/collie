@@ -114,6 +114,9 @@ async function openFind(user: User) {
   await user.click(screen.getByRole("button", { name: "Find in output" }));
 }
 
+// One 4000-line file of render-heavy cases: under the full suite's parallel load a case passes the 5 s default, times out, and leaves its render behind for the next ones (28 red in CI-sized runs, green alone).
+vi.setConfig({ testTimeout: 30_000 });
+
 describe("AgentChat — reply flow", () => {
   it("sends a typed reply and clears the composer on success", async () => {
     const user = userEvent.setup();
