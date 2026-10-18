@@ -18,6 +18,7 @@ import {
 } from "./profile";
 import { PROFILE_FILES } from "./profiles/index";
 import { findInputFrame } from "./frame";
+import { askOf } from "./surface";
 import { fixtureRows, idleFor, PANES_DIR, readScreen, SURFACE_FIXTURES_DIR } from "../../test/surface-corpus";
 
 const PROFILES_DIR = join(import.meta.dirname, "profiles");
@@ -938,6 +939,6 @@ describe("omp 18.11.3 with the status row and a widget row under the box", () =>
   });
   it("the Ask dialog lifts with its options, the widget row under it notwithstanding", () => {
     const surface = read("ask-single");
-    expect(typeof surface.modal === "object" && "ask" in surface.modal ? surface.modal.ask.options.map((o) => o.label) : null).toEqual(["Apple", "Banana", "Cherry", "Other (type your own)", "Cancel"]);
+    expect(askOf(surface.modal)?.options.map((o) => o.label)).toEqual(["Apple", "Banana", "Cherry", "Other (type your own)", "Cancel"]);
   });
 });
