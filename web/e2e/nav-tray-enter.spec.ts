@@ -51,7 +51,7 @@ test("Space spans four columns, Enter spans both rows and no key's label overflo
   expect(spaceBox!.height).toBeLessThanOrEqual(upBox!.height * 1.2);
 
   // Every single-cell key buys hit area with its ::before: 2px past the border into the middle of
-  // each 4px gap, in both axes (ADR 0104). That is 44.5px wide at 390px and 40px tall, and no two
+  // each 4px gap, in both axes (ADR 0110). That is 44.5px wide at 390px and 40px tall, and no two
   // reaches overlap, so a tap in a gap never lands on the other row's key. elementFromPoint proves
   // the reach is not clipped and not doubled.
   const hit = await page.evaluate(() => {

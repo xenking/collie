@@ -29,7 +29,7 @@ function runtime(opts: {
         return { panes: [{ paneId: "p1", sleeping: opts.freshSleeping }], spaces: [], tabs: [] } as never;
       },
       refresh: async () => undefined,
-      sendKeys: async (_pane: string, k: readonly string[]) => {
+      writeKeys: async (_pane: string, k: readonly string[]) => {
         keys.push([...k]);
         return { ok: true, value: undefined } as never;
       },

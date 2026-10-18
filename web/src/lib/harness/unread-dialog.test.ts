@@ -59,8 +59,8 @@ describe("the cancel key each adapter declares", () => {
 
 describe("a real unread modal gets the card", () => {
   // One capture per DECLARING adapter whose own grammars all decline it while `composerReady`
-  // answers a definite false. agy/antigravity have no such capture in the corpus — every AGY dialog
-  // fixture is one its prompt-select grammar reads — so they are covered by a hand-built screen.
+  // answers a definite false. agy/antigravity are covered by a hand-built screen here; their one real
+  // capture of that kind is in CARD_FIXTURES below.
   it.each([
     ["claude", "claude-lab--menu-status-screen--w82.txt", "Escape"],
     ["codex", "codex--ask-notes-focused.txt", "Escape"],
@@ -215,9 +215,6 @@ const CARD_FIXTURES = {
       "claude-lab--agents-screen--w82.txt",
       // corpus: `/status` screen, `Esc to cancel` footer — the M34 reference capture
       "claude-lab--menu-status-screen--w82.txt",
-      // README: a multiSelect with the pointer on its "Type something" field. Declined on purpose,
-      // since every toggle digit would be typed into the field, so the card is the honest answer.
-      "claude--v2283-multiselect-type-something-focused.txt",
       // corpus: `/tasks` panel, `Esc to close` footer; raw only at 40 columns, where its
       // footer wraps and the menu grammar declines. The w82 capture lifts `menu`, so no card.
       "claude-lab--tasks-panel--w40.txt",
@@ -238,7 +235,13 @@ const CARD_FIXTURES = {
   },
   codex: {
     // README: notes composer focused inside the ask card — a real dialog
-    modals: ["codex--ask-notes-focused.txt"],
+    modals: [
+      "codex--ask-notes-focused.txt",
+      // Codex 0.162.1 pickers: no grammar reads them yet, so the unread card covers them. The
+      // /resume list is read (session-picker.ts) and lifts as a menu, so it is not here.
+      "codex--v0162-picker-model.txt",
+      "codex--v0162-picker-permissions.txt",
+    ],
     notModals: [],
   },
   grok: {
@@ -258,23 +261,29 @@ const CARD_FIXTURES = {
     ],
     notModals: [],
   },
-  // No AGY capture in the corpus lands raw-only with no input box: every AGY dialog fixture is one
-  // its own prompt-select grammar reads. An entry appearing here is news either way.
-  agy: { modals: [], notModals: [] },
-  antigravity: { modals: [], notModals: [] },
+  // README: the `/resume` Conversations picker after a search that matched nothing, a real dialog
+  // with no row to select, so the menu grammar declines it and Escape is the way out, and a checkbox
+  // question, which no recipe here ticks. Every other AGY dialog fixture is one its grammars read.
+  // agy--working.txt is a mid-turn screen (M56 spec 14 review restored the first capture): its footer
+  // `esc to cancel` is also the key hint of an agy dialog, so the card shows on a busy pane and offers
+  // Escape over it. A known false positive of the agy grammar, left for its own fix.
+  agy: { modals: ["agy--ask-multi.txt", "agy--resume-picker-nomatch.txt"], notModals: ["agy--working.txt"] },
+  antigravity: { modals: ["agy--ask-multi.txt", "agy--resume-picker-nomatch.txt"], notModals: ["agy--working.txt"] },
   // Every opencode picker: composerReady refuses it (the picker shape) and no grammar reads it, so
   // Escape, which closes a picker (probed on 1.18.32), is its way out. The permission steps and every
   // question dialog the grammars lift (single select, multi select, a many-question call, the Confirm
   // tab: question.ts and question-tabs.ts, issue 329) lift their buttons and get no card. What stays
   // raw is a real modal with `esc dismiss` in its footer, so it gets the card (ADR 0053): a
   // multi-select whose free-text input is open (a digit would be typed as text) and a list too long
-  // for a digit (fourteen options).
+  // for a digit (fourteen options). The Update Available confirm dialog is a modal too: Confirm is the
+  // highlighted button, so the composer is refused, and Escape dismisses it.
   opencode: {
     modals: [
       "oc--agents-picker.txt",
       "oc--command-palette.txt",
       "oc--question--multi--free-text.txt",
       "oc--question--tall14.txt",
+      "oc--update-available.txt",
     ],
     notModals: [],
   },
@@ -299,6 +308,9 @@ const CARD_FIXTURES = {
       "omp--v18-4-ask-multi.txt",
       "omp--v18-4-menu-model.txt",
       "omp--v18-4-menu-settings.txt",
+      // omp 18.6.1's Models picker and settings screen (lab, 2026-10-17).
+      "omp--v18-6-model-selector-empty--w120.txt",
+      "omp--v18-6-settings-screen--w120.txt",
       "omp--v18-4-resume-nomatch.txt",
       "omp--v18-4-switch-nerd.txt",
       "omp--v18-4-switch-nomatch.txt",

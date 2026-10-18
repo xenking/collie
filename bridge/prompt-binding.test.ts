@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  composerBelowShadow,
   DEFAULT_PROMPT_TAIL_LINES,
   normalizePromptRegion,
   verifyExpectedPrompt,
@@ -14,6 +15,12 @@ import {
   styledRegionLines,
 } from "../web/src/lib/styled-region.ts";
 import { cropRawColumns, type ColumnRange } from "../web/src/lib/column-range.ts";
+import { parseAnsi } from "../web/src/lib/ansi.ts";
+import { splitLines } from "../web/src/lib/blocks.ts";
+import { findInputFrame } from "../web/src/lib/surface/frame.ts";
+import { requireProfile } from "../web/src/lib/surface/profile.ts";
+import { detectQuestion as detectMuseQuestion } from "../web/src/lib/harness/muse/question.ts";
+import { detectCheckbox as detectMuseCheckbox } from "../web/src/lib/harness/muse/checkbox.ts";
 
 describe("normalizePromptRegion", () => {
   test("strips SGR sequences and normalizes CRLF and CR line endings", () => {
@@ -188,8 +195,12 @@ const REGIONS = JSON.parse(
 ) as BindingRegion[];
 
 /** Fixtures that show ONE dialog and so legitimately share a region: the `-named-` captures of Claude
- *  Code 2.1.296 beside their unnamed twins, and the wizard review step at both widths. */
+ *  Code 2.1.296 beside their unnamed twins, the wizard review step at both widths, and the `/effort`
+ *  slider on `high` at 120 columns captured twice. That last pair differed only in the label spliced
+ *  into the `▔` edge, which the menu's region leaves out since 1.22.5 (Claude puts timed notices
+ *  there). */
 const SAME_DIALOG: string[][] = [
+  ["claude--menu-effort-slider--w120.txt", "claude--v2283-slash-effort.txt"],
   ["claude-lab--ask-multi-named-v2296--w82.txt", "claude-lab--ask-multi-v2296--w82.txt"],
   ["claude-lab--ask-multi-named-v2296--w40.txt", "claude-lab--ask-multi-v2296--w40.txt"],
   ["claude-lab--ask-single-named-v2296--w40.txt", "claude-lab--ask-single-v2296--w40.txt"],
@@ -253,9 +264,10 @@ describe("client/bridge binding contract", () => {
         // `/rename` and an unnamed one draw the same dialog (Claude Code 2.1.296 adds a closing
         // rule under it in the named one), and the wizard's review step reads the same at 40 and 82
         // columns. The exemption is a NAMED list, not a comparison of region text, and a group is
-        // only legitimate while its members really hold one region.
+        // only legitimate while its members really hold one region, as the bridge reads a region:
+        // normalized, so a capture with trailing spaces on its blank rows is still the same one.
         if (SAME_DIALOG.some((group) => group.includes(a.fixture) && group.includes(b.fixture))) {
-          expect(b.region, `${a.fixture} and ${b.fixture} are listed as one dialog`).toBe(a.region);
+          expect(normalizePromptRegion(b.region), `${a.fixture} and ${b.fixture} are listed as one dialog`).toEqual(normalizePromptRegion(a.region));
           sameDialogPairs++;
           continue;
         }
@@ -316,6 +328,83 @@ describe("a task checklist under the region", () => {
       reason: "not_in_tail",
     });
   });
+});
+
+// M56 spec 03, SHADOW MODE. The idea: a dialog replaces the composer while it is up, so an input box
+// drawn UNDER the matched region would mean the dialog has closed. The premise is false for Muse, which
+// draws a live question above its own Claude-shaped box. So the frame module's answer is recorded in
+// the audit line (`composerBelowShadow`) and never refuses: `verifyPromptBinding` does not look at it.
+describe("an input box under the region (shadow only)", () => {
+  const FIXTURE = "claude--permission-bash.txt";
+  const { region } = REGIONS.find((r) => r.fixture === FIXTURE)!;
+  const RULE = "─".repeat(40);
+
+  test("the live dialog binds and the shadow says nothing", () => {
+    const raw = readFileSync(join(FIXTURE_DIR, FIXTURE), "utf8");
+    expect(verifyPromptBinding(raw, region)).toEqual({ ok: true });
+    expect(composerBelowShadow(raw, region)).toBeUndefined();
+  });
+
+  test("the same region with the composer back under it binds, and the shadow records it", () => {
+    const fresh = [region, "", RULE, "❯\u00a0", RULE, "  ? for shortcuts"].join("\n");
+    expect(verifyPromptBinding(fresh, region)).toEqual({ ok: true });
+    expect(verifyExpectedPrompt(fresh, region)).toEqual({ ok: true });
+    expect(composerBelowShadow(fresh, region)).toBe("composer_below");
+  });
+
+  test("a draft in that box changes nothing", () => {
+    const fresh = [region, RULE, "❯ yes please", RULE].join("\n");
+    expect(verifyPromptBinding(fresh, region)).toEqual({ ok: true });
+    expect(composerBelowShadow(fresh, region)).toBe("composer_below");
+  });
+
+  test("an echoed box ABOVE the live region is not the composer", () => {
+    const fresh = [RULE, "❯ an old prompt", RULE, region].join("\n");
+    expect(composerBelowShadow(fresh, region)).toBeUndefined();
+  });
+
+  test("a half box under the region (no bottom edge) is no frame", () => {
+    const fresh = [region, RULE, "❯ "].join("\n");
+    expect(composerBelowShadow(fresh, region)).toBeUndefined();
+  });
+
+  test("a region the text check refuses gives no shadow", () => {
+    const fresh = [RULE, "❯ ", RULE].join("\n");
+    expect(verifyPromptBinding(fresh, region).ok).toBe(false);
+    expect(composerBelowShadow(fresh, region)).toBeUndefined();
+  });
+});
+
+// The case that kept composer_below out of the verdict: every live Muse question draws Claude's own
+// input box under the question, and a tap on it must bind.
+describe("a live Muse question binds with the input box under it", () => {
+  const MUSE_ASKS = [
+    "muse--ask-color.txt",
+    "muse--ask-color-moved.txt",
+    "muse--ask-season.txt",
+    "muse--ask-multi-q1.txt",
+    "muse--ask-multi-q2.txt",
+    "muse--ask-multi-review.txt",
+    "muse--ask-drinks.txt",
+    "muse--ask-toppings.txt",
+    "muse--ask-toppings-147.txt",
+    "muse--ask-toppings-147-moved.txt",
+    "muse--ask-toppings-checked.txt",
+    "muse--ask-toppings-review.txt",
+  ];
+
+  for (const fixture of MUSE_ASKS) {
+    test(fixture, () => {
+      const raw = readFileSync(join(FIXTURE_DIR, fixture), "utf8");
+      const lines = splitLines(parseAnsi(raw));
+      const region = detectMuseQuestion(lines)?.signature ?? detectMuseCheckbox(lines)?.regionSignature;
+      expect(region).toBeDefined();
+      expect(verifyPromptBinding(raw, region!)).toEqual({ ok: true });
+      expect(verifyExpectedPrompt(raw, region!)).toEqual({ ok: true });
+      // The shadow sees the box and says so; that is exactly why it is not a refusal.
+      expect(composerBelowShadow(raw, region!)).toBe("composer_below");
+    });
+  }
 });
 
 // ADR 0080 point 7. The text check strips every SGR escape, so a pointer drawn only as a background
@@ -599,4 +688,102 @@ describe("hostile pane content", () => {
       expect(elapsed).toBeLessThan(BOUND_MS);
     });
   }
+});
+
+// The card of Claude Code's notice above a live box (ADR 0109) binds from the notice's head down
+// through the box's bottom edge, so the bridge's own read refuses a tap once the box holds a draft: a
+// digit typed then would join the draft (review F4). The status rows under the box stay inside the
+// tail window with up to five of them (review F5).
+describe("a notice card above a live box", () => {
+  const NOTICE = "claude--v2302-heads-up-above-box--w142.txt";
+  const region = REGIONS.find((row) => row.fixture === NOTICE)!.region;
+  const raw = readFileSync(join(FIXTURE_DIR, NOTICE), "utf8");
+  const statusRow = raw.split(/\r?\n/u).at(-2)!;
+
+  test("binds on the empty box, with one and with three extra status rows under it", () => {
+    expect(verifyPromptBinding(raw, region)).toEqual({ ok: true });
+    for (const extra of [1, 3]) {
+      const taller = [raw, ...Array.from({ length: extra }, () => statusRow)].join("\n");
+      expect(verifyPromptBinding(taller, region), `${String(extra)} extra`).toEqual({ ok: true });
+    }
+  });
+
+  test("refuses the tap once a draft stands in the box", () => {
+    const drafted = raw.replace("❯ ", "❯ half a thought");
+    expect(drafted).not.toBe(raw);
+    expect(verifyPromptBinding(drafted, region).ok).toBe(false);
+  });
+
+  test("refuses the region with six plain status rows more under the box", () => {
+    const taller = [raw, ...Array.from({ length: 6 }, () => statusRow)].join("\n");
+    expect(verifyPromptBinding(taller, region)).toEqual({ ok: false, reason: "not_in_tail" });
+  });
+
+  // Claude Code's agents panel, listing three background agents under the statusline, is the footer
+  // run the input frame names: it is not counted against the tail.
+  test("binds with the agents panel under the box", () => {
+    const panel = readFileSync(join(FIXTURE_DIR, "claude--v2302-notice-over-agents-panel--w69.txt"), "utf8");
+    const rows = panel.split(/\r?\n/u);
+    expect(rows[59]).toContain("You should know · ");
+    expect(rows[66]).toMatch(/^\S*─+/u);
+    expect(verifyPromptBinding(panel, rows.slice(59, 67).join("\n"))).toEqual({ ok: true });
+  });
+
+  // A Claude frame left on screen with plain output under it, a blank row between (a shell under a
+  // Claude that has exited): the frame walk takes those rows for a generic footer, which is no named
+  // run, so nothing is cut and a stale digit tap is refused.
+  test("refuses the region with a blank row and four to eight plain output rows under the box", () => {
+    for (let count = 4; count <= 8; count++) {
+      const output = Array.from({ length: count }, (_, i) => `notes-${String(i)}.txt`);
+      expect(verifyPromptBinding([raw, "", ...output].join("\n"), region), `${String(count)} rows`).toEqual({
+        ok: false,
+        reason: "not_in_tail",
+      });
+    }
+  });
+});
+
+// The read is cut only at the footer run a profile names under its input box (ADR 0109): Claude
+// Code's agents panel, whose rows claude.json lists (`idle.volatile.below.footerRows`). The cut may
+// turn a `not_in_tail` refusal into a binding, and changes no other verdict.
+describe("the cut at the agents panel", () => {
+  const PANEL = "claude--v2302-notice-over-agents-panel--w69.txt";
+  const rows = readFileSync(join(FIXTURE_DIR, PANEL), "utf8").split(/\r?\n/u);
+  const region = rows.slice(59, 67).join("\n");
+  const namedRows = (read: string): number =>
+    findInputFrame(splitLines(parseAnsi(read)), requireProfile("claude").idle)?.volatile.named.length ?? 0;
+  /** The capture with `extra` more status rows over the blank row that sets the panel apart. */
+  const withStatusRows = (extra: number): string =>
+    [...rows.slice(0, 69), ...Array.from({ length: extra }, () => rows[67]!), ...rows.slice(69)].join("\n");
+
+  test("counts the rows between the box and the panel: five bind, six or more refuse", () => {
+    expect(verifyPromptBinding(withStatusRows(3), region)).toEqual({ ok: true });
+    for (const extra of [4, 6]) {
+      const read = withStatusRows(extra);
+      expect(namedRows(read), `${String(extra)} extra: the panel is named, so the cut runs`).toBe(4);
+      expect(verifyPromptBinding(read, region), `${String(extra)} extra`).toEqual({ ok: false, reason: "not_in_tail" });
+    }
+  });
+
+  // A region inside the run: the read cut above the run no longer holds it (`not_found`), and the
+  // uncut refusal stands, as it did for agy--slash-exact.txt's region inside its slash popup when a
+  // generic footer was cut.
+  test("keeps the uncut refusal when the cut leaves the region out", () => {
+    const agent = rows[71]!;
+    const read = [...rows.slice(0, 74), agent, agent, agent].join("\n");
+    expect(namedRows(read)).toBe(7);
+    expect(verifyPromptBinding(read, rows[70]!)).toEqual({ ok: false, reason: "not_in_tail" });
+  });
+
+  // agy.json names no footer rows, so its frame names no run and nothing is cut: its slash popup's
+  // region binds where it stands, and output pushing it out of the tail refuses it.
+  test("cuts nothing on agy--slash-exact.txt", () => {
+    const AGY = "agy--slash-exact.txt";
+    const raw = readFileSync(join(FIXTURE_DIR, AGY), "utf8");
+    const { region: popup } = REGIONS.find((row) => row.fixture === AGY)!;
+    expect(findInputFrame(splitLines(parseAnsi(raw)), requireProfile("agy").idle)?.volatile.named).toEqual([]);
+    expect(verifyPromptBinding(raw, popup)).toEqual({ ok: true });
+    const pushed = [raw.trimEnd(), ...Array.from({ length: 6 }, (_, i) => `output row ${String(i)}`)].join("\n");
+    expect(verifyPromptBinding(pushed, popup)).toEqual({ ok: false, reason: "not_in_tail" });
+  });
 });

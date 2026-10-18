@@ -1,11 +1,12 @@
 import type { MuxAdapter } from "./mux/types.ts";
+import { gateFor } from "./surface/key-gate.ts";
 import type { StateEngine } from "./state-engine.ts";
 import type { AgentView } from "./types.ts";
 
 /** What the realtime-voice handshake needs from a pane's runtime. */
 export interface VoicePaneRuntime {
   readonly engine: Pick<StateEngine, "current" | "pokeNow">;
-  readonly herdr: Pick<MuxAdapter, "snapshot" | "refresh" | "sendKeys">;
+  readonly herdr: Pick<MuxAdapter, "snapshot" | "refresh" | "writeKeys">;
 }
 
 export type VoicePaneOutcome =
@@ -26,7 +27,7 @@ function findPane(rt: VoicePaneRuntime, paneId: string): AgentView | undefined {
  * Resolve the pane a voice socket will serve, waking a parked OMP pane first. `sessionFile` is the
  * OMP session path when the pane can speak replies, and null for STT-only (shells, other agents).
  *
- * The wake key is decided from a FRESH multiplexer listing, never from the engine's cached `sleeping`:
+ * The wake Enter is the operator's own tap (the key gate's `person_tap` door). It is decided from a FRESH multiplexer listing, never from the engine's cached `sleeping`:
  * a pane someone woke after the last poll would otherwise get an Enter in its live composer, which
  * submits a draft or accepts a completion.
  */
@@ -51,7 +52,7 @@ export async function prepareVoicePane(
     waking = fresh.sleeping === true;
   }
   if (waking) {
-    const sent = await rt.herdr.sendKeys(paneId, ["Enter"]);
+    const sent = await gateFor(rt.herdr).press(paneId, ["Enter"], "person_tap");
     if (!sent.ok) return { ok: false, detail: `voice wake failed: ${sent.detail}` };
     const deadline = now() + WAKE_DEADLINE_MS;
     while (now() < deadline) {
