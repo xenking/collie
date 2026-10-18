@@ -27,6 +27,7 @@ Running a crew? Update the lead first; members follow on their own. Details:
 
 - **Claude Code 2.1.302 is verified for the screen reader.** The harness lab walked its slash menu, read the Surface on 22 screens, made one probed send and one ask answer, and passed on 2026-10-17. The browser leg on the 1.22.6 release commit ran on 2.1.302 as well and passed all fifteen cases on the first tap. The journal reader stays verified on 2.1.296.
 - **Codex 0.163.0, omp 18.6.1 and OpenCode 1.19.3 are verified for the screen reader.** The harness lab ran each one through its slash walk, the Surface, one probed send and one ask answer, and all three passed on 2026-10-18. omp 18.10.4 and later stay provisional: their approval dialog adds a row for this session, and the card falls back to the raw view there. The journal readers stay on their earlier versions.
+- **A tall draft stacks the attach button over the send button.** At three lines or more, as when dictating a paragraph, the paperclip moves up over the primary action and the field takes the freed width; at one line or an empty box it goes back, and the default box stays the one row it was. Nothing remounts, so the caret and focus stay. See [ADR 0111](./.adr/0111-a-tall-draft-stacks-the-composer-buttons.md).
 
 ### Fixed
 

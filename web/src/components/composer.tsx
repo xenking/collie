@@ -8,6 +8,7 @@ import { applyDraftFontSize, fontStack, inputFocusZoomsPage } from "@/hooks/use-
 import type { DisplayPrefs, Hand } from "@/hooks/use-display-prefs";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
 import { useDirectTyping } from "@/hooks/use-direct-typing";
+import { useStackedActions } from "@/hooks/use-stacked-actions";
 import { useLocale } from "@/hooks/use-locale";
 import { t as translate, tn as translatePlural } from "@/lib/i18n";
 import { holdsMask } from "@/lib/masked-text";
@@ -677,6 +678,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     // falls back to shell) — a change there disarms with a notice.
     agentKey: agent ?? "shell",
   });
+  // A tall draft frees the room beside it: the attach and primary buttons stand in a column then
+  // (ADR 0057, amended 2026-10-19). Measured on the text the field shows, so a voice caption counts.
+  const buttonsRef = useRef<HTMLDivElement>(null);
+  const stacked = useStackedActions(inputRef, buttonsRef, direct.active ? direct.value : voicePreview ?? input);
 
   // ── VOICE (ADR 0029) ──────────────────────────────────────────────────────────────────────────
   //
@@ -2016,6 +2021,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             field upward to its cap, which is where a thumb already is. `p-1` is 4px, exactly the
             reach of `TOOLBAR_TAP_TARGET`, so an empty box is 36 + 8 = 44px inside its border.
 
+            A TALL DRAFT STACKS THE TWO BUTTONS (ADR 0057, amended 2026-10-19). Dictated text runs
+            to many lines and attach then stands over empty room, so at 3+ lines the two buttons
+            become a column, attach over the primary action, and the field takes the width back.
+            The empty box and one or two lines are exactly the row above (stacking by default would
+            make an empty box 76px, DESIGN.md §2). It is a class change on ONE always-rendered
+            group, so nothing remounts and the caret stays; `useStackedActions` holds the
+            hysteresis that keeps the freed width from rewrapping the text back into the row.
+
             THE FRAME IS HERE AND NOWHERE ELSE, AND THERE IS ONE. The border is unconditional and
             only its colour moves on focus, so the box never resizes under the caret (DESIGN.md §2),
             and `focus-within:ring-1` doubles it to a 2px line as a box-shadow, which costs no
@@ -2164,194 +2177,219 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             readOnly={voicePreview !== null}
             rows={1}
           />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
+          {/* THE BUTTON GROUP: attach and the primary action, always rendered as ONE element, so
+              stacking them is a class change and nothing remounts (the field above it is untouched
+              and keeps its caret; DESIGN.md §2). Resting, it is the row it always was: attach, then
+              the primary action, `gap-1`. When the draft is tall (3+ lines, `useStackedActions`) it is
+              a column, attach over the primary action, the primary action still at the bottom edge
+              where a thumb is, and the field keeps the width the second button gave back. The gap
+              is `gap-1` in both layouts, as it always was between these two: the column is then
+              36 + 4 + 36 = 76px tall, or 84 with the 44px voice control, never taller than the
+              three-line field that stacked it (84), so stacking does not grow the box. The two
+              4px hit-area reaches (TOOLBAR_TAP_TARGET) overlap in that gap exactly as they do in
+              the row, and the later control, the primary action, wins the overlap.
+              Mirrored (`hand="left"`) the row reverses with the box, so Send keeps the outer edge;
+              a column has no left and right, so the reversal is dropped there. The picker is
+              absolutely positioned and this group is NOT `relative`, so it still anchors to the box
+              and opens above the whole shape in either layout. */}
+          <div
+            ref={buttonsRef}
+            data-slot="composer-buttons"
+            data-stacked={stacked ? "true" : "false"}
             className={cn(
-              TOOLBAR_TAP_TARGET,
-              "size-9 rounded-full text-muted-foreground",
-              // The press echo, in the tone this app already uses for "your press landed" —
-              // `variant="default"`, which is what a tapped quick reply and a busy dialog option
-              // both flip to. It was `bg-accent` first, and that was a token chosen by name
-              // rather than by looking: in the dark theme `accent` resolves to oklch(0.269),
-              // which is the SAME value as `muted` and sits 0.06 of lightness above the card it
-              // is drawn on. Measured through a real tap, it faded in over 180ms, held for 40,
-              // and faded out — a flash nobody could see on a phone. `primary` is oklch(0.922).
-              //
-              // `duration-0` on the way IN, and the base duration on the way out. A press has to
-              // answer immediately or it is not answering the press; the release is the part that
-              // wants easing. Removing both classes in one commit is what lets the exit animate.
-              // Lit for the press, and then for as long as the menu it opened is standing: the
-              // menu is anchored above rather than over the button precisely so this can be seen,
-              // and a trigger that went dark under its own open menu would waste that.
-              (pressed || picking) && "scale-95 bg-primary text-primary-foreground duration-0",
+              "flex shrink-0 gap-1 self-end",
+              stacked ? "flex-col items-center" : cn("items-end", hand === "left" && "flex-row-reverse"),
             )}
-            disabled={uploading || locked || direct.active}
-            onPointerDown={(e) => e.preventDefault()}
-            onClick={() => {
-              echoAttachPress();
-              if (asksWhich) setPicking(true);
-              else photoRef.current?.click();
-            }}
-            aria-label={translate("composer.attach.aria")}
-            aria-haspopup="dialog"
-            aria-expanded={asksWhich ? picking : undefined}
           >
-            {uploading ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Paperclip className="size-4" />
-            )}
-          </Button>
-          {/* The picker, anchored to the BOX so it opens above the whole shape rather than over
-              the button that opened it (ui/anchored-menu.tsx carries the measurement, and the
-              box's own `relative` is the anchor). It is not anchored to the attach button itself
-              even now that attach stands near the box's own right edge: the panel is `right-0
-              min-w-44` against its anchor, and the gap between attach and that edge is NOT fixed —
-              the primary action beside it is a size-9 icon square most of the time but widens into
-              a text button ("Answer the dialog" / "Really send?") when its slot holds a word, which
-              would slide the menu sideways if it followed the button instead of the box. Anchoring
-              to the box keeps the picker's own right edge pinned to the box's right edge no matter
-              which shape the primary action is wearing.
-              Two rows, no confirm, each one opens a native picker, which is its own decision
-              point. The menu closes BEFORE the click so it is not left standing behind the
-              system UI, and the click still counts as the user gesture the browser requires
-              because both happen in this one handler. */}
-          <AnchoredMenu
-            open={picking}
-            onClose={() => setPicking(false)}
-            label={translate("composer.attach.title")}
-            // Attach stands near the box's LEFT edge under `hand="left"`; the panel follows it.
-            className={hand === "left" ? "right-auto left-0" : undefined}
-          >
-            <ActionRow
-              icon={<Image aria-hidden="true" className="size-4 shrink-0" />}
-              label={translate("composer.attach.photos")}
-              onClick={() => {
-                setPicking(false);
-                photoRef.current?.click();
-              }}
-            />
-            <ActionRow
-              icon={<FileText aria-hidden="true" className="size-4 shrink-0" />}
-              label={translate("composer.attach.files")}
-              onClick={() => {
-                setPicking(false);
-                fileRef.current?.click();
-              }}
-            />
-          </AnchoredMenu>
-          {customVoiceVisible ? (
-            <VoiceInput
-              paneId={paneId}
-              session={scope?.session}
-              showControl
-              disabled={locked || slot === "answer" || sending || uploading}
-              recordingMode={voiceRecordingMode}
-              replySpeechSupported={replySpeechSupported}
-              onTranscript={acceptVoiceTranscript}
-              onVoiceStateChange={(next) =>
-                setVoicePreview(next?.caption?.role === "user" ? next.caption.text : null)
-              }
-              onError={(message) => setStatus(message, "error")}
-            />
-          ) : askOwnsKeys && hasDraft ? (
-            // A modal ask owns the agent's keyboard, so the refusal is shown HERE, in the Send slot,
-            // and never in the header: on a phone that line is scrolled off or under
-            // the keyboard when Send is tapped (field case 2026-10-15, ADR 0009). The word replaces
-            // Send only once there is a draft to refuse; an empty box keeps its microphone. The tap is a way TO the card (scroll, focus its first
-            // button), never a send. Same shape as the two confirm words below but a muted variant,
-            // because this is a state to read, not a deliberate override to arm.
             <Button
-              variant="secondary"
-              className={cn(TOOLBAR_TAP_TARGET, "h-9 shrink-0 rounded-md px-3 text-sm font-semibold")}
-              onClick={() => onAnswerDialog?.()}
-              aria-label={translate("composer.send.dialogFirst")}
-            >
-              {translate("composer.send.dialogFirst")}
-            </Button>
-          ) : !direct.active && confirmingSend ? (
-            <Button
-              variant="destructive"
-              className={cn(TOOLBAR_TAP_TARGET, "h-9 shrink-0 rounded-md px-3 text-sm font-semibold")}
-              onClick={onSendClick}
-              disabled={locked || offline || !hasDraft || sending}
-              title={offline ? translate("composer.send.reconnect") : undefined}
-              aria-label={offline ? translate("composer.send.reconnect") : translate("composer.send.reallySend")}
-            >
-              {translate("composer.send.reallySend")}
-            </Button>
-          ) : micIsPrimary ? (
-            // THE MICROPHONE IS THE PRIMARY ACTION WHILE THE BOX IS EMPTY, and becomes Send the
-            // moment there is anything to send. It used to be a second, permanent control tucked
-            // inside the field beside the attach button — deliberately, to avoid a split primary
-            // action. The v1 beta said that reads the workflow wrong: you either dictate a message
-            // or you type one, and nobody dictates into the middle of a draft. So the field paid
-            // 36px of its width, on every render, for a control that is only ever wanted on an empty
-            // box. An empty box has no Send either (`send` refuses a blank value), so this branch
-            // takes over a button that could do nothing anyway — it replaces no capability.
-            <Button
-              data-slot="composer-primary"
+              type="button"
+              variant="ghost"
               size="icon"
-              variant={recorder.busy ? "destructive" : "default"}
-              className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 rounded-full")}
-              disabled={!micAvailable || locked || offline || sending || recorder.phase === "transcribing"}
-              aria-pressed={recorder.busy}
-              // The bridge's own words when it cannot serve — the operator's next move is on the
-              // host, so the button says what is wrong rather than just refusing.
-              aria-label={
-                !micAvailable
-                  ? (stt?.reason ?? translate("composer.mic.unavailable"))
-                  : recorder.phase === "recording"
-                    ? translate("composer.mic.stopAria")
-                    : translate("composer.mic.recordAria")
-              }
-              title={micAvailable ? undefined : stt?.reason}
+              className={cn(
+                TOOLBAR_TAP_TARGET,
+                "size-9 rounded-full text-muted-foreground",
+                // The press echo, in the tone this app already uses for "your press landed" —
+                // `variant="default"`, which is what a tapped quick reply and a busy dialog option
+                // both flip to. It was `bg-accent` first, and that was a token chosen by name
+                // rather than by looking: in the dark theme `accent` resolves to oklch(0.269),
+                // which is the SAME value as `muted` and sits 0.06 of lightness above the card it
+                // is drawn on. Measured through a real tap, it faded in over 180ms, held for 40,
+                // and faded out — a flash nobody could see on a phone. `primary` is oklch(0.922).
+                //
+                // `duration-0` on the way IN, and the base duration on the way out. A press has to
+                // answer immediately or it is not answering the press; the release is the part that
+                // wants easing. Removing both classes in one commit is what lets the exit animate.
+                // Lit for the press, and then for as long as the menu it opened is standing: the
+                // menu is anchored above rather than over the button precisely so this can be seen,
+                // and a trigger that went dark under its own open menu would waste that.
+                (pressed || picking) && "scale-95 bg-primary text-primary-foreground duration-0",
+              )}
+              disabled={uploading || locked || direct.active}
               onPointerDown={(e) => e.preventDefault()}
-              onClick={(e) => {
-                // `detail` is 0 for a click the keyboard made: the takeover then shows its focus mark.
-                openedByKeyboard.current = e.detail === 0;
-                if (recorder.phase === "recording") recorder.stopAndSend();
-                else recorder.start();
+              onClick={() => {
+                echoAttachPress();
+                if (asksWhich) setPicking(true);
+                else photoRef.current?.click();
               }}
+              aria-label={translate("composer.attach.aria")}
+              aria-haspopup="dialog"
+              aria-expanded={asksWhich ? picking : undefined}
             >
-              {recorder.phase === "transcribing" ? (
+              {uploading ? (
                 <Loader2 className="size-4 animate-spin" />
-              ) : recorder.phase === "recording" ? (
-                <Square className="size-4 fill-current" />
               ) : (
-                <Mic className="size-4" />
+                <Paperclip className="size-4" />
               )}
             </Button>
-          ) : (
-            <Button
-              data-slot="composer-primary"
-              size="icon"
-              className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 rounded-full")}
-              onClick={direct.active ? () => direct.deactivate() : onSendClick}
-              disabled={locked || sending || (offline && !direct.active)}
-              title={offline && !direct.active ? translate("composer.send.reconnect") : undefined}
-              aria-label={
-                direct.active
-                  ? translate("composer.send.stopTypingAria")
-                  : offline
-                    ? translate("composer.send.reconnect")
-                    : translate("composer.send.sendAria")
-              }
-              aria-pressed={direct.active}
+            {/* The picker, anchored to the BOX so it opens above the whole shape rather than over
+                the button that opened it (ui/anchored-menu.tsx carries the measurement, and the
+                box's own `relative` is the anchor). It is not anchored to the attach button itself
+                even now that attach stands near the box's own right edge: the panel is `right-0
+                min-w-44` against its anchor, and the gap between attach and that edge is NOT fixed —
+                the primary action beside it is a size-9 icon square most of the time but widens into
+                a text button ("Answer the dialog" / "Really send?") when its slot holds a word, which
+                would slide the menu sideways if it followed the button instead of the box. Anchoring
+                to the box keeps the picker's own right edge pinned to the box's right edge no matter
+                which shape the primary action is wearing.
+                Two rows, no confirm, each one opens a native picker, which is its own decision
+                point. The menu closes BEFORE the click so it is not left standing behind the
+                system UI, and the click still counts as the user gesture the browser requires
+                because both happen in this one handler. */}
+            <AnchoredMenu
+              open={picking}
+              onClose={() => setPicking(false)}
+              label={translate("composer.attach.title")}
+              // Attach stands near the box's LEFT edge under `hand="left"`; the panel follows it.
+              className={hand === "left" ? "right-auto left-0" : undefined}
             >
-              {direct.active ? (
-                <Keyboard className="size-4" />
-              ) : sending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : justSent ? (
-                <Check className="size-4" />
-              ) : (
-                <Send className="size-4" />
-              )}
-            </Button>
-          )}
+              <ActionRow
+                icon={<Image aria-hidden="true" className="size-4 shrink-0" />}
+                label={translate("composer.attach.photos")}
+                onClick={() => {
+                  setPicking(false);
+                  photoRef.current?.click();
+                }}
+              />
+              <ActionRow
+                icon={<FileText aria-hidden="true" className="size-4 shrink-0" />}
+                label={translate("composer.attach.files")}
+                onClick={() => {
+                  setPicking(false);
+                  fileRef.current?.click();
+                }}
+              />
+            </AnchoredMenu>
+            {customVoiceVisible ? (
+              <VoiceInput
+                paneId={paneId}
+                session={scope?.session}
+                showControl
+                disabled={locked || slot === "answer" || sending || uploading}
+                recordingMode={voiceRecordingMode}
+                replySpeechSupported={replySpeechSupported}
+                onTranscript={acceptVoiceTranscript}
+                onVoiceStateChange={(next) =>
+                  setVoicePreview(next?.caption?.role === "user" ? next.caption.text : null)
+                }
+                onError={(message) => setStatus(message, "error")}
+              />
+            ) : askOwnsKeys && hasDraft ? (
+              // A modal ask owns the agent's keyboard, so the refusal is shown HERE, in the Send slot,
+              // and never in the header: on a phone that line is scrolled off or under
+              // the keyboard when Send is tapped (field case 2026-10-15, ADR 0009). The word replaces
+              // Send only once there is a draft to refuse; an empty box keeps its microphone. The tap is a way TO the card (scroll, focus its first
+              // button), never a send. Same shape as the two confirm words below but a muted variant,
+              // because this is a state to read, not a deliberate override to arm.
+              <Button
+                variant="secondary"
+                className={cn(TOOLBAR_TAP_TARGET, "h-9 shrink-0 rounded-md px-3 text-sm font-semibold")}
+                onClick={() => onAnswerDialog?.()}
+                aria-label={translate("composer.send.dialogFirst")}
+              >
+                {translate("composer.send.dialogFirst")}
+              </Button>
+            ) : !direct.active && confirmingSend ? (
+              <Button
+                variant="destructive"
+                className={cn(TOOLBAR_TAP_TARGET, "h-9 shrink-0 rounded-md px-3 text-sm font-semibold")}
+                onClick={onSendClick}
+                disabled={locked || offline || !hasDraft || sending}
+                title={offline ? translate("composer.send.reconnect") : undefined}
+                aria-label={offline ? translate("composer.send.reconnect") : translate("composer.send.reallySend")}
+              >
+                {translate("composer.send.reallySend")}
+              </Button>
+            ) : micIsPrimary ? (
+              // THE MICROPHONE IS THE PRIMARY ACTION WHILE THE BOX IS EMPTY, and becomes Send the
+              // moment there is anything to send. It used to be a second, permanent control tucked
+              // inside the field beside the attach button — deliberately, to avoid a split primary
+              // action. The v1 beta said that reads the workflow wrong: you either dictate a message
+              // or you type one, and nobody dictates into the middle of a draft. So the field paid
+              // 36px of its width, on every render, for a control that is only ever wanted on an empty
+              // box. An empty box has no Send either (`send` refuses a blank value), so this branch
+              // takes over a button that could do nothing anyway — it replaces no capability.
+              <Button
+                data-slot="composer-primary"
+                size="icon"
+                variant={recorder.busy ? "destructive" : "default"}
+                className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 rounded-full")}
+                disabled={!micAvailable || locked || offline || sending || recorder.phase === "transcribing"}
+                aria-pressed={recorder.busy}
+                // The bridge's own words when it cannot serve — the operator's next move is on the
+                // host, so the button says what is wrong rather than just refusing.
+                aria-label={
+                  !micAvailable
+                    ? (stt?.reason ?? translate("composer.mic.unavailable"))
+                    : recorder.phase === "recording"
+                      ? translate("composer.mic.stopAria")
+                      : translate("composer.mic.recordAria")
+                }
+                title={micAvailable ? undefined : stt?.reason}
+                onPointerDown={(e) => e.preventDefault()}
+                onClick={(e) => {
+                  // `detail` is 0 for a click the keyboard made: the takeover then shows its focus mark.
+                  openedByKeyboard.current = e.detail === 0;
+                  if (recorder.phase === "recording") recorder.stopAndSend();
+                  else recorder.start();
+                }}
+              >
+                {recorder.phase === "transcribing" ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : recorder.phase === "recording" ? (
+                  <Square className="size-4 fill-current" />
+                ) : (
+                  <Mic className="size-4" />
+                )}
+              </Button>
+            ) : (
+              <Button
+                data-slot="composer-primary"
+                size="icon"
+                className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 rounded-full")}
+                onClick={direct.active ? () => direct.deactivate() : onSendClick}
+                disabled={locked || sending || (offline && !direct.active)}
+                title={offline && !direct.active ? translate("composer.send.reconnect") : undefined}
+                aria-label={
+                  direct.active
+                    ? translate("composer.send.stopTypingAria")
+                    : offline
+                      ? translate("composer.send.reconnect")
+                      : translate("composer.send.sendAria")
+                }
+                aria-pressed={direct.active}
+              >
+                {direct.active ? (
+                  <Keyboard className="size-4" />
+                ) : sending ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : justSent ? (
+                  <Check className="size-4" />
+                ) : (
+                  <Send className="size-4" />
+                )}
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 
