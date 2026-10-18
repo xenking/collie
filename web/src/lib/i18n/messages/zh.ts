@@ -1487,8 +1487,6 @@ export const zh: Dictionary = {
   // --- apiError (the bridge's refusals, keyed by the code on the wire) ---
   "apiError.unknown": "操作失败，请重试。",
   "apiError.reply.not_submitted": "消息已填入窗格但未提交。重新发送前请检查窗格状态。",
-  "reply.unconfirmed":
-    "已发送 Enter，但无法读取窗格以确认消息已提交。重新发送前请检查窗格状态。",
   "apiError.reply.send_failed": "消息发送失败：{reason}",
   "apiError.keys.send_failed": "按键发送失败：{reason}",
   "apiError.prompt_changed": "发送前屏幕内容已改变，请检查窗格。",

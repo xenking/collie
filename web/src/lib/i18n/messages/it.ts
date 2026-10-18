@@ -1366,7 +1366,6 @@ export const it: Dictionary = {
   "directTyping.status.backgrounded": "Digitazione nel terminale interrotta: l'app è passata in background.",
   "apiError.unknown": "Si è verificato un errore. Riprova.",
   "apiError.reply.not_submitted": "Il messaggio è stato digitato nel riquadro ma non inviato: controlla il riquadro prima di inviarlo di nuovo.",
-  "reply.unconfirmed": "Invio inviato, ma non è stato possibile leggere il riquadro per confermare l'invio: controlla il riquadro prima di inviarlo di nuovo.",
   "apiError.reply.send_failed": "Impossibile inviare il messaggio: {reason}",
   "apiError.keys.send_failed": "Impossibile inviare questi tasti: {reason}",
   "apiError.prompt_changed": "La schermata è cambiata prima dell'invio: controlla il riquadro.",

@@ -1366,7 +1366,6 @@ export const fr: Dictionary = {
   "directTyping.status.backgrounded": "Saisie dans le terminal interrompue : l'application est passée en arrière-plan.",
   "apiError.unknown": "Une erreur est survenue. Réessayez.",
   "apiError.reply.not_submitted": "Votre message a été saisi dans le volet mais non envoyé : vérifiez le volet avant de le renvoyer.",
-  "reply.unconfirmed": "Entrée a été envoyée, mais le volet n'a pas pu être lu pour confirmer l'envoi : vérifiez le volet avant de le renvoyer.",
   "apiError.reply.send_failed": "Le message n'a pas pu être envoyé : {reason}",
   "apiError.keys.send_failed": "Ces touches n'ont pas pu être envoyées : {reason}",
   "apiError.prompt_changed": "L'écran a changé avant l'envoi : vérifiez le volet.",

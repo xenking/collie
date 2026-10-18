@@ -1511,8 +1511,6 @@ export const es: Dictionary = {
   "apiError.unknown": "Error desconocido. Reintente más tarde.",
   "apiError.reply.not_submitted":
     "El mensaje se escribió en el panel pero no se envió. Revise el panel antes de reintentar.",
-  "reply.unconfirmed":
-    "Se envió Enter, pero no se pudo leer el panel para confirmar el envío. Revise el panel antes de reintentar.",
   "apiError.reply.send_failed": "Error al enviar el mensaje: {reason}",
   "apiError.keys.send_failed": "Error al enviar las pulsaciones de teclado: {reason}",
   "apiError.prompt_changed": "El estado del terminal cambió antes de enviar. Revise el panel.",

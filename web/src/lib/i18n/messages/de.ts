@@ -1513,8 +1513,6 @@ export const de: Dictionary = {
   "apiError.unknown": "Ein Fehler ist aufgetreten. Bitte erneut versuchen.",
   "apiError.reply.not_submitted":
     "Nachricht wurde in das Pane eingefügt, aber nicht gesendet. Bitte Pane vor erneutem Senden prüfen.",
-  "reply.unconfirmed":
-    "Enter wurde gesendet, aber das Pane ließ sich nicht lesen, um das Senden zu bestätigen. Bitte Pane vor erneutem Senden prüfen.",
   "apiError.reply.send_failed": "Nachricht konnte nicht gesendet werden: {reason}",
   "apiError.keys.send_failed": "Tasteneingaben konnten nicht gesendet werden: {reason}",
   "apiError.prompt_changed":

@@ -1366,7 +1366,6 @@ export const pt: Dictionary = {
   "directTyping.status.backgrounded": "Digitação no terminal interrompida: o app foi para segundo plano.",
   "apiError.unknown": "Ocorreu um erro. Tente novamente.",
   "apiError.reply.not_submitted": "Sua mensagem foi digitada no painel, mas não enviada: confira o painel antes de reenviar.",
-  "reply.unconfirmed": "O Enter foi enviado, mas não foi possível ler o painel para confirmar o envio: confira o painel antes de reenviar.",
   "apiError.reply.send_failed": "Não foi possível enviar a mensagem: {reason}",
   "apiError.keys.send_failed": "Não foi possível enviar essas teclas: {reason}",
   "apiError.prompt_changed": "A tela mudou antes do envio: confira o painel.",
