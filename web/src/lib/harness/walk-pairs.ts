@@ -52,6 +52,9 @@ export const WALK_PAIRS: readonly WalkPair[] = [
   ["grok", "grok--model-effort.txt", "grok--model-effort-moved.txt"],
   // omp tool approval, `unicode` preset (18.4.10) and `nerd` preset (18.1.17): Approve and Deny.
   ["omp", "omp--v18-4-approval-bash.txt", "omp--v18-4-approval-bash-moved.txt"],
+  // omp 18.11.3 under pi-o-my's runtime: three decision rows, Approve, Approve for the session, Deny.
+  ["omp", "omp--v18-11-3-approval-bash.txt", "omp--v18-11-3-approval-bash-moved.txt"],
+  ["omp", "omp--v18-11-3-ask-single.txt", "omp--v18-11-3-ask-single-moved.txt"],
   ["omp", "omp--v18-4-approval-write.txt", "omp--v18-4-approval-write-moved.txt"],
   ["omp", "omp--approval-write.txt", "omp--approval-write--deny.txt"],
   // omp Ask single-select, both keycap dialects, and the 18.8 dialog with option descriptions (#372).

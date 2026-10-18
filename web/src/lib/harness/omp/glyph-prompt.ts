@@ -95,6 +95,7 @@ export function isStatusRow(line: StyledLine): boolean {
  */
 const MAX_BELOW_STATUS_ROWS = 12;
 const DIALOG_BOTTOM = /^╰─+╯$/;
+const BARE_PROMPT = /^[❯›]$/;
 
 /**
  * The screen without the rows that patched omp draws under it: the widget rows under the status row
@@ -113,6 +114,11 @@ export function withoutStatusTail(lines: StyledLine[]): StyledLine[] {
       // Under a dialog's closing border the status row is chrome of the dialog's screen, not of a composer.
       let above = up - 1;
       while (above >= 0 && isBlank(lineText(lines[above]!))) above--;
+      // The patched omp draws its bare prompt row right under a dialog's border: `›` alone, then the status
+      // row. A composer has a blank row over its prompt, so a border that is only an old box does not match.
+      if (above === up - 1 && BARE_PROMPT.test(rstrip(lineText(lines[above]!))) && up >= 2 && DIALOG_BOTTOM.test(rstrip(lineText(lines[up - 2]!)))) {
+        return lines.slice(0, up - 1);
+      }
       if (above >= 0 && DIALOG_BOTTOM.test(rstrip(lineText(lines[above]!)))) return lines.slice(0, above + 1);
       return up === end ? lines : lines.slice(0, up + 1);
     }

@@ -98,6 +98,11 @@ const SWITCH_LIFTED = SWITCH_COHORT.filter((name) => !DECLINED_SWITCH.includes(n
 // wrapped and at both window edges, searches, over-context and truncated rows, role chips, and windows
 // of 16, 15 and 5 rows).
 const LIFTED = new Set([
+  "omp--v18-11-3-approval-bash.txt",
+  "omp--v18-11-3-approval-bash-moved.txt",
+  "omp--v18-11-3-approval-bash-deny.txt",
+  "omp--v18-11-3-ask-single.txt",
+  "omp--v18-11-3-ask-single-moved.txt",
   "omp--menu-resume-moved.txt",
   "omp--menu-resume.txt",
   "omp--v18-4-resume-all-projects.txt",
@@ -171,6 +176,7 @@ const TALL_PALETTE_V18_11 = [
 ];
 
 const DECLINED = new Set([
+  "omp--v18-11-3-below-status-decision-row.txt",
   "omp--v18-11-3-below-status-idle.txt",
   "omp--v18-11-3-below-status-draft.txt",
   "omp--v18-11-3-below-status-draft-ghost.txt",
@@ -391,6 +397,12 @@ describe("the omp corpus", () => {
     "omp--v18-10-draft-blank-line.txt",
     "omp--v18-10-draft-indented.txt",
     "omp--v18-10-draft-two-lines.txt",
+    "omp--v18-11-3-approval-bash-deny.txt",
+    "omp--v18-11-3-approval-bash-moved.txt",
+    "omp--v18-11-3-approval-bash.txt",
+    "omp--v18-11-3-ask-single-moved.txt",
+    "omp--v18-11-3-ask-single.txt",
+    "omp--v18-11-3-below-status-decision-row.txt",
     "omp--v18-11-3-below-status-draft-ghost.txt",
     "omp--v18-11-3-below-status-draft.txt",
     "omp--v18-11-3-below-status-idle-recap.txt",
@@ -650,6 +662,7 @@ const COMPOSER_FIXTURES = [
   "omp--v18-11-3-below-status-idle-recap.txt",
   "omp--v18-11-3-below-status-running-todo.txt",
   "omp--v18-11-3-below-status-slash-model.txt",
+  "omp--v18-11-3-below-status-decision-row.txt",
   // omp 18.6.1's open box with the slash palette under it (lab, 2026-10-17).
   "omp--v18-6-slash-mod-partial--w120.txt",
   "omp--v18-6-slash-model-list--w120.txt",

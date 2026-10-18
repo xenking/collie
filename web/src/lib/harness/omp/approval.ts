@@ -188,6 +188,8 @@ function hasHiddenCharacter(row: string): boolean {
  */
 export function detectApprovalRegion(lines: StyledLine[]): ApprovalRegion | null {
   const texts = lines.map((l) => rstrip(lineText(l)));
+  const decision = detectDecisionApproval(texts);
+  if (decision !== null) return decision;
 
   // 1. The tail: the bottom border, or the border with one row of anything under it.
   let end = texts.length - 1;
@@ -278,6 +280,79 @@ export function detectApprovalRegion(lines: StyledLine[]): ApprovalRegion | null
     coreSignature,
   };
   return { model, startLine: titleAt };
+}
+
+const DIVIDER = /^├─+┤$/;
+/** The decision dialog's footer, whatever its keycap glyphs: the way it names its choose and deny keys. */
+const DECISION_FOOTER = /^↑\/↓ choose · .*\bselect\b.* · .*\bdeny\b.*type to deny and steer$/;
+const SESSION_LABEL = /^Approve (?:bash|write) for this session$/;
+
+/**
+ * The tool-approval dialog of omp 18.11 with its user-decision rows (pi-o-my's runtime, captured on
+ * 18.11.3: `omp--v18-11-3-approval-*.txt`): three rows, `Approve`, `Approve <tool> for this session` and
+ * `Deny`, straight under the body, then a divider, one footer row and the border. The pointer wraps at
+ * both ends, so the plain walk is the verified commit as for the other pointed lists. The rows under
+ * the border (the bare prompt, the status row, widget rows) are the caller's to strip
+ * (glyph-prompt.ts `withoutStatusTail`). Null when any piece of evidence is missing.
+ */
+function detectDecisionApproval(texts: string[]): ApprovalRegion | null {
+  let bottom = texts.length - 1;
+  while (bottom >= 0 && isBlank(texts[bottom]!)) bottom--;
+  if (bottom < 7 || !BOTTOM.test(texts[bottom]!)) return null;
+  const footerRow = BOX_ROW.exec(texts[bottom - 1]!);
+  if (footerRow === null || !DECISION_FOOTER.test(footerRow[1]!.trim())) return null;
+  if (!DIVIDER.test(texts[bottom - 2]!)) return null;
+  const rows = [bottom - 5, bottom - 4, bottom - 3].map((at) => readDecisionOption(texts[at]!));
+  if (rows[0]?.label !== "Approve" || rows[1] === null || !SESSION_LABEL.test(rows[1].label) || rows[2]?.label !== "Deny") return null;
+  const pointedAt = rows.filter((r) => r!.pointed).length === 1 ? rows.findIndex((r) => r!.pointed) : -1;
+  if (pointedAt < 0) return null;
+
+  let titleAt = bottom - 6;
+  while (titleAt >= 0 && !TITLE.test(texts[titleAt]!)) {
+    if (bottom - titleAt > MAX_BODY_ROWS || !BODY_ROW.test(texts[titleAt]!)) return null;
+    titleAt--;
+  }
+  if (titleAt < 0 || titleAt + 1 > bottom - 6) return null;
+  const tool = TITLE.exec(texts[titleAt]!)![1]!;
+  if (!LIFTED_TOOLS.has(tool) || !rows[1].label.includes(` ${tool} `)) return null;
+  const bodyRows = texts.slice(titleAt + 1, bottom - 5);
+  if (bodyRows.some((row) => !row.endsWith("│") && row.endsWith("…"))) return null;
+  const body = bodyRows.map(bodyText);
+  if (body[0]!.length === 0) return null;
+  const shown = summarise(tool, body);
+  if (shown === null) return null;
+
+  const region = texts.slice(titleAt, bottom + 1);
+  const signature = region.join("\n");
+  if (signature.length > MAX_REGION_CHARS) return null;
+  const pointedRow = bottom - 5 + pointedAt;
+  const coreSignature = region.map((row, i) => (titleAt + i === pointedRow ? row.replace(DECISION_POINTER, " ") : row)).join("\n");
+  const title = `Allow tool: ${tool}`;
+  const badge = (i: number): string => (pointedAt === i ? POINTER_BADGE : "");
+  const model: PromptModel = {
+    question: [title, ...shown].join("\n"),
+    caption: title,
+    options: [
+      { label: "Approve", description: shown.join(ROW_BREAK), keys: pointerWalk(pointedAt, 0), keyLabel: badge(0) },
+      { label: rows[1].label, keys: pointerWalk(pointedAt, 1), keyLabel: badge(1) },
+      { label: "Deny", keys: pointerWalk(pointedAt, 2), keyLabel: badge(2) },
+    ],
+    family: "permission",
+    signature,
+    coreSignature,
+  };
+  return { model, startLine: titleAt };
+}
+
+const DECISION_POINTER = /[\u{F054}❯]/u;
+
+/** A decision row: the pointer glyph and a space where the pointer stands, else three spaces, then the label. */
+function readDecisionOption(row: string): { label: string; pointed: boolean } | null {
+  const inner = BOX_ROW.exec(row)?.[1]?.replace(/\s+$/, "");
+  if (inner === undefined) return null;
+  const pointed = /^[\u{F054}❯] \S/u.test(inner);
+  if (!pointed && !/^ {2}\S/.test(inner)) return null;
+  return { label: inner.slice(pointed ? 2 : 2), pointed };
 }
 
 /** The model alone (or null), the thin matcher tests assert on. */

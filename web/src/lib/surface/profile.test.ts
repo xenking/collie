@@ -19,7 +19,7 @@ import {
 import { PROFILE_FILES } from "./profiles/index";
 import { findInputFrame } from "./frame";
 import { askOf } from "./surface";
-import { fixtureRows, idleFor, PANES_DIR, readScreen, SURFACE_FIXTURES_DIR } from "../../test/surface-corpus";
+import { fixtureRows, idleFor, readScreen } from "../../test/surface-corpus";
 
 const PROFILES_DIR = join(import.meta.dirname, "profiles");
 const profileFiles = readdirSync(PROFILES_DIR).filter((name) => name.endsWith(".json"));
@@ -923,7 +923,7 @@ describe("other names of a harness (M56 spec 14 review)", () => {
 // omp 18.11.3 under pi-o-my's patched runtime (the `›` gutter, the status row under the box, a belowStatus
 // widget row, the todo HUD and a recap above it). Captured live 2026-10-18 through Collie's own pane read.
 describe("omp 18.11.3 with the status row and a widget row under the box", () => {
-  const read = (name: string) => readScreen(fixtureRows(`omp--v18-11-3-below-status-${name}.txt`, name === "ask-single" ? SURFACE_FIXTURES_DIR : PANES_DIR), "omp", idleFor("omp")).surface;
+  const read = (name: string) => readScreen(fixtureRows(name === "ask-single" ? "omp--v18-11-3-ask-single.txt" : `omp--v18-11-3-below-status-${name}.txt`), "omp", idleFor("omp")).surface;
   const frameTextOf = (file: string) => findInputFrame(fixtureRows(file), idleFor("omp")!)?.interior.text;
   it.each([
     ["idle", "idle", "empty"],
@@ -936,6 +936,15 @@ describe("omp 18.11.3 with the status row and a widget row under the box", () =>
   });
   it("the ghost word after a typed `el` is not part of the draft", () => {
     expect(frameTextOf("omp--v18-11-3-below-status-draft-ghost.txt")).toBe("el");
+  });
+  it("the approval dialog lifts its three decision rows, whichever one the pointer is on", () => {
+    for (const name of ["approval-bash", "approval-bash-moved", "approval-bash-deny"]) {
+      const surface = readScreen(fixtureRows(`omp--v18-11-3-${name}.txt`), "omp", idleFor("omp")).surface;
+      expect(askOf(surface.modal)?.options.map((o) => o.label)).toEqual(["Approve", "Approve bash for this session", "Deny"]);
+    }
+  });
+  it("the decision row after an answer reads as a free box", () => {
+    expect(readScreen(fixtureRows("omp--v18-11-3-below-status-decision-row.txt"), "omp", idleFor("omp")).surface).toMatchObject({ modal: "none", composer: "empty" });
   });
   it("the Ask dialog lifts with its options, the widget row under it notwithstanding", () => {
     const surface = read("ask-single");

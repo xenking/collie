@@ -37,6 +37,7 @@ Running a crew? Update the lead first; members follow on their own. Details:
 - **Live speech now appears in the composer while recording.** Provisional words update the field without becoming a saved draft, remain visible while recognition finishes, and are replaced by the final transcript. ([beea9fac](https://github.com/xenking/collie/commit/beea9fac))
 - **The Keys tray's Enter is tall and on the right again.** The Default pad draws its own tinted Enter in a column of its own past a small gap, spanning both rows, and Space is four cells wide beside the arrows. A pad that has its own Enter (a preset, or one you placed) is unchanged, and Enter is no longer a key the editor warns about. Width goes up to 4.
 - **omp 18.11.3 under pi-o-my's patched runtime takes sends and asks again.** The `›` gutter, the Nerd Font status row, a `belowStatus` widget row under it, the todo HUD and the recap line left the Surface unread, so every send was refused with "Collie cannot read this screen" and an Ask dialog read as unreadable. The omp profile reads that frame, the Working row and omp's grey ghost word in this theme; the omp readers step over the status and widget rows under a dialog or box.
+- **omp's approval dialog with its decision rows is read again.** omp 18.11 under pi-o-my's runtime draws Approve, "Approve bash for this session" and Deny above a divider, with a bare prompt row under the border. The phone showed it as an unreadable dialog; it now shows the three buttons, and the answer lands in omp with its decision row.
 
 ## [1.22.6] - 2026-10-18
 

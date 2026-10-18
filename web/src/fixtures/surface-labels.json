@@ -2956,6 +2956,36 @@
    "version": "18.10",
    "state": "draft"
   },
+  "omp--v18-11-3-approval-bash-deny.txt": {
+   "harness": "omp",
+   "version": "18.11",
+   "state": "dialog"
+  },
+  "omp--v18-11-3-approval-bash-moved.txt": {
+   "harness": "omp",
+   "version": "18.11",
+   "state": "dialog"
+  },
+  "omp--v18-11-3-approval-bash.txt": {
+   "harness": "omp",
+   "version": "18.11",
+   "state": "dialog"
+  },
+  "omp--v18-11-3-ask-single-moved.txt": {
+   "harness": "omp",
+   "version": "18.11",
+   "state": "dialog"
+  },
+  "omp--v18-11-3-ask-single.txt": {
+   "harness": "omp",
+   "version": "18.11",
+   "state": "dialog"
+  },
+  "omp--v18-11-3-below-status-decision-row.txt": {
+   "harness": "omp",
+   "version": "18.11",
+   "state": "idle"
+  },
   "omp--v18-11-3-below-status-draft-ghost.txt": {
    "harness": "omp",
    "version": "18.11",
