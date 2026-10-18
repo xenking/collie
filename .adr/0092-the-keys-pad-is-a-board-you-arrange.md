@@ -2,7 +2,7 @@
 
 Status: **Accepted** (2026-10-09)
 
-Amended in scope by: [ADR 0104](./0104-the-tray-owns-a-tall-enter-when-the-board-has-none.md) — the Default has no Enter of its
+Amended in scope by: [ADR 0110](./0110-the-tray-owns-a-tall-enter-when-the-board-has-none.md) — the Default has no Enter of its
 own: the tray draws a tall one on a column at the right edge, and a key spans up to 4 columns.
 
 Related: [ADR 0018](./0018-operator-command-rows-replace-the-catalog.md) (the `keys.toml` rows replace

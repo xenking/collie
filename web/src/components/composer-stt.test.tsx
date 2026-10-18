@@ -10,7 +10,7 @@ import type { BridgeConfig } from "@/lib/types";
 import { __resetHandsFree, setHandsFreeEnabled } from "@/lib/stt";
 import { __resetOperatorCommands } from "@/lib/operator-config";
 import { server } from "@/test/setup";
-import { recordReply } from "@/test/handlers";
+import { sendAnswer, sendHandler } from "@/test/handlers";
 import {
   FakeMediaRecorder,
   installFakeMediaRecorder,
@@ -63,18 +63,12 @@ function sttRefusal(status: number, error: string) {
   return http.post("/api/stt", () => HttpResponse.json({ ok: false, error }, { status }));
 }
 
-// A guarded send is TWO reply calls (type, then submit-only). Keeping the fake pane's input line
-// honest via recordReply is what lets the guard's verification poll pass.
-function replyHandler(onBody: (body: { text: string; submit?: boolean }) => void) {
-  return http.post<never, { text: string; submit?: boolean }>(
-    /\/api\/pane\/[^/]+\/reply$/,
-    async ({ request }) => {
-      const body = await request.json();
-      recordReply(body);
-      onBody(body);
-      return HttpResponse.json({ ok: true });
-    },
-  );
+/** The fake bridge's Send Protocol, calling back with each request's body (M56 spec 06: one request per text). */
+function replyHandler(onBody: (body: { text: string; mode: string }) => void) {
+  return sendHandler((request) => {
+    onBody({ text: request.text, mode: request.mode });
+    return sendAnswer(request.id, "sent");
+  });
 }
 
 function StatusSentinel() {
@@ -91,7 +85,7 @@ function baseProps(
     isShell: false,
     gone: false,
     readOnly: false,
-    dialogPresent: false,
+    surface: { revision: 1, turn: "idle", modal: "none", composer: "empty" },
     text: "pane output",
     terminalDraft: null,
     rawTerminalDraft: null,
@@ -188,6 +182,16 @@ describe("Composer — the record button is drawn only when there is a microphon
     await user.type(box, "x");
     expect(screen.queryByRole("button", { name: /start voice input/i })).toBeNull();
     expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
+  });
+
+  it("keeps the clip recorder on a crew peer's pane: the voice socket would resolve the pane on this bridge", async () => {
+    server.use(
+      configHandler({ push: false, vapidPublicKey: "", voice: true, stt: CONFIG_WITH_STT.stt }),
+      http.get("/api/voice/preferences", () => HttpResponse.json({ recordingMode: "toggle" })),
+    );
+    renderComposer({ scope: { host: "peer-a" } });
+    expect(await screen.findByRole("button", { name: /record a voice message/i })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /start voice input/i })).toBeNull();
   });
 
   it("renders no microphone in an insecure context, even with a provider configured", async () => {
@@ -347,25 +351,22 @@ describe("Composer — a finished clip", () => {
 });
 
 describe("Composer — hands-free", () => {
-  it("routes the transcript through the guarded send path when the draft is empty", async () => {
+  it("routes the transcript through the Send Protocol when the draft is empty", async () => {
     const user = userEvent.setup();
     setHandsFreeEnabled(true);
-    const bodies: { text: string; submit?: boolean }[] = [];
+    const bodies: { text: string; mode: string }[] = [];
     server.use(
       configHandler(CONFIG_WITH_STT),
       sttHandler("ship it"),
-      replyHandler((body) => bodies.push(body)),
+      ...replyHandler((body) => bodies.push(body)),
     );
     renderComposer();
     const recorder = await startRecording(user);
     act(() => recorder.finish());
 
-    // The guard's own two-call shape: type without submitting, verify, then submit. A shortcut past
-    // it would show one call, or a first call carrying submit.
-    await waitFor(() => expect(bodies.length).toBeGreaterThanOrEqual(2));
-    expect(bodies[0]).toMatchObject({ text: "ship it", submit: false });
-    expect(bodies.at(-1)?.submit).toBe(true);
-    await waitFor(() => expect(screen.getByPlaceholderText(/type a reply/i)).toHaveValue(""));
+    // The same one Send Protocol request the Send button makes: the bridge's guard, never around it.
+    await waitFor(() => expect(bodies).toEqual([{ text: "ship it", mode: "send" }]));
+    expect(screen.getByPlaceholderText(/type a reply/i)).toHaveValue("");
   });
 
   it("falls back to inserting when the draft already holds text", async () => {
@@ -375,7 +376,7 @@ describe("Composer — hands-free", () => {
     server.use(
       configHandler(CONFIG_WITH_STT),
       sttHandler("and this"),
-      replyHandler(() => (replies += 1)),
+      ...replyHandler(() => (replies += 1)),
     );
     renderComposer();
     // Typed DURING the clip — see the caret case above for why that is the only way here.
@@ -396,7 +397,7 @@ describe("Composer — hands-free", () => {
     server.use(
       configHandler(CONFIG_WITH_STT),
       sttHandler("ship it"),
-      http.post(/\/api\/pane\/[^/]+\/reply$/, () => HttpResponse.json({ error: "bridge down" }, { status: 500 })),
+      http.post("/api/send", () => HttpResponse.json({ error: "bridge down" }, { status: 500 })),
     );
     renderComposer();
     const recorder = await startRecording(user);

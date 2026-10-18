@@ -8,6 +8,13 @@
 // An adapter is DETECTION only. The Block union + renderers and the keystroke ACTION recipes
 // (prompt/wizard/preview-action) stay in core, dispatched from agent-chat — the adapter just tells
 // core what's on screen.
+//
+// SINCE M56 SPEC 06 THE PHONE SENDS NO TEXT OF ITS OWN. The free-text reply is one Send Protocol
+// request (lib/reply-action.ts), and the bridge reads the box from the harness's profile. So the
+// members below that served the phone's old type-then-verify guard (`replyChunks`, `bracketedPaste`,
+// `submitSettleMs`, `newlineSubmits`, `overlayHoldsKeyboard`, `composerPrompt`) are read by nothing in
+// the app any more; their tests still pin what each harness looks like. The doc comments below that
+// name "the reply path" or its pre-flight describe that removed guard. They go with a later cleanup.
 
 import type { Block, StyledLine } from "../blocks";
 
@@ -95,6 +102,15 @@ export interface HarnessAdapter {
    */
   modalOnScreen?(lines: StyledLine[]): boolean;
   /**
+   * A question waits in the terminal that no card answers, while the input box stays ready: OmO's
+   * `? Question pending` banner (pi/ask.ts `piQuestionBanner`). A reply sent then is the harness's
+   * own free-text answer, so nothing is refused or lifted; Chat draws one status line that says a
+   * question waits (session-stream.tsx). The terminal view shows the banner itself.
+   *
+   * OPTIONAL. Absent means no harness signal of this kind, and nothing is drawn.
+   */
+  questionPending?(lines: StyledLine[]): boolean;
+  /**
    * Positive evidence that a full overlay box holds the keyboard — the /models-style overlay
    * paints its own bordered box over the middle of the screen while the composer tail stays
    * intact, so `composerReady` still answers true although typing would land in the overlay's
@@ -153,17 +169,6 @@ export interface HarnessAdapter {
    * and a fresh one look the same.
    */
   draftCarriesSend?(sent: string, draft: string, before?: string | null): boolean;
-  /**
-   * After the submit key was accepted: does this screen still hold an unsent message in the input?
-   * A harness whose Enter can be taken by something other than "submit" (omp's `@` file menu applies
-   * the highlighted entry and leaves the text in the box) declares it, and the guarded send then reads
-   * the pane again before it reports `sent`. It submits once more only while the box still holds
-   * exactly the sent text; a completion that rewrote it, or text still there after the retry, fails
-   * with the draft kept (lib/reply-action.ts).
-   *
-   * OPTIONAL; absence means the bridge's ack of the submit key is the last word, as before.
-   */
-  submitLeftDraft?(lines: StyledLine[]): boolean;
   /**
    * Whether the draft on the input line is the harness's OWN opaque token rather than the user's text
    * — the same placeholder as above, sitting stranded. The stranded-draft preview keeps showing it

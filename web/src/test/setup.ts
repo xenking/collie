@@ -14,6 +14,7 @@ import { __resetAuthedUrls } from "@/lib/authed-url";
 import { __resetStore } from "@/lib/store";
 import { __resetChatTail } from "@/lib/chat-tail";
 import { resetFoldersCacheForTests } from "@/lib/folders";
+import { __resetSessionCards } from "@/lib/session-cards";
 
 // Node 25 exposes a disabled process-level localStorage; use jsdom's native Storage in test globals.
 const storageWindow = new JSDOM("", { url: "http://localhost" }).window;
@@ -80,6 +81,9 @@ Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: tr
 beforeEach(() => __resetAuthedUrls());
 // The New page's folder cache is module-scoped: one test's list must not open the next test's page.
 beforeEach(() => resetFoldersCacheForTests());
+// The session cards are module-scoped (lib/session-cards.ts): one case's program session would
+// otherwise answer the next case's capability reads.
+beforeEach(() => __resetSessionCards());
 
 // jsdom gaps that the terminal mirror / sheets touch.
 if (!Element.prototype.scrollIntoView) {

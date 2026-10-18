@@ -56,6 +56,8 @@ const BOX_COMPOSER_FIXTURES = [
   "omp--draft-wrapped.txt",
   "omp--fresh-agents-hint.txt",
   "omp--fresh-effort-hint.txt",
+  "omp--fresh-idle-widget-above.txt",
+  "omp--fresh-idle-widget-below.txt",
   "omp--fresh-idle.txt",
   "omp--menu-dismissed.txt",
   "omp--slash-palette--filtered.txt",
@@ -65,17 +67,58 @@ const BOX_COMPOSER_FIXTURES = [
   "omp--v18-10-draft-indented.txt",
   "omp--v18-10-draft-two-lines.txt",
   "omp--working.txt",
+  // omp 18.6.1 with `/settings` typed: a five-row palette under the open box (lab, 2026-10-17).
+  "omp--v18-6-slash-settings-list--w120.txt",
+  "omp--v18-6-slash-settings-list--w80.txt",
+  // omp 18.11.3's box composer, nerd and unicode symbol presets (issue 497, 2026-10-18).
+  "omp--v18-11-ghost-word--w130.txt",
+  "omp--v18-11-image-chip--w130.txt",
+  "omp--v18-11-nerd-box-path-text--w130.txt",
+  "omp--v18-11-nerd-box-path-text--w80.txt",
+  "omp--v18-11-nerd-box-two-lines--w130.txt",
+  "omp--v18-11-nerd-box-two-lines--w80.txt",
+  "omp--v18-11-nerd-box-wrapped--w130.txt",
+  "omp--v18-11-nerd-box-wrapped--w80.txt",
+  "omp--v18-11-nerd-ghost-word--w130.txt",
+  "omp--v18-11-nerd-ghost-word--w80.txt",
+  "omp--v18-11-nerd-image-chip--w130.txt",
+  "omp--v18-11-nerd-image-chip--w80.txt",
+  "omp--v18-11-nerd-running-tool--w130.txt",
+  "omp--v18-11-nerd-running-tool--w80.txt",
+  "omp--v18-11-nerd-running-tool-minute--w130.txt",
+  "omp--v18-11-nerd-running-tool-minute--w80.txt",
+  "omp--v18-11-nerd-skill-long-form--w130.txt",
+  "omp--v18-11-nerd-skill-pointed--w130.txt",
+  "omp--v18-11-nerd-skill-pointed--w80.txt",
+  "omp--v18-11-skill-pointed--w130.txt",
+];
+
+// omp 18.6.1 with `/model` or `/mod` typed (lab, 2026-10-17): a ten-row palette under the open box. The
+// box is found and its draft read, but the palette pushes the row past the bridge's tail window, so no
+// region is named (see "declines the region" below).
+const TALL_PALETTE_FIXTURES = [
+  "omp--v18-6-slash-mod-partial--w120.txt",
+  "omp--v18-6-slash-model-list--w120.txt",
+  "omp--v18-6-slash-model-list--w80.txt",
+  // omp 18.11.3, nerd preset: `/ship` and `/model` with a ten-row palette (issue 497, 2026-10-18).
+  "omp--v18-11-nerd-skill-and-command--w130.txt",
+  "omp--v18-11-nerd-slash-model--w130.txt",
+  "omp--v18-11-nerd-slash-model--w80.txt",
 ];
 
 const ALL_OMP_FIXTURES = readdirSync(PANES_DIR)
   .filter((f) => f.startsWith("omp--") && f.endsWith(".txt"))
   .toSorted();
 
-const NON_BOX_COMPOSER_FIXTURES = ALL_OMP_FIXTURES.filter((f) => !BOX_COMPOSER_FIXTURES.includes(f));
+const NON_BOX_COMPOSER_FIXTURES = ALL_OMP_FIXTURES.filter((f) => !BOX_COMPOSER_FIXTURES.includes(f) && !TALL_PALETTE_FIXTURES.includes(f));
 
 describe("locateComposer — the real corpus, pinned so any change to the walk shows up as a diff", () => {
   const PINNED: { fixture: string; top: number; bottom: number; suggestEnd: number; draftEnd?: number }[] = [
     { fixture: "omp--fresh-idle.txt", top: 26, bottom: 27, suggestEnd: 28 },
+    // Issue 468: an extension's widget row under the box (`belowEditor`) falls in the suggestion
+    // rows, and one over it (`aboveEditor`) moves the box down a row.
+    { fixture: "omp--fresh-idle-widget-below.txt", top: 26, bottom: 27, suggestEnd: 29, draftEnd: 28 },
+    { fixture: "omp--fresh-idle-widget-above.txt", top: 27, bottom: 28, suggestEnd: 29 },
     // omp 18.4's empty-composer hint (`⇧⇥ to change thinking effort`) sits right-aligned in the
     // bottom border: it changes what the row SAYS, never where the box is.
     { fixture: "omp--fresh-effort-hint.txt", top: 1, bottom: 2, suggestEnd: 3 },
@@ -108,6 +151,30 @@ describe("locateComposer — the real corpus, pinned so any change to the walk s
     { fixture: "omp--v18-10-draft-two-lines.txt", top: 11, bottom: 12, suggestEnd: 14, draftEnd: 14 },
     { fixture: "omp--v18-10-draft-blank-line.txt", top: 11, bottom: 12, suggestEnd: 15, draftEnd: 15 },
     { fixture: "omp--v18-10-draft-indented.txt", top: 11, bottom: 12, suggestEnd: 15, draftEnd: 15 },
+    // omp 18.6.1: the `/settings` palette under the open box, at 120 and 80 columns.
+    { fixture: "omp--v18-6-slash-settings-list--w120.txt", top: 17, bottom: 18, suggestEnd: 23 },
+    { fixture: "omp--v18-6-slash-settings-list--w80.txt", top: 18, bottom: 19, suggestEnd: 24 },
+    // omp 18.11.3's box composer (issue 497): drafts, chips, a short skill list and a running turn.
+    { fixture: "omp--v18-11-ghost-word--w130.txt", top: 15, bottom: 16, suggestEnd: 17 },
+    { fixture: "omp--v18-11-image-chip--w130.txt", top: 21, bottom: 22, suggestEnd: 23 },
+    { fixture: "omp--v18-11-nerd-box-path-text--w130.txt", top: 14, bottom: 16, suggestEnd: 17 },
+    { fixture: "omp--v18-11-nerd-box-path-text--w80.txt", top: 15, bottom: 18, suggestEnd: 19 },
+    { fixture: "omp--v18-11-nerd-box-two-lines--w130.txt", top: 14, bottom: 16, suggestEnd: 17 },
+    { fixture: "omp--v18-11-nerd-box-two-lines--w80.txt", top: 15, bottom: 17, suggestEnd: 18 },
+    { fixture: "omp--v18-11-nerd-box-wrapped--w130.txt", top: 14, bottom: 16, suggestEnd: 17 },
+    { fixture: "omp--v18-11-nerd-box-wrapped--w80.txt", top: 15, bottom: 18, suggestEnd: 19 },
+    { fixture: "omp--v18-11-nerd-ghost-word--w130.txt", top: 14, bottom: 15, suggestEnd: 16 },
+    { fixture: "omp--v18-11-nerd-ghost-word--w80.txt", top: 15, bottom: 16, suggestEnd: 17 },
+    { fixture: "omp--v18-11-nerd-image-chip--w130.txt", top: 20, bottom: 21, suggestEnd: 22 },
+    { fixture: "omp--v18-11-nerd-image-chip--w80.txt", top: 21, bottom: 22, suggestEnd: 23 },
+    { fixture: "omp--v18-11-nerd-running-tool--w130.txt", top: 43, bottom: 44, suggestEnd: 45 },
+    { fixture: "omp--v18-11-nerd-running-tool--w80.txt", top: 43, bottom: 44, suggestEnd: 45 },
+    { fixture: "omp--v18-11-nerd-running-tool-minute--w130.txt", top: 43, bottom: 44, suggestEnd: 45 },
+    { fixture: "omp--v18-11-nerd-running-tool-minute--w80.txt", top: 43, bottom: 44, suggestEnd: 45 },
+    { fixture: "omp--v18-11-nerd-skill-long-form--w130.txt", top: 14, bottom: 15, suggestEnd: 17 },
+    { fixture: "omp--v18-11-nerd-skill-pointed--w130.txt", top: 14, bottom: 15, suggestEnd: 17 },
+    { fixture: "omp--v18-11-nerd-skill-pointed--w80.txt", top: 15, bottom: 16, suggestEnd: 19 },
+    { fixture: "omp--v18-11-skill-pointed--w130.txt", top: 15, bottom: 16, suggestEnd: 18 },
   ];
 
   // These eleven indices are byte-identical to the ones the width-gated scanner produced. That is
@@ -163,6 +230,11 @@ describe("extractInputDraft", () => {
     // A slash command mid-typing is a draft like any other — the palette below the box is chrome.
     { fixture: "omp--slash-palette.txt", draft: "/" },
     { fixture: "omp--slash-palette--filtered.txt", draft: "/new" },
+    { fixture: "omp--v18-6-slash-settings-list--w120.txt", draft: "/settings" },
+    { fixture: "omp--v18-6-slash-settings-list--w80.txt", draft: "/settings" },
+    { fixture: "omp--v18-6-slash-model-list--w120.txt", draft: "/model" },
+    { fixture: "omp--v18-6-slash-model-list--w80.txt", draft: "/model" },
+    { fixture: "omp--v18-6-slash-mod-partial--w120.txt", draft: "/mod" },
     // Empty composers. omp 17/18.1 painted nothing in an empty box; omp 18.4 paints a right-aligned
     // key hint there (`⇧⇥ to change thinking effort`), which is placeholder text, not a draft.
     // Reading it as one showed "Draft in terminal" on every fresh session (markers.ts
@@ -198,7 +270,8 @@ describe("extractStatusLines", () => {
   // The two omp 18.4 hint captures carry the capturing operator's own statusline template, not
   // the `π … ▶` powerline these assertions read, and neither does the 18.4.10 idle capture, whose
   // row runs on into a context meter (`▶─2%───┃─1.1M`) and names branch `main`. The three 18.10 draft
-  // captures run on into the same meter (`▶───5%───…128K─`).
+  // captures run on into the same meter (`▶───5%───…128K─`). The 18.11 captures run in a scratch folder
+  // with no branch, and the nerd preset draws no `π` and no `▶`.
   it.each(
     BOX_COMPOSER_FIXTURES.filter(
       (f) =>
@@ -206,7 +279,9 @@ describe("extractStatusLines", () => {
         f !== "omp--fresh-effort-hint.txt" &&
         f !== "omp--fresh-agents-hint.txt" &&
         f !== "omp--v18-4-composer-idle.txt" &&
-        !f.startsWith("omp--v18-10-draft-"),
+        !f.startsWith("omp--v18-10-draft-") &&
+        !f.startsWith("omp--v18-6-") &&
+        !f.startsWith("omp--v18-11-"),
     ),
   )(
     "%s: trims the border glyphs off both ends, keeping the whole powerline",
@@ -717,6 +792,25 @@ describe("composerPrompt — the region a destructive write is bound to", () => 
     expect(hasComposer(withPalette(6))).toBe(true);
     expect(composerPrompt(withPalette(6))).toBeNull();
     expect(composerPrompt(withPalette(20))).toBeNull();
+  });
+
+  it("declines the region on omp 18.6.1's ten-row palette, and still finds the box and its one status row", () => {
+    const PINNED_TALL = [
+      { fixture: "omp--v18-6-slash-mod-partial--w120.txt", top: 17, bottom: 18, suggestEnd: 29 },
+      { fixture: "omp--v18-6-slash-model-list--w120.txt", top: 17, bottom: 18, suggestEnd: 29 },
+      { fixture: "omp--v18-6-slash-model-list--w80.txt", top: 18, bottom: 19, suggestEnd: 30 },
+      { fixture: "omp--v18-11-nerd-skill-and-command--w130.txt", top: 14, bottom: 15, suggestEnd: 26 },
+      { fixture: "omp--v18-11-nerd-slash-model--w130.txt", top: 14, bottom: 15, suggestEnd: 26 },
+      { fixture: "omp--v18-11-nerd-slash-model--w80.txt", top: 15, bottom: 16, suggestEnd: 27 },
+    ];
+    expect(PINNED_TALL.map((p) => p.fixture)).toEqual(TALL_PALETTE_FIXTURES);
+    for (const { fixture, top, bottom, suggestEnd } of PINNED_TALL) {
+      const buffer = fixtureLines(fixture);
+      expect(locateComposer(buffer), fixture).toEqual({ top, firstDraftRow: top + 1, bottom, suggestEnd, draftEnd: bottom + 1 });
+      expect(hasComposer(buffer), fixture).toBe(true);
+      expect(extractStatusLines(buffer), fixture).toHaveLength(1);
+      expect(composerPrompt(buffer), fixture).toBeNull();
+    }
   });
 
   it("sits inside the tail window the bridge will accept a binding within", () => {

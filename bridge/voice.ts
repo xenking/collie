@@ -26,7 +26,7 @@ export type VoiceSocketData = {
 type VoiceSocket = ServerWebSocket<VoiceSocketData>;
 type TurnConfig = Pick<Config, "sonioxApiKey" | "sonioxTtsVoice" | "voiceControlUrl" | "voiceControlTokenFile">;
 type TurnAudit = Pick<AuditLog, "record">;
-type TurnSocket = Pick<VoiceSocket, "data" | "send">;
+type TurnSocket = Pick<VoiceSocket, "data" | "send"> & { close?: VoiceSocket["close"] };
 type SonioxContext = {
   general?: Array<{ key: string; value: string }>;
   text?: string;
@@ -240,6 +240,11 @@ export class TurnController {
 
   get detached(): boolean {
     return this.ws === null;
+  }
+
+  /** The browser socket this relay talks to, or null while detached. */
+  get socket(): TurnSocket | null {
+    return this.ws;
   }
 
   attach(ws: VoiceSocket): boolean {
@@ -706,8 +711,11 @@ export class VoiceBroker {
     }
     this.#clearReconnectExpiry(session);
     if (prior) {
+      // The displaced browser must learn it lost the relay, or it keeps a voice UI nobody answers.
+      const displaced = prior.socket;
       prior.close();
       this.#relays.delete(session);
+      if (displaced && displaced !== ws) displaced.close?.(1000, "voice taken over by another device");
     }
     if (ws.data.replySpeechSupported) {
       try {
@@ -718,6 +726,20 @@ export class VoiceBroker {
         console.warn(`[voice] couldn't activate laptop relay: ${error instanceof Error ? error.message : String(error)}`);
         return;
       }
+    }
+    // The browser left while the daemon was being asked: nobody owns the lease it just granted.
+    if (ws.readyState === 2 || ws.readyState === 3) {
+      if (ws.data.replySpeechSupported) await this.#setRemote(session, "remote-release").catch(() => undefined);
+      return;
+    }
+    // Another phone opened the same session while the daemon was being asked: the later opener wins, and the
+    // earlier one is told, not left holding a socket nobody reads.
+    const raced = this.#relays.get(session);
+    if (raced) {
+      const lost = raced.socket;
+      raced.close();
+      this.#relays.delete(session);
+      lost?.close?.(1000, "voice taken over by another device");
     }
     this.#relays.set(session, new TurnController(this.cfg, this.audit, ws,
       (text) => this.#setRemote(session, "transcript", text)));

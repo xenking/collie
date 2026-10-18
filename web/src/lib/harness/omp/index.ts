@@ -254,11 +254,6 @@ export const ompAdapter: HarnessAdapter = {
   // a long palette pushes that row out of range; the rule region ends one status row from the tail.
   // The answer editor's region is its last answer row, four rows above the tail.
   composerPrompt: (lines) => (hasComposer(lines) ? composerPrompt(lines) : answerEditorPrompt(lines)),
-  // Enter can be spent on the completion menu instead of the submit: omp's `@` file menu applies the
-  // highlighted entry and leaves the message in the box (captured on 18.10.0,
-  // `omp--v18-10-borderless-glyph-completion-accepted.txt`). A message still in the composer after the
-  // key is not sent.
-  submitLeftDraft: (lines) => hasComposer(lines) && extractInputDraft(lines) !== null,
   // The composer inserts a raw newline; the answer editor SUBMITS on one (answer-editor.ts).
   newlineSubmits: (lines) => !hasComposer(lines) && locateAnswerEditor(lines) !== null,
   // Numbered paste chips contain no content evidence. Keep literal verification
