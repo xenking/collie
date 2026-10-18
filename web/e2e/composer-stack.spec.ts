@@ -223,7 +223,11 @@ test("the attach picker opens above the box in both layouts, right-aligned to it
 test("a chip strip stays above the row, and a tall draft beside it still stacks", async ({ page }, testInfo) => {
   await installUploadCapability(page);
   await open(page);
-  await page.getByTestId("attach-photos").setInputFiles({ name: "a.png", mimeType: "image/png", buffer: Buffer.from("x") });
+  // The way a person does it: Attach, Photos, and the system chooser that opens.
+  await attach(page).click();
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: en["composer.attach.photos"] }).click();
+  await (await chooser).setFiles({ name: "a.png", mimeType: "image/png", buffer: Buffer.from("x") });
   const chips = page.getByRole("list", { name: en["composer.attach.listAria"] });
   await expect(chips).toBeVisible();
   await field(page).fill(rows(4));
