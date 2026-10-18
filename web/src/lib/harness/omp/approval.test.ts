@@ -6,6 +6,7 @@ import { parseAnsi } from "../../ansi";
 import { lineText, splitLines, type StyledLine } from "../../blocks";
 import { promptsEqual } from "../prompt-model";
 import { detectApproval, detectApprovalRegion } from "./approval";
+import { withoutStatusTail } from "./glyph-prompt";
 import { ompAdapter, ompBuildBlocks } from "./index";
 import { ompModalOnScreen } from "./modal";
 
@@ -540,5 +541,34 @@ describe("the grammar claims nothing else in the corpus", () => {
     expect(all.length).toBeGreaterThan(300);
     const lifted = all.filter((name) => detectApproval(load(name)) !== null);
     expect(lifted.toSorted()).toEqual(LIFTED);
+  });
+});
+
+// omp 18.11.3 under pi-o-my's runtime: three decision rows. Every piece of the shape is evidence.
+describe("the decision-row approval dialog (omp 18.11.3)", () => {
+  const dir = join(import.meta.dirname, "../../../fixtures/panes");
+  const text = readFileSync(join(dir, "omp--v18-11-3-approval-bash-moved.txt"), "utf8");
+  const model = (raw: string) => detectApproval(withoutStatusTail(splitLines(parseAnsi(raw))));
+
+  it("lifts Approve, Approve for the session and Deny, walking from the pointed row", () => {
+    const m = model(text)!;
+    expect(m.options.map((o) => o.label)).toEqual(["Approve", "Approve bash for this session", "Deny"]);
+    // the pointer is on the second row: Up/Enter for Approve, Enter alone for the pointed one, Down/Enter for Deny
+    expect(m.options.map((o) => o.keys)).toEqual([["Up", "Enter"], ["Enter"], ["Down", "Enter"]]);
+  });
+
+  it("declines when the session row names another tool or the Deny row is gone", () => {
+    expect(model(text.replace("Approve bash for this session", "Approve write for this session"))).toBeNull();
+    expect(model(text.replace("Deny", "Nope"))).toBeNull();
+  });
+});
+
+describe("the widget rows under the status row (pi-o-my's belowStatus slot)", () => {
+  it("steps over exactly as many rows as the slot can hold", () => {
+    const base = splitLines(parseAnsi(readFileSync(join(PANES_DIR, "omp--v18-11-3-below-status-idle.txt"), "utf8")));
+    const statusAt = base.findLastIndex((row) => lineText(row).trimStart().startsWith("\u{F0D57}") || lineText(row).includes("·"));
+    const widget = (n: number) => [...base.slice(0, statusAt + 1), ...Array.from({ length: n }, (_, i) => splitLines(parseAnsi(`widget ${i}`))[0]!)];
+    expect(ompAdapter.composerReady?.(widget(12))).toBe(true);
+    expect(ompAdapter.composerReady?.(widget(13))).toBe(false);
   });
 });

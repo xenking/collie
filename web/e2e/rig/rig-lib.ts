@@ -133,10 +133,16 @@ export function pidAlive(pid: number | null): boolean {
 export function pidIs(pid: number | null, needle: string): boolean {
   if (pid === null || !pidAlive(pid)) return false;
   try {
-    return readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").includes(needle);
+    return commandLine(pid).includes(needle);
   } catch {
     return false;
   }
+}
+
+/** The pid's command line: /proc on Linux, `ps` where there is none (macOS). */
+function commandLine(pid: number): string {
+  if (existsSync(`/proc/${pid}/cmdline`)) return readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ");
+  return spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).stdout;
 }
 
 export async function killPid(pid: number | null, needle: string, ms = 8000): Promise<void> {
@@ -163,10 +169,19 @@ export async function killPid(pid: number | null, needle: string, ms = 8000): Pr
 export const MEM_FLOOR_KB = 8 * 1024 * 1024;
 
 export function memAvailableKb(): number {
+  if (!existsSync("/proc/meminfo")) return vmStatAvailableKb();
   const line = readFileSync("/proc/meminfo", "utf8")
     .split("\n")
     .find((row) => row.startsWith("MemAvailable:"));
   return Number(/(\d+)/.exec(line ?? "")?.[1] ?? 0);
+}
+
+/** macOS: free, inactive, speculative and purgeable pages of `vm_stat`, the memory a new process can take. */
+function vmStatAvailableKb(): number {
+  const out = spawnSync("vm_stat", { encoding: "utf8" }).stdout;
+  const pageKb = Number(/page size of (\d+) bytes/.exec(out)?.[1] ?? 16384) / 1024;
+  const pages = (name: string): number => Number(new RegExp(`Pages ${name}:\\s+(\\d+)`).exec(out)?.[1] ?? 0);
+  return (pages("free") + pages("inactive") + pages("speculative") + pages("purgeable")) * pageKb;
 }
 
 /** Throws under 8 GB available. `what` names the start the guard stood in front of. */

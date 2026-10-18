@@ -267,6 +267,6 @@ describe("tail anchoring", () => {
 describe("the adapter declares the pair together", () => {
   it("cancelKey is Escape and modalOnScreen is this gate", () => {
     expect(ompAdapter.cancelKey).toBe("Escape");
-    expect(ompAdapter.modalOnScreen).toBe(ompModalOnScreen);
+    expect(ompAdapter.modalOnScreen?.([])).toBe(ompModalOnScreen([]));
   });
 });

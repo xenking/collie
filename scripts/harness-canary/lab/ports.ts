@@ -1,8 +1,8 @@
 // The real hands of a lab run (M56 spec 10): npm, git, a throwaway tmux, the walk, the protocol.
 // run.ts holds the order of the steps. This file does the work, so a test of the order needs none of it.
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { resolveTmuxBinary } from "../../../bridge/mux/tmux/exec";
 import { gateFor } from "../../../bridge/surface/key-gate";
 import { profileFor } from "../../../web/src/lib/surface/profile";
@@ -16,7 +16,7 @@ import { loadKnownGaps } from "../known-gaps";
 import { beltCommands, operatorBelt, PHONE_TURN_CAP, runPhoneLeg, shippedBeltFromDisk, writeBeaconHooks, type PhoneFacts } from "./phone";
 import { ScratchBridge } from "./phone-bridge";
 import { PhoneClient } from "./phone-client";
-import { LabDeferred, LabInfraError, seedClaude, type SeedSource } from "./seed";
+import { LabDeferred, LabInfraError, loginEnv, prepareRun, seedClaude, type CodexSource, type SeedSource } from "./seed";
 import { realLiveness } from "./sweep";
 import { LabTmux, paneCommand } from "./tmux";
 import { isDialogScreen, SETTLED_OUTCOMES, type AskFact, type ScreenFact, type SendFact, type WalkFact } from "./verdict";
@@ -59,6 +59,7 @@ export function makeProject(dir: string): void {
 
 export interface RealOptions {
   readonly seedSource?: SeedSource;
+  readonly codexSource?: CodexSource;
   readonly minLoginMinutes?: number;
   readonly env?: Readonly<Record<string, string | undefined>>;
 }
@@ -193,16 +194,31 @@ export function realPorts(options: RealOptions = {}): LabPorts {
     },
     async preflight(spec: HarnessSpec, dirs: RunDirs): Promise<void> {
       if (resolveTmuxBinary("") === null) throw new LabDeferred("no tmux binary on this machine");
-      if (Bun.which("npm") === null) throw new LabDeferred("no npm on PATH");
+      if ((env[`COLLIE_LAB_BIN_${spec.id.toUpperCase()}`] ?? "") === "" && Bun.which("npm") === null) throw new LabDeferred("no npm on PATH");
       if (Bun.which("git") === null) throw new LabDeferred("no git on PATH");
       makeProject(dirs.project);
-      // The login is checked here, before the claim: a token that is too old defers the run and costs nothing.
-      if (spec.seedsLogin) seedClaude(dirs.config, dirs.project, options.seedSource, options.minLoginMinutes);
+      // The folders, the config files and the login are made here, before the claim: a login that is not
+      // usable (a Claude token that is too old, no Codex API key, no OpenRouter key) defers the run and costs nothing.
+      prepareRun(spec, dirs, { seedSource: options.seedSource, minLoginMinutes: options.minLoginMinutes, codexSource: options.codexSource, env });
     },
 
     async install(spec, dirs, version, log): Promise<string> {
       mkdirSync(dirs.bin, { recursive: true });
       const base = { ...serverEnv(env), npm_config_update_notifier: "false", npm_config_fund: "false" };
+      // `COLLIE_LAB_BIN_<ID>` names a binary to run in place of the npm install: the person's own runtime, patched
+      // or not. It must print the version the lab was asked for; the lab changes nothing in it.
+      const own = env[`COLLIE_LAB_BIN_${spec.id.toUpperCase()}`];
+      if (own !== undefined && own !== "") {
+        mkdirSync(dirname(binaryPath(dirs, spec)), { recursive: true });
+        // A symlink target is read from the link's own folder, so a relative override must be made absolute first.
+        const target = resolve(own);
+        symlinkSync(target, binaryPath(dirs, spec));
+        const printed = await run([binaryPath(dirs, spec), "--version"], dirs.root, { ...base, ...spec.env(dirs) }, 30_000);
+        const found = VERSION_IN_TEXT.exec(printed.out)?.[0];
+        if (found !== version) throw new LabInfraError(`${target} prints ${found ?? "no version"}, and the lab asked for ${version}`);
+        log(`using ${target} for ${spec.id}; it prints ${found}`);
+        return found;
+      }
       const result = await run(["npm", "install", "--prefix", dirs.bin, "--no-audit", "--no-fund", "--no-save", `${spec.npm}@${version}`], dirs.bin, base, INSTALL_TIMEOUT_MS);
       if (result.code !== 0) throw new LabInfraError(`npm install ${spec.npm}@${version} exited ${String(result.code)}: ${result.out.trim().split("\n").slice(-3).join(" ")}`);
       const printed = await run([binaryPath(dirs, spec), "--version"], dirs.root, { ...base, ...spec.env(dirs) }, 30_000);
@@ -226,7 +242,8 @@ export function realPorts(options: RealOptions = {}): LabPorts {
       const counters = new LabCounters();
       try {
         const command = legs === "all" ? paneCommand(spec.env(dirs), binaryPath(dirs, spec), spec.startArgs(dirs)) : "exec sleep 86400";
-        await tmux.start(dirs.project, command, serverEnv(env));
+        // A key a harness signs in with goes into the tmux server's environment, never onto the command line.
+        await tmux.start(dirs.project, command, { ...serverEnv(env), ...loginEnv(spec, env) });
         log(`tmux server ${tmux.socket} started`);
         const runPhone = async (): Promise<{ phone?: PhoneFacts | null; phoneNote?: string }> => {
           if (!spec.phone || phonePlan === null) return {};
@@ -257,7 +274,7 @@ export function realPorts(options: RealOptions = {}): LabPorts {
         let sendNote = freeDialog ? "skipped: a dialog read free during the walk" : undefined;
         let askNote = sendNote;
         if (labProfile(spec.id, version, log) !== null && walkClean) {
-          const leg: LegEnv = { harness: spec.id, version, mux, pane, sendsDir: dirs.sends, project: dirs.project, counters, turns, log };
+          const leg: LegEnv = { harness: spec.id, version, mux, pane, sendsDir: dirs.sends, project: dirs.project, counters, turns, decline: spec.decline, log };
           const sent = await runSendLeg(leg);
           send = sent.fact;
           sendNote = sent.note;

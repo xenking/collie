@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { parseAnsi } from "../ansi";
 import { splitLines } from "../blocks";
+import { withoutStatusTail } from "./omp/glyph-prompt";
 import { ompAdapter } from "./omp";
 import { lineText, rstrip } from "./omp/markers";
 import { hasComposer as hasBoxComposer } from "./omp/chrome";
@@ -55,7 +56,7 @@ const GLYPH_COMPOSER_FIXTURES = allOmpFixtures.filter((name) =>
 );
 // omp 18.10.0 borderless captures with this install's `›` gutter (glyph-gutter.test.ts reads them in detail).
 // Composers, so the modal cohort never names them, and their own locator arm is not the 18.4 one.
-const GLYPH_GUTTER_FIXTURES = new Set(allOmpFixtures.filter((name) => name.startsWith("omp--v18-10-borderless-glyph-")));
+const GLYPH_GUTTER_FIXTURES = new Set(allOmpFixtures.filter((name) => name.startsWith("omp--v18-10-borderless-glyph-") || name.startsWith("omp--v18-11-3-below-status-")));
 const CLAUDE_COMPOSER_FIXTURES = GLYPH_COMPOSER_FIXTURES.filter((name) => name.includes("-claude-"));
 const BORDERLESS_COMPOSER_FIXTURES = GLYPH_COMPOSER_FIXTURES.filter((name) => name.includes("-borderless-"));
 // `omp--menu-dismissed.txt` matches this prefix and is a COMPOSER capture, not a modal, and so is
@@ -97,6 +98,11 @@ const SWITCH_LIFTED = SWITCH_COHORT.filter((name) => !DECLINED_SWITCH.includes(n
 // wrapped and at both window edges, searches, over-context and truncated rows, role chips, and windows
 // of 16, 15 and 5 rows).
 const LIFTED = new Set([
+  "omp--v18-11-3-approval-bash.txt",
+  "omp--v18-11-3-approval-bash-moved.txt",
+  "omp--v18-11-3-approval-bash-deny.txt",
+  "omp--v18-11-3-ask-single.txt",
+  "omp--v18-11-3-ask-single-moved.txt",
   "omp--menu-resume-moved.txt",
   "omp--menu-resume.txt",
   "omp--v18-4-resume-all-projects.txt",
@@ -170,6 +176,13 @@ const TALL_PALETTE_V18_11 = [
 ];
 
 const DECLINED = new Set([
+  "omp--v18-11-3-below-status-decision-row.txt",
+  "omp--v18-11-3-below-status-idle.txt",
+  "omp--v18-11-3-below-status-draft.txt",
+  "omp--v18-11-3-below-status-draft-ghost.txt",
+  "omp--v18-11-3-below-status-idle-recap.txt",
+  "omp--v18-11-3-below-status-running-todo.txt",
+  "omp--v18-11-3-below-status-slash-model.txt",
   // — Composer states. An input box is chrome, never a dialog; stripChrome peels it, the statusline
   //   and stranded-draft probes re-surface what it carried.
   "omp--done--tool-result.txt",
@@ -319,7 +332,8 @@ describeAdapterConformance(ompAdapter, {
   // changed while clearing it" (pi-shape.ts `piComposerPrompt`). Null means an unbound write, exactly
   // as the boxed shape answers for the same palette sitting under its own composer (chrome.ts).
   // omp 18.6.1 draws a ten-row palette under its open box for `/model` and `/mod` (lab, 2026-10-17): the same trade.
-  unboundComposerFixtures: ["omp--v18-8-slash-palette.txt", "omp--v18-8-slash-palette-w48.txt", ...TALL_PALETTE_V18_6, ...TALL_PALETTE_V18_11, "omp--v18-10-borderless-glyph-slash-palette.txt"],
+  unboundComposerFixtures: ["omp--v18-8-slash-palette.txt", "omp--v18-8-slash-palette-w48.txt", ...TALL_PALETTE_V18_6, ...TALL_PALETTE_V18_11, "omp--v18-10-borderless-glyph-slash-palette.txt", "omp--v18-11-3-below-status-slash-model.txt"],
+  tailChrome: (lines) => lines.length - withoutStatusTail(lines).length,
 });
 
 // The corpus pin (mirroring claude/chrome.test.ts's): a newly-captured omp fixture must be filed into
@@ -383,6 +397,18 @@ describe("the omp corpus", () => {
     "omp--v18-10-draft-blank-line.txt",
     "omp--v18-10-draft-indented.txt",
     "omp--v18-10-draft-two-lines.txt",
+    "omp--v18-11-3-approval-bash-deny.txt",
+    "omp--v18-11-3-approval-bash-moved.txt",
+    "omp--v18-11-3-approval-bash.txt",
+    "omp--v18-11-3-ask-single-moved.txt",
+    "omp--v18-11-3-ask-single.txt",
+    "omp--v18-11-3-below-status-decision-row.txt",
+    "omp--v18-11-3-below-status-draft-ghost.txt",
+    "omp--v18-11-3-below-status-draft.txt",
+    "omp--v18-11-3-below-status-idle-recap.txt",
+    "omp--v18-11-3-below-status-idle.txt",
+    "omp--v18-11-3-below-status-running-todo.txt",
+    "omp--v18-11-3-below-status-slash-model.txt",
     "omp--v18-11-ask-nerd-batch-moved.txt",
     "omp--v18-11-ask-nerd-batch-review.txt",
     "omp--v18-11-ask-nerd-batch-revisited.txt",
@@ -630,6 +656,13 @@ const COMPOSER_FIXTURES = [
   "omp--v18-11-nerd-slash-model--w130.txt",
   "omp--v18-11-nerd-slash-model--w80.txt",
   "omp--v18-11-skill-pointed--w130.txt",
+  "omp--v18-11-3-below-status-idle.txt",
+  "omp--v18-11-3-below-status-draft.txt",
+  "omp--v18-11-3-below-status-draft-ghost.txt",
+  "omp--v18-11-3-below-status-idle-recap.txt",
+  "omp--v18-11-3-below-status-running-todo.txt",
+  "omp--v18-11-3-below-status-slash-model.txt",
+  "omp--v18-11-3-below-status-decision-row.txt",
   // omp 18.6.1's open box with the slash palette under it (lab, 2026-10-17).
   "omp--v18-6-slash-mod-partial--w120.txt",
   "omp--v18-6-slash-model-list--w120.txt",
@@ -907,7 +940,8 @@ describe("OMP 18.4 claude and borderless composers", () => {
     const good = frame("transcript", "", RULE, "❯ hello", RULE, STATUS);
     expect(locateClaudeComposer(good)).not.toBeNull();
     expect(locateClaudeComposer(frame("transcript", "", RULE, "❯ hello", RULE, "", STATUS))).toBeNull();
-    expect(locateClaudeComposer(frame("transcript", "", RULE, "❯ hello", RULE, STATUS, "output below"))).toBeNull();
+    // a row under the status row is a belowStatus widget of pi-o-my's patched omp, not output
+    expect(locateClaudeComposer(frame("transcript", "", RULE, "❯ hello", RULE, STATUS, "Matt [prototype]"))).not.toBeNull();
     expect(locateClaudeComposer(frame("transcript", "", RULE, "❯ hello", RULE, " plain text no separator"))).toBeNull();
     expect(locateClaudeComposer(frame("transcript", "", RULE, "❯ hello", "──", STATUS))).toBeNull();
   });
@@ -976,8 +1010,8 @@ describe("OMP 18.4 claude and borderless composers", () => {
     expect(ompAdapter.extractInputDraft(frame("transcript", "", "❯ hello", "  more", STATUS))).toBe("hello more");
     // a blank row between the prompt and the status row is the `rule` shape's tail, never this one
     expect(locateBorderlessComposer(frame("transcript", "❯ hello", "", STATUS))).toBeNull();
-    // anything below the status row
-    expect(locateBorderlessComposer(frame("❯ hello", STATUS, "output below"))).toBeNull();
+    // a row under the status row is a belowStatus widget of pi-o-my's patched omp, not output
+    expect(locateBorderlessComposer(frame("❯ hello", STATUS, "Matt [prototype]"))).not.toBeNull();
     // a status row without styled separator segments, or with the wrong indent
     expect(locateBorderlessComposer(frame("❯ hello", " π · model"))).toBeNull();
     expect(locateBorderlessComposer(frame("❯ hello", "  " + STATUS.trimStart()))).toBeNull();

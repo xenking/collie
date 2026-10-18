@@ -10,10 +10,10 @@
   },
   "versions": [
     {
-      "range": "18.4.0 - 18.4.10",
+      "range": "18.4.0 - 18.6.1",
       "status": "verified",
-      "verifiedThrough": "18.4.10",
-      "verifiedOn": "2026-10-02"
+      "verifiedThrough": "18.6.1",
+      "verifiedOn": "2026-10-18"
     }
   ],
   "idle": {
@@ -115,14 +115,37 @@
           "blank": true
         },
         "prompt": {
-          "pattern": "^❯(?: (?<draft>(?:(?!\\s{8,}\\S).)*))?(?:\\s{8,}\\S.*)?$",
+          "pattern": "^[❯›](?: (?<draft>(?:(?!\\s{8,}\\S).)*))?(?:\\s{8,}\\S.*)?$",
           "column": 0
         },
         "bottom": {
-          "pattern": "^\\s?π · .*$",
+          "pattern": "^\\s?(?:π|[\\u{E000}-\\u{F8FF}\\u{F0000}-\\u{FFFFD}]|[⠀-⣿]\\s+\\d+[smh]) · .*$",
           "column": 0,
           "maxColumn": 1
         },
+        "continuationIndent": 2,
+        "maxDraftRows": 40,
+        "maxTailRows": 12
+      },
+      {
+        "walk": "interior",
+        "top": {
+          "pattern": "^$",
+          "column": 0,
+          "blank": true
+        },
+        "prompt": {
+          "pattern": "^[❯›](?: (?<draft>(?:(?!\\s{8,}\\S).)*))?(?:\\s{8,}\\S.*)?$",
+          "column": 0
+        },
+        "bottom": {
+          "pattern": "^",
+          "column": 0,
+          "maxColumn": 3,
+          "open": true
+        },
+        "rows": "^(?:[❯›].*|\\s{2}.*|\\s*)$",
+        "continuation": "^\\s{2}(?<text>.*)$",
         "continuationIndent": 2,
         "maxDraftRows": 40,
         "maxTailRows": 3
@@ -147,6 +170,10 @@
           "pointer": "^(?:❯|\\u{F054}) (?:[^\\x00-\\x7F\\s]\\S* {1,2})?(?<command>\\w[\\w:.-]*)(?: {2,}\\S.*)?$",
           "entry": "^ {2}(?:[^\\x00-\\x7F\\s]\\S* {1,2})?(?<command>\\w[\\w:.-]*)(?: {2,}\\S.*)?$",
           "wrapped": "^ {8,}\\S",
+      "footer": {
+        "pattern": "^\\S",
+        "maxRows": 3
+      },
           "namespaces": [
             "skill:"
           ]
@@ -156,13 +183,16 @@
     "runningRows": [
       "^\\s*[⠀-⣿] Working…",
       "^\\s*⎋ Working…",
+      "^\\s*\\u{F12B7} Working…",
+      "^\\s?[⠀-⣿]\\s+\\d+[smh] · ",
       "^\\s?[⠀-⣿]\\s+\\d+[smh]\\s.*▶",
       "^╭─{2} [⠀-⣿] \\d+[smh] "
     ],
     "dialogsInBox": true,
     "inlineHint": {
       "fg": [
-        "rgb(107,114,128)"
+        "rgb(107,114,128)",
+        "rgb(192,181,182)"
       ]
     }
   },

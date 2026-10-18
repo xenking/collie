@@ -17,6 +17,9 @@ import {
   type Profile,
 } from "./profile";
 import { PROFILE_FILES } from "./profiles/index";
+import { findInputFrame } from "./frame";
+import { askOf } from "./surface";
+import { fixtureRows, idleFor, readScreen } from "../../test/surface-corpus";
 
 const PROFILES_DIR = join(import.meta.dirname, "profiles");
 const profileFiles = readdirSync(PROFILES_DIR).filter((name) => name.endsWith(".json"));
@@ -250,7 +253,7 @@ describe("the codex profile (M56 spec 13)", () => {
     expect(stock.pointer("> ")).toBeNull();
     const omp = read("omp");
     expect(omp.list).toMatchObject({ lead: "/", sides: ["under"] });
-    expect(omp.list.footer).toBeUndefined();
+    expect(omp.list.footer).toEqual({ pattern: "^\\S", maxRows: 3 });
     // omp 18.6.1 draws an icon column, omp 18.8 too, older omp none; a scrollbar cell ends the row.
     expect(omp.pointer(`❯ ⬢  model         Model: none selected${" ".repeat(60)}█`)).toBe("model");
     expect(omp.entry(`  🏃 prewalk       Arm or restart a one-shot model handoff${" ".repeat(40)}█`)).toBe("prewalk");
@@ -368,7 +371,7 @@ const SPEC14_CASES: readonly Spec14Case[] = [
     binary: "opencode",
     versionOutput: "1.19.2",
     version: "1.19.2",
-    above: "1.19.2",
+    above: "1.19.4",
     takes: [
       { anchor: "top", row: "  ┃" },
       { anchor: "prompt", row: "  ┃  hello there", draft: "hello there" },
@@ -600,7 +603,7 @@ describe("the frame schema of the interior walk (M56 spec 14)", () => {
     const raw = parseJsonObject(readFileSync(join(PROFILES_DIR, "omp.json"), "utf8"))!;
     expect(failure(change(raw, ["idle", "frameAlternates", 1, "bottom", "pattern"], "[unclosed")).path).toBe("idle.frameAlternates[1].bottom.pattern");
     expect(failure(change(raw, ["idle", "frameAlternates"], "no list")).path).toBe("idle.frameAlternates");
-    expect(parseProfile(raw).idle.frameAlternates).toHaveLength(4);
+    expect(parseProfile(raw).idle.frameAlternates).toHaveLength(5);
   });
 
   it("omp 18.11 (issue 497): the chips of every symbol preset collapse, the Nerd Font pointer points, and a skill is listed under its namespace", () => {
@@ -616,7 +619,7 @@ describe("the frame schema of the interior walk (M56 spec 14)", () => {
     expect(pointer.exec("❯ ✦ skill:wrap-up   Wrap up the session")?.groups?.["command"]).toBe("skill:wrap-up");
     expect(pointer.test("> model   Switch model")).toBe(false);
     expect(list.namespaces).toEqual(["skill:"]);
-    expect(omp.idle.inlineHint).toEqual({ fg: ["rgb(107,114,128)"] });
+    expect(omp.idle.inlineHint).toEqual({ fg: ["rgb(107,114,128)", "rgb(192,181,182)"] });
   });
 
   it("omp 18.11 (issue 497): the prompt and continuation rows leave the box's right border out of the draft", () => {
@@ -914,5 +917,45 @@ describe("other names of a harness (M56 spec 14 review)", () => {
         claimed.set(name, profile.id);
       }
     }
+  });
+});
+
+// omp 18.11.3 under pi-o-my's patched runtime (the `›` gutter, the status row under the box, a belowStatus
+// widget row, the todo HUD and a recap above it). Captured live 2026-10-18 through Collie's own pane read.
+describe("omp 18.11.3 with the status row and a widget row under the box", () => {
+  const read = (name: string) => readScreen(fixtureRows(name === "ask-single" ? "omp--v18-11-3-ask-single.txt" : `omp--v18-11-3-below-status-${name}.txt`), "omp", idleFor("omp")).surface;
+  const frameTextOf = (file: string) => findInputFrame(fixtureRows(file), idleFor("omp")!)?.interior.text;
+  it.each([
+    ["idle", "idle", "empty"],
+    ["idle-recap", "idle", "empty"],
+    ["draft", "idle", "draft"],
+    ["draft-ghost", "idle", "draft"],
+    ["running-todo", "running", "empty"],
+  ])("%s reads turn %s, composer %s", (name, turn, composer) => {
+    expect(read(name)).toMatchObject({ turn, modal: "none", composer });
+  });
+  it.each([1, 3, 12])("reads the box with %i widget rows under the status row", (count) => {
+    const rows = fixtureRows("omp--v18-11-3-below-status-idle.txt");
+    const widgetAt = rows.findIndex((row) => row.segments.some((seg) => seg.text.startsWith("Matt [prototype]")));
+    const widget = rows[widgetAt];
+    expect(widget).toBeDefined();
+    const screen = [...rows.slice(0, widgetAt), ...Array.from({ length: count }, () => widget!)];
+    expect(readScreen(screen, "omp", idleFor("omp")).surface).toMatchObject({ turn: "idle", modal: "none", composer: "empty" });
+  });
+  it("the ghost word after a typed `el` is not part of the draft", () => {
+    expect(frameTextOf("omp--v18-11-3-below-status-draft-ghost.txt")).toBe("el");
+  });
+  it("the approval dialog lifts its three decision rows, whichever one the pointer is on", () => {
+    for (const name of ["approval-bash", "approval-bash-moved", "approval-bash-deny"]) {
+      const surface = readScreen(fixtureRows(`omp--v18-11-3-${name}.txt`), "omp", idleFor("omp")).surface;
+      expect(askOf(surface.modal)?.options.map((o) => o.label)).toEqual(["Approve", "Approve bash for this session", "Deny"]);
+    }
+  });
+  it("the decision row after an answer reads as a free box", () => {
+    expect(readScreen(fixtureRows("omp--v18-11-3-below-status-decision-row.txt"), "omp", idleFor("omp")).surface).toMatchObject({ modal: "none", composer: "empty" });
+  });
+  it("the Ask dialog lifts with its options, the widget row under it notwithstanding", () => {
+    const surface = read("ask-single");
+    expect(askOf(surface.modal)?.options.map((o) => o.label)).toEqual(["Apple", "Banana", "Cherry", "Other (type your own)", "Cancel"]);
   });
 });
