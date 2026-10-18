@@ -302,9 +302,10 @@ function detectDecisionApproval(texts: string[]): ApprovalRegion | null {
   const footerRow = BOX_ROW.exec(texts[bottom - 1]!);
   if (footerRow === null || !DECISION_FOOTER.test(footerRow[1]!.trim())) return null;
   if (!DIVIDER.test(texts[bottom - 2]!)) return null;
-  const rows = [bottom - 5, bottom - 4, bottom - 3].map((at) => readDecisionOption(texts[at]!));
-  if (rows[0]?.label !== "Approve" || rows[1] === null || !SESSION_LABEL.test(rows[1].label) || rows[2]?.label !== "Deny") return null;
-  const pointedAt = rows.filter((r) => r!.pointed).length === 1 ? rows.findIndex((r) => r!.pointed) : -1;
+  const [approve, session, deny] = [bottom - 5, bottom - 4, bottom - 3].map((at) => readDecisionOption(texts[at]!));
+  if (approve?.label !== "Approve" || !session || !SESSION_LABEL.test(session.label) || deny?.label !== "Deny") return null;
+  const rows = [approve, session, deny];
+  const pointedAt = rows.filter((r) => r.pointed).length === 1 ? rows.findIndex((r) => r.pointed) : -1;
   if (pointedAt < 0) return null;
 
   let titleAt = bottom - 6;
@@ -314,7 +315,7 @@ function detectDecisionApproval(texts: string[]): ApprovalRegion | null {
   }
   if (titleAt < 0 || titleAt + 1 > bottom - 6) return null;
   const tool = TITLE.exec(texts[titleAt]!)![1]!;
-  if (!LIFTED_TOOLS.has(tool) || !rows[1].label.includes(` ${tool} `)) return null;
+  if (!LIFTED_TOOLS.has(tool) || !session.label.includes(` ${tool} `)) return null;
   const bodyRows = texts.slice(titleAt + 1, bottom - 5);
   if (bodyRows.some((row) => !row.endsWith("│") && row.endsWith("…"))) return null;
   const body = bodyRows.map(bodyText);
@@ -334,7 +335,7 @@ function detectDecisionApproval(texts: string[]): ApprovalRegion | null {
     caption: title,
     options: [
       { label: "Approve", description: shown.join(ROW_BREAK), keys: pointerWalk(pointedAt, 0), keyLabel: badge(0) },
-      { label: rows[1].label, keys: pointerWalk(pointedAt, 1), keyLabel: badge(1) },
+      { label: session.label, keys: pointerWalk(pointedAt, 1), keyLabel: badge(1) },
       { label: "Deny", keys: pointerWalk(pointedAt, 2), keyLabel: badge(2) },
     ],
     family: "permission",

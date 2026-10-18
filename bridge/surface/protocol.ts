@@ -2625,7 +2625,9 @@ export class SendProtocol {
       state.marks.s1 = s1;
       throw new Ended("typed_not_submitted", "changed", sawNote(s1, { framed: s0.frame !== null, rowsHash: s1.rowsHash, detail: TURN_STARTED }));
     }
-    if (state.match?.profile.keys.enterWhileRunning !== "queues") state.streamed = true;
+    // Streamed on a harness whose Enter queues too: commitKeys keeps Enter there, but S2 must then read
+    // the box letting go of the text, not the running sign that was already on the screen (fork deviation).
+    state.streamed = true;
   }
 
   /** Anything that goes into a turn S0 read as running (a send, Add to it, Replace, Submit, Discard) meets {@link turnRefusal}, then is queued. */

@@ -125,7 +125,7 @@
         },
         "continuationIndent": 2,
         "maxDraftRows": 40,
-        "maxTailRows": 3
+        "maxTailRows": 12
       },
       {
         "walk": "interior",

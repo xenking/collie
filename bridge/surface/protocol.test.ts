@@ -5472,6 +5472,16 @@ describe("S1 reads the turn again before the commit key (PR 491): a turn starts 
     expect({ enter: pane.keysSeen.includes("Enter"), outcome: answer.receipt?.outcome }).toEqual({ enter: true, outcome: "sent" });
   });
 
+  test("claude: a turn the S1 read first sees, and an Enter that does nothing: the text stays in the box, so it is never reported sent", async () => {
+    const { pane, send } = rig();
+    pane.enterSubmits = false;
+    pane.afterInput = (p, what) => {
+      if (what.endsWith("then give it a title")) p.over = [LIVE_ROW];
+    };
+    const answer = await send("then give it a title");
+    expect(answer.receipt?.outcome).not.toBe("sent");
+  });
+
   test("codex: /status (a command Codex queues) typed on an idle box, a turn starts while it goes in: it takes Tab, as at S0, never Enter", async () => {
     const pane = new FakePane("codex");
     const { send } = rig({ pane, harness: "codex", version: "0.159.2" });

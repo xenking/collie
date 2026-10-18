@@ -934,6 +934,14 @@ describe("omp 18.11.3 with the status row and a widget row under the box", () =>
   ])("%s reads turn %s, composer %s", (name, turn, composer) => {
     expect(read(name)).toMatchObject({ turn, modal: "none", composer });
   });
+  it.each([1, 3, 12])("reads the box with %i widget rows under the status row", (count) => {
+    const rows = fixtureRows("omp--v18-11-3-below-status-idle.txt");
+    const widgetAt = rows.findIndex((row) => row.segments.some((seg) => seg.text.startsWith("Matt [prototype]")));
+    const widget = rows[widgetAt];
+    expect(widget).toBeDefined();
+    const screen = [...rows.slice(0, widgetAt), ...Array.from({ length: count }, () => widget!)];
+    expect(readScreen(screen, "omp", idleFor("omp")).surface).toMatchObject({ turn: "idle", modal: "none", composer: "empty" });
+  });
   it("the ghost word after a typed `el` is not part of the draft", () => {
     expect(frameTextOf("omp--v18-11-3-below-status-draft-ghost.txt")).toBe("el");
   });

@@ -2,7 +2,7 @@
 // run.ts holds the order of the steps. This file does the work, so a test of the order needs none of it.
 
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { resolveTmuxBinary } from "../../../bridge/mux/tmux/exec";
 import { gateFor } from "../../../bridge/surface/key-gate";
 import { profileFor } from "../../../web/src/lib/surface/profile";
@@ -210,11 +210,13 @@ export function realPorts(options: RealOptions = {}): LabPorts {
       const own = env[`COLLIE_LAB_BIN_${spec.id.toUpperCase()}`];
       if (own !== undefined && own !== "") {
         mkdirSync(dirname(binaryPath(dirs, spec)), { recursive: true });
-        symlinkSync(own, binaryPath(dirs, spec));
+        // A symlink target is read from the link's own folder, so a relative override must be made absolute first.
+        const target = resolve(own);
+        symlinkSync(target, binaryPath(dirs, spec));
         const printed = await run([binaryPath(dirs, spec), "--version"], dirs.root, { ...base, ...spec.env(dirs) }, 30_000);
         const found = VERSION_IN_TEXT.exec(printed.out)?.[0];
-        if (found !== version) throw new LabInfraError(`${own} prints ${found ?? "no version"}, and the lab asked for ${version}`);
-        log(`using ${own} for ${spec.id}; it prints ${found}`);
+        if (found !== version) throw new LabInfraError(`${target} prints ${found ?? "no version"}, and the lab asked for ${version}`);
+        log(`using ${target} for ${spec.id}; it prints ${found}`);
         return found;
       }
       const result = await run(["npm", "install", "--prefix", dirs.bin, "--no-audit", "--no-fund", "--no-save", `${spec.npm}@${version}`], dirs.bin, base, INSTALL_TIMEOUT_MS);
