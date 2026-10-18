@@ -547,4 +547,11 @@ describe("normaliseBasePath — COLLIE_BASE_PATH as the bridge mounts it", () =>
     delete process.env.COLLIE_BASE_PATH;
     expect(loadConfig().basePath).toBe("/");
   });
+
+  test("the OMP voice token path expands a leading ~/ and defaults under the home config", () => {
+    const loaded = (value: string | undefined) => loadConfig({ ...process.env, OMP_VOICE_CONTROL_TOKEN_FILE: value }).voiceControlTokenFile;
+    expect(loaded("~/.config/omp-voice-control/token")).toBe(join(homedir(), ".config", "omp-voice-control", "token"));
+    expect(loaded("/run/secrets/voice")).toBe("/run/secrets/voice");
+    expect(loaded(undefined)).toBe(join(homedir(), ".config", "omp-voice-control", "token"));
+  });
 });

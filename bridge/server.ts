@@ -1003,7 +1003,10 @@ export function voiceRelayResponse(
   return secure(new Response(null, { status: 204 }));
 }
 
-async function voicePreferencesResponse(
+/** What the phone records with when no OMP voice daemon answers: STT-only voice (shells, other agents) needs no daemon. */
+const STT_ONLY_PREFERENCES = { recordingMode: "toggle" } as const;
+
+export async function voicePreferencesResponse(
   cfg: Pick<Config, "voiceControlUrl" | "voiceControlTokenFile">,
   acceptEncoding: string | null,
 ): Promise<Response> {
@@ -1011,9 +1014,9 @@ async function voicePreferencesResponse(
   try {
     token = (await readFile(cfg.voiceControlTokenFile, "utf8")).trim();
   } catch {
-    return text("voice preferences unavailable", 503);
+    return json(STT_ONLY_PREFERENCES, acceptEncoding);
   }
-  if (!token) return text("voice preferences unavailable", 503);
+  if (!token) return json(STT_ONLY_PREFERENCES, acceptEncoding);
 
   let response: Response;
   try {
@@ -1023,9 +1026,9 @@ async function voicePreferencesResponse(
       signal: AbortSignal.timeout(5_000),
     });
   } catch {
-    return text("voice preferences unavailable", 502);
+    return json(STT_ONLY_PREFERENCES, acceptEncoding);
   }
-  if (!response.ok) return text("voice preferences unavailable", 502);
+  if (!response.ok) return json(STT_ONLY_PREFERENCES, acceptEncoding);
 
   let value: unknown;
   try {
