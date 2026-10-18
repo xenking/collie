@@ -72,9 +72,9 @@ export function draftLines(field: HTMLTextAreaElement): number {
  * changes size (a rotation, a keyboard, a draft-size setting), so the state is settled before paint.
  * It only ever drives a class: nothing remounts, so the field keeps its caret.
  *
- * The widths come from the DOM, not from a constant: the row's group width is remembered while the
- * buttons are in the row, and what the column frees is that less the column's group width, so a
- * primary action that is a long word is accounted for ({@link RELEASE_MAX_WIDTH_RATIO}).
+ * The widths come from the DOM, not from a constant: what the column frees is read off the buttons
+ * as they stand, so a primary action that is a long word is accounted for
+ * ({@link RELEASE_MAX_WIDTH_RATIO}).
  */
 export function useStackedActions(
   field: RefObject<HTMLTextAreaElement | null>,
@@ -82,7 +82,6 @@ export function useStackedActions(
   draft: string,
 ): boolean {
   const [stacked, setStacked] = useState(false);
-  const rowGroupWidth = useRef(0);
   // Read by `measure` and not a dependency of it, so the observer below is not torn down and
   // re-armed on every keystroke.
   const draftRef = useRef(draft);
@@ -91,12 +90,11 @@ export function useStackedActions(
     const el = field.current;
     const buttons = group.current;
     if (el === null || buttons === null) return;
-    const inColumn = buttons.dataset.stacked === "true";
-    if (!inColumn) rowGroupWidth.current = buttons.offsetWidth;
     const reading: StackReading = {
       lines: draftLines(el),
-      empty: draftRef.current.length === 0,
-      widthRatio: inColumn ? stackedWidthRatio(el, rowGroupWidth.current - buttons.offsetWidth) : 1,
+      // The composer's own meaning of an empty draft (`hasDraft`): blank rows are not a message.
+      empty: draftRef.current.trim() === "",
+      widthRatio: buttons.dataset.stacked === "true" ? stackedWidthRatio(el, buttons) : 1,
     };
     setStacked((was) => nextStacked(was, reading));
   }, [field, group]);
@@ -111,12 +109,21 @@ export function useStackedActions(
   return stacked;
 }
 
-/** The stacked field's content width over what it would be in the row, `freed` px narrower; 1 when nothing is measured. */
-function stackedWidthRatio(field: HTMLTextAreaElement, freed: number): number {
+/**
+ * How much wider the stacked field is than it would be in the row. What the column frees is read off
+ * the buttons as they stand now, so a primary action that changes while stacked is accounted for:
+ * the row would hold every button side by side with the gap between them, the column holds the
+ * widest one. 1 when nothing is measured (no layout) or the column freed nothing.
+ */
+function stackedWidthRatio(field: HTMLTextAreaElement, group: HTMLElement): number {
   const style = getComputedStyle(field);
   const padding = (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
   const stackedWidth = field.clientWidth - padding;
+  // The picker is absolutely positioned and takes no place in either layout.
+  const widths = [...group.children].filter((el) => getComputedStyle(el).position !== "absolute").map((el) => el instanceof HTMLElement ? el.offsetWidth : 0);
+  const gap = Number.parseFloat(getComputedStyle(group).columnGap) || 0;
+  const freed = widths.reduce((sum, w) => sum + w, 0) + gap * Math.max(0, widths.length - 1) - Math.max(0, ...widths);
+  if (!(stackedWidth > 0) || !(freed > 0)) return 1;
   const rowWidth = stackedWidth - freed;
-  if (!(stackedWidth > 0) || freed <= 0) return 1;
   return rowWidth > 0 ? stackedWidth / rowWidth : Number.POSITIVE_INFINITY;
 }

@@ -847,6 +847,12 @@ export function fixtureFileRead(path: string): FileReadResponse | null {
   return { ...FILES_HEAD, available: true, root: FILES_ROOT, path, size: text.length, mtimeMs: FIXTURE_MTIME_MS, binary: false, truncated: false, text };
 }
 
+/** What a bridge that takes uploads publishes in `GET /api/config` (`upload`): the picker asks "Photos or Files" only then. */
+export const FIXTURE_UPLOAD = { maxBytes: 1024 * 1024, imageTypes: ["png"], textTypes: ["md"] } as const;
+
+/** The host path the bridge answers one upload with (`POST /api/pane/:id/upload`). */
+export const FIXTURE_UPLOAD_PATH = "/tmp/upload-1.png";
+
 /** The route's one answer for a path that is not there, outside the root or denied. */
 export const FIXTURE_FILES_UNKNOWN = { error: "unknown-path" } as const;
 

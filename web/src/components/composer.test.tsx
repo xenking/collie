@@ -4427,6 +4427,8 @@ describe("Composer — a tall draft stacks attach over the primary action", () =
   const WIDE = 33;
   const LINE = 24;
   const PADDING = 12;
+  /** A fixed field width, as a row a long-worded primary action leaves almost no room in; null follows the layout. */
+  let fieldPx: number | null = null;
   const field = () => {
     const el = screen.getByPlaceholderText(/type a reply/i);
     if (!(el instanceof HTMLTextAreaElement)) throw new Error("the composer's field is a textarea");
@@ -4444,13 +4446,14 @@ describe("Composer — a tall draft stacks attach over the primary action", () =
       configurable: true,
       get(this: HTMLTextAreaElement) {
         const wide = this.parentElement?.querySelector<HTMLElement>('[data-slot="composer-buttons"]')?.dataset.stacked === "true";
-        return (wide ? WIDE : NARROW) * 8;
+        return fieldPx ?? (wide ? WIDE : NARROW) * 8;
       },
     });
+    // A button is 36px wide, the 4px gap between two is the stylesheet's (`gap-1`, set inline below).
     Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
       configurable: true,
       get(this: HTMLElement) {
-        return this.dataset.slot === "composer-buttons" ? (this.dataset.stacked === "true" ? 36 : 76) : 0;
+        return this instanceof HTMLButtonElement ? 36 : 0;
       },
     });
     Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
@@ -4463,6 +4466,7 @@ describe("Composer — a tall draft stacks attach over the primary action", () =
   });
 
   afterEach(() => {
+    fieldPx = null;
     Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight");
     Reflect.deleteProperty(HTMLTextAreaElement.prototype, "clientWidth");
     Reflect.deleteProperty(HTMLElement.prototype, "offsetWidth");
@@ -4474,6 +4478,7 @@ describe("Composer — a tall draft stacks attach over the primary action", () =
     field().style.lineHeight = `${LINE}px`;
     field().style.paddingTop = `${PADDING / 2}px`;
     field().style.paddingBottom = `${PADDING / 2}px`;
+    group().style.columnGap = "4px";
     return props;
   }
 
@@ -4580,6 +4585,35 @@ describe("Composer — a tall draft stacks attach over the primary action", () =
     await waitFor(() => expect(stackedNow()).toBe(true));
     fireEvent.change(field(), { target: { value: "" } });
     await waitFor(() => expect(stackedNow()).toBe(false));
+  });
+
+  it("a sliver of a field (the column frees most of its width): a one-line draft holds the column, and emptying it lets go", async () => {
+    renderStyled();
+    fireEvent.change(field(), { target: { value: draft(4) } });
+    await waitFor(() => expect(stackedNow()).toBe(true));
+    // 70px of field: the 40px the column freed is more than half of it, so a one-line draft that is
+    // 70px wide could be three lines in the row.
+    fieldPx = 70;
+    const seen = watchLayout();
+    fireEvent.change(field(), { target: { value: "x" } });
+    expect(stackedNow()).toBe(true);
+    fireEvent.change(field(), { target: { value: "" } });
+    await waitFor(() => expect(stackedNow()).toBe(false));
+    expect(seen).toEqual([false]);
+  });
+
+  it("an ordinary field releases a one-line draft", async () => {
+    renderStyled();
+    fireEvent.change(field(), { target: { value: draft(4) } });
+    await waitFor(() => expect(stackedNow()).toBe(true));
+    fireEvent.change(field(), { target: { value: "x" } });
+    await waitFor(() => expect(stackedNow()).toBe(false));
+  });
+
+  it("blank rows are not a draft: newlines alone never stack", () => {
+    renderStyled();
+    fireEvent.change(field(), { target: { value: "\n\n\n\n" } });
+    expect(stackedNow()).toBe(false);
   });
 
   it("left: the row reverses with the box, and the column has no sides to reverse", async () => {

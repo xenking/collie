@@ -47,3 +47,19 @@ lines are exactly the row they were.**
 5. **The gap is `gap-1`, as in the row.** The column is 76px tall, or 84 with the 44px voice control,
    never taller than the three-line field (84) that stacked it, so stacking does not grow the box. The
    two 4px hit-area reaches overlap in the gap as they do in the row; the later control wins.
+
+## Consequences
+
+- An empty box, one line and two lines are unchanged, so the default composer's height and the mirror
+  above it do not move. Only a draft of three lines or more changes the layout, and it never makes the
+  box taller.
+- The field is wider by the attach button's width and a gap while stacked, about 40px, which is what
+  the owner asked the room to be used for.
+- A draft that shrinks from many lines to two keeps the column until it reads one line, so the buttons
+  do not move on every deleted line; a draft the column cannot safely release (a long-worded primary
+  action leaving a narrow row) holds the column until it is empty or sent.
+- The layout reads the DOM on every draft change and on every resize of the field: one
+  `scrollHeight` read per keystroke, and the group's button widths only while stacked.
+- Revisit if a third control joins the group, if the primary action becomes a text button by default
+  (the ratio bound then rules the column more often), or if the owner wants the column by default.
+

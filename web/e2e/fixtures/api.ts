@@ -19,6 +19,8 @@ import {
   fixtureTranscript,
   paneTextWithDraft,
   recordReply,
+  FIXTURE_UPLOAD,
+  FIXTURE_UPLOAD_PATH,
 } from "@/test/handlers";
 import { censusFor, fixtureMachines, fixtureMachinesSolo, historyFor } from "@/test/machine-fixtures";
 
@@ -215,6 +217,16 @@ export async function installApiStub(page: Page): Promise<void> {
   await page.route("**/api/**", async (route) => {
     await answer(route, new URL(route.request().url()).pathname);
   });
+}
+
+/**
+ * A bridge that takes uploads: `GET /api/config` publishes the upload capability (so the attach button
+ * asks "Photos or Files") and an upload is answered with a host path. Call it AFTER {@link installApiStub}:
+ * Playwright checks the newest handler first.
+ */
+export async function installUploadCapability(page: Page): Promise<void> {
+  await page.route("**/api/config", (route) => fulfillJson(route, { push: false, vapidPublicKey: "", upload: FIXTURE_UPLOAD }));
+  await page.route(/\/api\/pane\/[^/]+\/upload$/, (route) => fulfillJson(route, { ok: true, path: FIXTURE_UPLOAD_PATH }));
 }
 
 /**

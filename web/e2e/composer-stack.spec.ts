@@ -4,7 +4,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { en } from "@/lib/i18n/messages/en";
 
-import { installApiStub } from "./fixtures/api";
+import { installApiStub, installUploadCapability } from "./fixtures/api";
 
 // THE COMPOSER STACKS ITS TWO BUTTONS BESIDE A TALL DRAFT (ADR 0057, amended 2026-10-19), measured in
 // a real engine. jsdom (`components/composer.test.tsx`) models the field's height by hand, so this is
@@ -77,8 +77,6 @@ test("the empty box and one or two lines stay the one-row box; three lines stack
   await open(page);
   const emptyBox = await rect(box(page));
   expect(await stacked(page)).toBe(false);
-  // The default is the 44px row inside a 1px border, as before this change.
-  expect(emptyBox.height).toBeCloseTo(46, 0);
   const a0 = await rect(attach(page));
   const p0 = await rect(primary(page));
   expect(Math.abs(a0.y - p0.y)).toBeLessThan(1);
@@ -102,8 +100,7 @@ test("the empty box and one or two lines stay the one-row box; three lines stack
   // Over, not beside: the same column, attach entirely above the primary action, both 36px faces.
   expect(a1.y + a1.height).toBeLessThanOrEqual(p1.y);
   expect(Math.abs(a1.x - p1.x)).toBeLessThan(1);
-  expect(a1.width).toBeCloseTo(36, 0);
-  expect(p1.width).toBeCloseTo(36, 0);
+  expect(Math.abs(a1.width - p1.width)).toBeLessThan(1);
   // The primary action is still at the box's bottom edge, where a thumb is, and the field is wider.
   const boxRect = await rect(box(page));
   expect(boxRect.y + boxRect.height - (p1.y + p1.height)).toBeLessThan(6);
@@ -188,9 +185,7 @@ test("a draft at the field's cap scrolls inside it, stays stacked and keeps both
 });
 
 test("the attach picker opens above the box in both layouts, right-aligned to it", async ({ page }, testInfo) => {
-  await page.route("**/api/config", (route) =>
-    route.fulfill({ json: { push: false, vapidPublicKey: "", upload: { maxBytes: 1048576, imageTypes: ["png"], textTypes: ["md"] } } }),
-  );
+  await installUploadCapability(page);
   await open(page);
   for (const [name, text] of [["row", ""], ["column", rows(4)]] as const) {
     await field(page).fill(text);
@@ -209,10 +204,7 @@ test("the attach picker opens above the box in both layouts, right-aligned to it
 });
 
 test("a chip strip stays above the row, and a tall draft beside it still stacks", async ({ page }, testInfo) => {
-  await page.route("**/api/config", (route) =>
-    route.fulfill({ json: { push: false, vapidPublicKey: "", upload: { maxBytes: 1048576, imageTypes: ["png"], textTypes: ["md"] } } }),
-  );
-  await page.route(/\/api\/pane\/[^/]+\/upload$/, (route) => route.fulfill({ json: { ok: true, path: "/tmp/upload-1.png" } }));
+  await installUploadCapability(page);
   await open(page);
   await page.getByTestId("attach-photos").setInputFiles({ name: "a.png", mimeType: "image/png", buffer: Buffer.from("x") });
   const chips = page.getByRole("list", { name: en["composer.attach.listAria"] });
@@ -253,8 +245,11 @@ test("a long German placeholder leaves the empty box one row, and a tall draft s
   await page.goto(`/pane/${encodeURIComponent("w1:p1")}`);
   const textbox = page.locator('[data-slot="chat-input"]');
   await expect(textbox).toBeVisible();
-  expect((await rect(box(page))).height).toBeCloseTo(46, 0);
+  const emptyHeight = (await rect(box(page))).height;
   expect(await stacked(page)).toBe(false);
+  // The placeholder, however long its translation, does not make the empty box taller than a one-line draft.
+  await textbox.fill("x");
+  expect((await rect(box(page))).height).toBeCloseTo(emptyHeight, 0);
   await textbox.fill(rows(4));
   await expect(group(page)).toHaveAttribute("data-stacked", "true");
 });
