@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import { de } from "@/lib/i18n/messages/de";
 import { en } from "@/lib/i18n/messages/en";
 
 import { installApiStub, installUploadCapability } from "./fixtures/api";
@@ -24,10 +25,12 @@ test.beforeEach(async ({ page }, testInfo) => {
 });
 
 const field = (page: Page) => page.getByRole("textbox", { name: en["composer.placeholder.reply"] });
-const group = (page: Page) => page.locator('[data-slot="composer-buttons"]');
-const box = (page: Page) => page.locator('[data-slot="composer-box"]');
 const attach = (page: Page) => page.getByRole("button", { name: en["composer.attach.aria"] });
-const primary = (page: Page) => group(page).locator("button").last();
+// The box and the button group are found from the controls a person sees, never by an attribute: the
+// box is the field's parent, the group is attach's parent (its siblings are the other controls).
+const box = (page: Page) => field(page).locator("xpath=..");
+const group = (page: Page) => attach(page).locator("xpath=..");
+const primary = (page: Page) => group(page).getByRole("button").last();
 
 async function open(page: Page) {
   await page.goto(`/pane/${encodeURIComponent("w1:p1")}`);
@@ -40,17 +43,32 @@ async function rect(locator: Locator) {
   return r!;
 }
 
-const stacked = (page: Page) => group(page).evaluate((el) => el.getAttribute("data-stacked") === "true");
+/** Whether attach stands over the primary action rather than beside it, by where they are drawn. */
+async function stacked(page: Page): Promise<boolean> {
+  const a = await rect(attach(page));
+  const p = await rect(primary(page));
+  return a.y + a.height <= p.y + 1;
+}
+
+async function expectStacked(page: Page, want: boolean) {
+  await expect.poll(() => stacked(page)).toBe(want);
+}
 
 
-/** Records every change of the group's layout from now on, as a comma list on `<body>`. */
+/** Records every change of the button group's layout from now on, as a comma list on `<body>`. */
 async function watchFlips(page: Page) {
-  await page.evaluate(() => {
-    const g = document.querySelector('[data-slot="composer-buttons"]')!;
+  await group(page).evaluate((g) => {
+    const drawn = () => {
+      const buttons = g.querySelectorAll(":scope > button");
+      const first = buttons[0]?.getBoundingClientRect();
+      const last = buttons[buttons.length - 1]?.getBoundingClientRect();
+      return first !== undefined && last !== undefined && first.bottom <= last.top + 1;
+    };
     document.body.dataset.flips = "";
+    // Any attribute change on the group is a layout change; what it drew is recorded, not what it said.
     new MutationObserver(() => {
-      document.body.dataset.flips += `${g.getAttribute("data-stacked") ?? "?"},`;
-    }).observe(g, { attributes: true, attributeFilter: ["data-stacked"] });
+      document.body.dataset.flips += `${String(drawn())},`;
+    }).observe(g, { attributes: true });
   });
 }
 
@@ -94,7 +112,7 @@ test("the empty box and one or two lines stay the one-row box; three lines stack
   const fieldAtTwo = await rect(field(page));
 
   await field(page).fill(rows(3));
-  await expect(group(page)).toHaveAttribute("data-stacked", "true");
+  await expectStacked(page, true);
   const a1 = await rect(attach(page));
   const p1 = await rect(primary(page));
   // Over, not beside: the same column, attach entirely above the primary action, both 36px faces.
@@ -116,7 +134,7 @@ test("a long dictated paragraph stacks, and the field takes the width the column
   await open(page);
   const before = (await rect(field(page))).width;
   await field(page).fill("This is what a dictated message looks like when it runs on and on past two lines of a phone sized composer, with plenty of words in it. ".repeat(2));
-  await expect(group(page)).toHaveAttribute("data-stacked", "true");
+  await expectStacked(page, true);
   expect((await rect(field(page))).width).toBeGreaterThan(before + 30);
   await shot(page, "dictated", testInfo);
 });
@@ -124,35 +142,28 @@ test("a long dictated paragraph stacks, and the field takes the width the column
 test("typing across the boundary one key at a time toggles once, keeps the caret and remounts nothing", async ({ page }) => {
   await open(page);
   await field(page).click();
-  const tagged = await page.evaluate(() => {
-    const els = [document.querySelector('[data-slot="chat-input"]'), ...document.querySelectorAll('[data-slot="composer-buttons"] button')];
-    els.forEach((el, i) => el?.setAttribute("data-probe", String(i)));
-    return els.length;
-  });
-  expect(tagged).toBe(3);
+  // Handles on the field and both buttons: a control that was rebuilt leaves its handle disconnected.
+  const handles = [await field(page).elementHandle(), await attach(page).elementHandle(), await primary(page).elementHandle()];
   await watchFlips(page);
 
   const text = "word ".repeat(70);
   await page.keyboard.type(text, { delay: 3 });
-  await expect(group(page)).toHaveAttribute("data-stacked", "true");
+  await expectStacked(page, true);
   expect(await takeFlips(page)).toEqual(["true"]);
 
   // Nothing was rebuilt, and the caret is where the typing left it, still in the field.
-  const state = await page.evaluate(() => {
-    const f = document.querySelector<HTMLTextAreaElement>('[data-slot="chat-input"]')!;
-    return {
-      same: [...document.querySelectorAll("[data-probe]")].length,
-      focused: document.activeElement === f,
-      caretAtEnd: f.selectionStart === f.value.length,
-    };
-  });
-  expect(state).toEqual({ same: 3, focused: true, caretAtEnd: true });
+  for (const handle of handles) expect(await handle!.evaluate((el) => el.isConnected)).toBe(true);
+  const caret = await field(page).evaluate((el) => ({
+    focused: document.activeElement === el,
+    atEnd: el instanceof HTMLTextAreaElement && el.selectionStart === el.value.length,
+  }));
+  expect(caret).toEqual({ focused: true, atEnd: true });
 
   // And back down, a key at a time: it lets go once, when the draft is down to one line.
   await page.keyboard.down("Backspace");
   for (let i = 0; i < text.length; i++) await page.keyboard.press("Backspace");
   await page.keyboard.up("Backspace");
-  await expect(group(page)).toHaveAttribute("data-stacked", "false");
+  await expectStacked(page, false);
   expect(await takeFlips(page)).toEqual(["false"]);
 });
 
@@ -171,7 +182,7 @@ test("sweeping the draft length through the boundary never flips more than once 
 test("a draft at the field's cap scrolls inside it, stays stacked and keeps both buttons on screen", async ({ page }, testInfo) => {
   await open(page);
   await field(page).fill(rows(60));
-  await expect(group(page)).toHaveAttribute("data-stacked", "true");
+  await expectStacked(page, true);
   const scrolls = await field(page).evaluate((el) => el.scrollHeight > el.clientHeight);
   expect(scrolls).toBe(true);
   const viewport = page.viewportSize()!;
@@ -189,7 +200,7 @@ test("the attach picker opens above the box in both layouts, right-aligned to it
   await open(page);
   for (const [name, text] of [["row", ""], ["column", rows(4)]] as const) {
     await field(page).fill(text);
-    await expect(group(page)).toHaveAttribute("data-stacked", name === "column" ? "true" : "false");
+    await expectStacked(page, name === "column");
     await attach(page).click();
     const panel = page.getByRole("dialog", { name: en["composer.attach.title"] });
     await expect(panel).toBeVisible();
@@ -202,7 +213,7 @@ test("the attach picker opens above the box in both layouts, right-aligned to it
       // The picker's backdrop is a screen-wide button inside the group; it is no control, so a reading
       // taken while it is open (the draft shrinks to a line) still lets the column go.
       await field(page).fill("x");
-      await expect(group(page)).toHaveAttribute("data-stacked", "false");
+      await expectStacked(page, false);
     }
     await page.keyboard.press("Escape");
     await expect(panel).toBeHidden();
@@ -216,7 +227,7 @@ test("a chip strip stays above the row, and a tall draft beside it still stacks"
   const chips = page.getByRole("list", { name: en["composer.attach.listAria"] });
   await expect(chips).toBeVisible();
   await field(page).fill(rows(4));
-  await expect(group(page)).toHaveAttribute("data-stacked", "true");
+  await expectStacked(page, true);
   const c = await rect(chips);
   const f = await rect(field(page));
   const g = await rect(group(page));
@@ -234,7 +245,7 @@ test("hand left: the column stands at the box's left edge, attach over the prima
   // Mirrored row: Send on the outer (left) edge, then attach, then the field.
   expect(p0.x).toBeLessThan(a0.x);
   await field(page).fill(rows(4));
-  await expect(group(page)).toHaveAttribute("data-stacked", "true");
+  await expectStacked(page, true);
   const a1 = await rect(attach(page));
   const p1 = await rect(primary(page));
   const b = await rect(box(page));
@@ -249,15 +260,17 @@ test("hand left: the column stands at the box's left edge, attach over the prima
 test("a long German placeholder leaves the empty box one row, and a tall draft still stacks", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("collie:locale:v1", "de"));
   await page.goto(`/pane/${encodeURIComponent("w1:p1")}`);
-  const textbox = page.locator('[data-slot="chat-input"]');
+  const textbox = page.getByRole("textbox", { name: de["composer.placeholder.reply"] });
   await expect(textbox).toBeVisible();
-  const emptyHeight = (await rect(box(page))).height;
-  expect(await stacked(page)).toBe(false);
+  const german = textbox.locator("xpath=..");
+  const emptyHeight = (await rect(german)).height;
   // The placeholder, however long its translation, does not make the empty box taller than a one-line draft.
   await textbox.fill("x");
-  expect((await rect(box(page))).height).toBeCloseTo(emptyHeight, 0);
+  expect((await rect(german)).height).toBeCloseTo(emptyHeight, 0);
   await textbox.fill(rows(4));
-  await expect(group(page)).toHaveAttribute("data-stacked", "true");
+  const a = await rect(german.getByRole("button", { name: de["composer.attach.aria"] }));
+  const last = await rect(german.getByRole("button").last());
+  expect(a.y + a.height).toBeLessThanOrEqual(last.y + 1);
 });
 
 test("a desktop width stacks the same way", async ({ page }, testInfo) => {
@@ -265,7 +278,7 @@ test("a desktop width stacks the same way", async ({ page }, testInfo) => {
   await open(page);
   expect(await stacked(page)).toBe(false);
   await field(page).fill(rows(5));
-  await expect(group(page)).toHaveAttribute("data-stacked", "true");
+  await expectStacked(page, true);
   const a = await rect(attach(page));
   const p = await rect(primary(page));
   expect(a.y + a.height).toBeLessThanOrEqual(p.y);
