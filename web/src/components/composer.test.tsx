@@ -3088,10 +3088,13 @@ describe("Composer — the composer is one box", () => {
     // One row, no toolbar row under the field: the three are direct children of the box, in
     // reading order field, attach, action — attach next to the primary action, as it stood
     // before the one-box change.
-    expect(attach().parentElement).toBe(box);
-    expect(send.parentElement).toBe(box);
-    const order = [...box.children].filter((el) => el === attach() || el === field() || el === send);
-    expect(order).toEqual([field(), attach(), send]);
+    // The two buttons share one always-rendered group (so stacking them is a class change, never a
+    // remount), and the group is the box's second child after the field.
+    const group = attach().parentElement!;
+    expect(group.parentElement).toBe(box);
+    expect(send.parentElement).toBe(group);
+    expect([...box.children].filter((el) => el === field() || el === group)).toEqual([field(), group]);
+    expect([...group.children].filter((el) => el === attach() || el === send)).toEqual([attach(), send]);
     // The box IS the flex row, and `items-end` pins both buttons to the bottom edge while a long
     // draft grows the field upward.
     expect(box.className).toMatch(/(?:^|\s)flex(?=\s|$)/);
@@ -3161,7 +3164,7 @@ describe("Composer — the composer is one box", () => {
     expect(field().className).toMatch(/(?:^|\s)min-w-0(?=\s|$)/);
     const send = screen.getByRole("button", { name: "Send" });
     // Still in the box's one row, beside the field, after the field.
-    expect(send.parentElement).toBe(field().parentElement);
+    expect(send.parentElement!.parentElement).toBe(field().parentElement);
     expect(field().compareDocumentPosition(send) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Nothing in the field reserves a horizontal strip for a control, so the path has the field's
     // whole width to wrap into.
@@ -3949,7 +3952,7 @@ describe("Composer — hand", () => {
   it("left: mirrors the box so Send, Attach, then the field read left to right, in the same DOM order", () => {
     renderComposer();
     const order = (el: HTMLElement) =>
-      [...el.children]
+      [...el.querySelectorAll(":scope > textarea, :scope > [data-slot=composer-buttons] > button")]
         .map((c) => c.getAttribute("aria-label") ?? c.tagName)
         .filter((n) => ["TEXTAREA", "Attach file", "Send"].includes(n));
     const right = order(box());
@@ -4410,5 +4413,173 @@ describe("the cap (M56 spec 09)", () => {
     await waitFor(() => expect(recordedSends()).toHaveLength(3));
     expect(recordedSends()[2]!.rowsHash).toBeUndefined();
     expect(recordedSends()[2]!.capAck).toBeUndefined();
+  });
+});
+
+// A TALL DRAFT STACKS THE TWO BUTTONS (ADR 0057, amended 2026-10-19). Dictate a paragraph and the
+// field is three lines of text beside a column of free space; attach moves up over the primary action
+// and the field takes the width it gave back. jsdom lays nothing out, so the field's scroll height is
+// modelled here: a line holds NARROW characters beside two buttons and WIDE beside one (the column
+// is 40px narrower than the row, about five characters of this face). What each assertion stops is
+// named at it.
+describe("Composer — a tall draft stacks attach over the primary action", () => {
+  const NARROW = 28;
+  const WIDE = 33;
+  const LINE = 24;
+  const PADDING = 12;
+  const field = () => {
+    const el = screen.getByPlaceholderText(/type a reply/i);
+    if (!(el instanceof HTMLTextAreaElement)) throw new Error("the composer's field is a textarea");
+    return el;
+  };
+  const group = () => document.querySelector<HTMLElement>('[data-slot="composer-buttons"]')!;
+  const stackedNow = () => group().dataset.stacked === "true";
+  const linesOf = (text: string, perLine: number) =>
+    Math.max(1, text.split("\n").reduce((sum, row) => sum + Math.max(1, Math.ceil(row.length / perLine)), 0));
+  const draft = (lines: number) => "x".repeat(NARROW * (lines - 1) + 1);
+
+  beforeEach(() => {
+    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
+      configurable: true,
+      get(this: HTMLTextAreaElement) {
+        const wide = this.parentElement?.querySelector<HTMLElement>('[data-slot="composer-buttons"]')?.dataset.stacked === "true";
+        return linesOf(this.value, wide ? WIDE : NARROW) * LINE + PADDING;
+      },
+    });
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight");
+  });
+
+  /** The composer, its field wearing the line height and padding the stylesheet gives it (jsdom has no stylesheet). */
+  function renderStyled(overrides: Partial<ComponentProps<typeof Composer>> = {}) {
+    const props = renderComposer(overrides);
+    field().style.lineHeight = `${LINE}px`;
+    field().style.paddingTop = `${PADDING / 2}px`;
+    field().style.paddingBottom = `${PADDING / 2}px`;
+    return props;
+  }
+
+  /** Every change of the group's layout from here on, in order. */
+  function watchLayout(): boolean[] {
+    const seen: boolean[] = [];
+    new MutationObserver(() => seen.push(stackedNow())).observe(group(), { attributes: true, attributeFilter: ["data-stacked"] });
+    return seen;
+  }
+
+  it("keeps the empty box, one line and two lines in the row, exactly the one-row box it was", () => {
+    renderStyled();
+    expect(stackedNow()).toBe(false);
+    expect(group().className).toMatch(/(?:^|\s)items-end(?=\s|$)/);
+    expect(group().className).not.toMatch(/flex-col/);
+    for (const lines of [1, 2]) {
+      fireEvent.change(field(), { target: { value: draft(lines) } });
+      expect(stackedNow()).toBe(false);
+    }
+  });
+
+  it("stacks at three lines: a column, attach over the primary action, bottom-pinned", async () => {
+    renderStyled();
+    fireEvent.change(field(), { target: { value: draft(3) } });
+    await waitFor(() => expect(stackedNow()).toBe(true));
+    expect(group().className).toMatch(/(?:^|\s)flex-col(?=\s|$)/);
+    expect(group().className).toMatch(/(?:^|\s)self-end(?=\s|$)/);
+    // 36px faces whose 4px reaches meet in the middle of the gap, and cross nowhere.
+    expect(group().className).toMatch(/(?:^|\s)gap-2(?=\s|$)/);
+    const buttons = [...group().querySelectorAll("button")].map((b) => b.getAttribute("aria-label"));
+    expect(buttons).toEqual(["Attach file", "Send"]);
+  });
+
+  it("only restyles: the field and both buttons are the same nodes, and the caret stays, across the toggle", async () => {
+    renderStyled();
+    const before = field();
+    const beforeAttach = screen.getByRole("button", { name: "Attach file" });
+    field().focus();
+    fireEvent.change(field(), { target: { value: "ab" } });
+    const beforeSend = screen.getByRole("button", { name: "Send" });
+    field().setSelectionRange(1, 1);
+
+    fireEvent.change(field(), { target: { value: draft(3) } });
+    await waitFor(() => expect(stackedNow()).toBe(true));
+
+    expect(field()).toBe(before);
+    expect(screen.getByRole("button", { name: "Attach file" })).toBe(beforeAttach);
+    expect(screen.getByRole("button", { name: "Send" })).toBe(beforeSend);
+    expect(document.activeElement).toBe(field());
+  });
+
+  it("cannot flicker: growing one character at a time across the boundary changes the layout once", async () => {
+    renderStyled();
+    const seen = watchLayout();
+    let value = "";
+    for (let i = 0; i < NARROW * 5; i++) {
+      value += "x";
+      fireEvent.change(field(), { target: { value } });
+    }
+    await waitFor(() => expect(stackedNow()).toBe(true));
+    // Stacking made the field wider, so the same text wraps to two lines at the boundary. It stays
+    // stacked: a flip-flop would show here as more than one record.
+    expect(linesOf(value.slice(0, NARROW * 2 + 1), WIDE)).toBe(2);
+    expect(seen).toEqual([true]);
+  });
+
+  it("cannot flicker: shrinking one character at a time back through the boundary changes the layout once, at one line", async () => {
+    renderStyled();
+    let value = draft(5);
+    fireEvent.change(field(), { target: { value } });
+    await waitFor(() => expect(stackedNow()).toBe(true));
+    const seen = watchLayout();
+    const leftAt: number[] = [];
+    while (value.length > 0) {
+      value = value.slice(0, -1);
+      fireEvent.change(field(), { target: { value } });
+      if (!stackedNow() && leftAt.length === 0) leftAt.push(value.length);
+    }
+    await waitFor(() => expect(stackedNow()).toBe(false));
+    expect(seen).toEqual([false]);
+    // It let go only once the draft read one line at the stacked width, and that is a draft that
+    // cannot reach three lines at the narrow one.
+    expect(linesOf("x".repeat(leftAt[0]!), WIDE)).toBeLessThanOrEqual(1);
+    expect(linesOf("x".repeat(leftAt[0]!), NARROW)).toBeLessThan(3);
+  });
+
+  it("a draft at the field's cap, scrolling inside itself, stays stacked", async () => {
+    renderStyled();
+    fireEvent.change(field(), { target: { value: draft(40) } });
+    await waitFor(() => expect(stackedNow()).toBe(true));
+    fireEvent.change(field(), { target: { value: draft(41) } });
+    expect(stackedNow()).toBe(true);
+  });
+
+  it("an explicit newline counts as a line: three short rows stack", async () => {
+    renderStyled();
+    fireEvent.change(field(), { target: { value: "one\ntwo\nthree" } });
+    await waitFor(() => expect(stackedNow()).toBe(true));
+  });
+
+  it("clearing the draft (as a send does) puts the buttons back in the row", async () => {
+    renderStyled();
+    fireEvent.change(field(), { target: { value: draft(4) } });
+    await waitFor(() => expect(stackedNow()).toBe(true));
+    fireEvent.change(field(), { target: { value: "" } });
+    await waitFor(() => expect(stackedNow()).toBe(false));
+  });
+
+  it("left: the row reverses with the box, and the column has no sides to reverse", async () => {
+    renderStyled({ hand: "left" });
+    expect(group().className).toMatch(/(?:^|\s)flex-row-reverse(?=\s|$)/);
+    fireEvent.change(field(), { target: { value: draft(3) } });
+    await waitFor(() => expect(stackedNow()).toBe(true));
+    expect(group().className).not.toMatch(/flex-row-reverse/);
+    expect(group().className).toMatch(/(?:^|\s)flex-col(?=\s|$)/);
+  });
+
+  it("Ctrl+Enter still sends from a stacked composer", async () => {
+    const props = renderStyled();
+    fireEvent.change(field(), { target: { value: draft(3) } });
+    await waitFor(() => expect(stackedNow()).toBe(true));
+    fireEvent.keyDown(field(), { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(props.onSent).toHaveBeenCalled());
   });
 });
