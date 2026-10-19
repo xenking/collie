@@ -81,14 +81,16 @@ describe("parseSnapshotPanes", () => {
       { paneId: "w2:p5", agent: "claude", kind: "agent" },
       { paneId: "w2:p6", agent: "bash", kind: "shell" },
       { paneId: "w3:p1", agent: "omp", kind: "agent" },
+      { paneId: "w3:p2", agent: "omp", kind: "agent", sleeping: true },
     ],
   });
 
-  test("keeps agent panes only, and reads an absent `hasSession` as false", () => {
+  test("keeps agent panes only, and reads an absent `hasSession` or `sleeping` as false", () => {
     expect(parseSnapshotPanes(body)).toEqual([
-      { paneId: "w1:p1", agent: "claude", hasSession: true },
-      { paneId: "w2:p5", agent: "claude", hasSession: false },
-      { paneId: "w3:p1", agent: "omp", hasSession: false },
+      { paneId: "w1:p1", agent: "claude", hasSession: true, sleeping: false },
+      { paneId: "w2:p5", agent: "claude", hasSession: false, sleeping: false },
+      { paneId: "w3:p1", agent: "omp", hasSession: false, sleeping: false },
+      { paneId: "w3:p2", agent: "omp", hasSession: false, sleeping: true },
     ]);
   });
 
@@ -106,10 +108,11 @@ describe("parseSnapshotPanes", () => {
 
 describe("the per-pane verdict", () => {
   const panes: SnapshotPane[] = [
-    { paneId: "w1:p1", agent: "claude", hasSession: true },
-    { paneId: "w2:p5", agent: "claude", hasSession: false },
-    { paneId: "w3:p1", agent: "omp", hasSession: false },
-    { paneId: "w3:p2", agent: "cursor", hasSession: false },
+    { paneId: "w1:p1", agent: "claude", hasSession: true, sleeping: false },
+    { paneId: "w2:p5", agent: "claude", hasSession: false, sleeping: false },
+    { paneId: "w3:p1", agent: "omp", hasSession: false, sleeping: false },
+    { paneId: "w3:p2", agent: "cursor", hasSession: false, sleeping: false },
+    { paneId: "w3:p3", agent: "omp", hasSession: false, sleeping: true },
   ];
 
   test("a pane is journalled when THIS build has an adapter for its agent, never by its name alone", () => {
@@ -118,10 +121,11 @@ describe("the per-pane verdict", () => {
       ["w2:p5", true],
       ["w3:p1", true],
       ["w3:p2", false],
+      ["w3:p3", true],
     ]);
   });
 
-  test("only a journalled pane with no session hides its link silently — the others are honest", () => {
+  test("only an awake journalled pane with no session hides its link silently — the others are honest", () => {
     expect(silentPanes(paneVerdicts(panes)).map((v) => v.pane.paneId)).toEqual(["w2:p5", "w3:p1"]);
   });
 });
@@ -160,7 +164,7 @@ describe("readJournalRoots", () => {
 const HEALTHY_STATUS = JOURNAL_AGENTS.map((a) => `${a}: installed (/home/pat/.${a}/hook.sh)`).join("\n");
 
 /** A snapshot body with the given panes, as `/api/snapshot` serialises them. */
-const snapshotOf = (agents: { paneId: string; agent: string; hasSession?: boolean }[]): string =>
+const snapshotOf = (agents: { paneId: string; agent: string; hasSession?: boolean; sleeping?: boolean }[]): string =>
   JSON.stringify({ bridge: "connected", agents: agents.map((a) => ({ ...a, kind: "agent" })) });
 
 async function run(
@@ -309,6 +313,57 @@ describe("the history section", () => {
     expect(sessions?.status).toBe("error");
     expect(sessions?.detail).toContain("1 report NO session: w2:p5 (claude)");
     expect(sessions?.detail).toContain("1 report no session YET: w4:p2 (codex)");
+  });
+
+  // A sleeping omp pane (Herdr's `omp (sleeping)`) runs no omp at all, so it has no session to report
+  // until it is woken. A machine full of them is healthy, and only an awake silent pane is a fault.
+  test("sleeping panes are counted in a note, never a fault on their own", async () => {
+    const byCheck = await run({
+      status: MIXED_STATUS,
+      snapshot: snapshotOf([
+        { paneId: "w3:p1", agent: "omp", sleeping: true },
+        { paneId: "w3:p2", agent: "omp", sleeping: true },
+      ]),
+    });
+    const sessions = byCheck.get("agent-sessions");
+    expect(sessions?.status).toBe("ok");
+    expect(sessions?.detail).toContain("2 sleeping");
+    expect(sessions?.detail).not.toContain("w3:p1");
+    const hook = byCheck.get("integration-omp");
+    expect(hook?.status).toBe("ok");
+    expect(hook?.detail).toContain("2 sleeping");
+  });
+
+  test("a sleeping pane does not hide an awake one with no session beside it", async () => {
+    const byCheck = await run({
+      status: MIXED_STATUS,
+      snapshot: snapshotOf([
+        { paneId: "w3:p1", agent: "omp", sleeping: true },
+        { paneId: "w3:p2", agent: "omp" },
+      ]),
+    });
+    const sessions = byCheck.get("agent-sessions");
+    expect(sessions?.status).toBe("error");
+    expect(sessions?.detail).toContain("1 report NO session: w3:p2 (omp)");
+    expect(sessions?.detail).not.toContain("w3:p1");
+    expect(sessions?.detail).toContain("1 sleeping");
+    const hook = byCheck.get("integration-omp");
+    expect(hook?.status).toBe("error");
+    expect(hook?.detail).toContain("1 omp pane(s) report no session (w3:p2)");
+    expect(hook?.detail).not.toContain("w3:p1");
+    expect(hook?.detail).toContain("1 sleeping");
+  });
+
+  test("a current hook over sleeping panes alone is green, with no restart asked", async () => {
+    const hook = (
+      await run({
+        status: `${HEALTHY_STATUS}\nomp: installed (/home/pat/.omp/agent/extensions/herdr-omp-agent-state.ts)`,
+        snapshot: snapshotOf([{ paneId: "w3:p1", agent: "omp", sleeping: true }]),
+      })
+    ).get("integration-omp");
+    expect(hook?.status).toBe("ok");
+    expect(hook?.remedy).toBeNull();
+    expect(hook?.detail).toBe("installed and current; 1 sleeping, with no agent running to report a session until woken");
   });
 
   test("a bridge that does not answer is `skipped`, never a pass — and takes nothing else down", async () => {

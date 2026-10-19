@@ -57,6 +57,11 @@ describe("toPaneWire hasSession", () => {
     );
     expect("hasSession" in wire).toBe(false);
   });
+
+  test("a parked pane says so on the wire, so `collie doctor` can tell it from a broken hook", () => {
+    expect(toPaneWire(pane({ agent: "omp", sleeping: true }), () => true).sleeping).toBe(true);
+    expect("sleeping" in toPaneWire(pane({ agent: "omp" }), () => true)).toBe(false);
+  });
 });
 
 describe("journalAgentOf", () => {

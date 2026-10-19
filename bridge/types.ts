@@ -45,6 +45,11 @@ export interface AgentView {
   workspaceNumber: number;
   tabId: string;
   agent: string;
+  /**
+   * True while Herdr has the pane's omp parked (`omp (sleeping)`): no agent process runs, so it has
+   * no session to report until a keypress wakes it. Absent on every other pane. On the wire it lets
+   * `collie doctor` tell a parked pane from one whose hook is broken; the phone does not read it.
+   */
   sleeping?: boolean;
   status: AgentStatus;
   cwd: string;
@@ -210,7 +215,7 @@ export interface AgentView {
  * NOTE the `Omit` is opt-OUT: a future server-only field on AgentView goes on the wire unless it is
  * added to the omit list here. If you add one, strip it here in the same change.
  */
-export type PaneWire = Omit<AgentView, "agentSession" | "sessionAgent" | "sleeping"> & {
+export type PaneWire = Omit<AgentView, "agentSession" | "sessionAgent"> & {
   /** True when this pane's history is actually offerable: the agent named a session AND its harness
    *  has a journal adapter. Says nothing about whether the log is readable — a named session whose
    *  file is missing still answers `available:false` with reason `no-log`. */
@@ -571,7 +576,7 @@ export function toPaneWire(
   hasJournal: (agent: string) => boolean,
   discoversSessions: (agent: string) => boolean = () => false,
 ): PaneWire {
-  const { agentSession, sessionAgent: _sessionAgent, sleeping: _sleeping, ...rest } = pane;
+  const { agentSession, sessionAgent: _sessionAgent, ...rest } = pane;
   const addressable = agentSession !== undefined || discoversSessions(pane.agent);
   return addressable && hasJournal(pane.agent) ? { ...rest, hasSession: true } : rest;
 }

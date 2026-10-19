@@ -27,7 +27,9 @@ import type { Exec, Files } from "./sys.ts";
 //
 // One agent's session start is late on purpose: Codex fires the hook only on its first prompt
 // (issue #294, `REPORTS_SESSION_ON_FIRST_PROMPT`), so its pane with no session is explained here and
-// never counted as a fault on its own.
+// never counted as a fault on its own. A sleeping pane (Herdr's `omp (sleeping)`, the wire's
+// `sleeping`) runs no agent at all, so it has nothing to report until it is woken: it is counted in a
+// note and never as a fault either.
 //
 // This section walks that chain in order — versions, the integration per agent, the interpreter the
 // hook needs, what the running bridge actually reports per pane, and where a journal would be read
@@ -95,11 +97,13 @@ function classifyIntegration(note: string): IntegrationState {
 
 // ── The snapshot, as this section reads it ───────────────────────────────────
 
-/** The two pane fields this section asks about, plus the id that names the pane. */
+/** The pane fields this section asks about, plus the id that names the pane. */
 export interface SnapshotPane {
   readonly paneId: string;
   readonly agent: string;
   readonly hasSession: boolean;
+  /** Parked by Herdr with no agent process running, so it has no session to report until woken. */
+  readonly sleeping: boolean;
 }
 
 /** What one agent pane's `hasSession` means for its History link. */
@@ -112,7 +116,7 @@ export interface PaneVerdict {
 /** The wire shape, every field optional: an answer that disagrees must degrade, never be trusted. */
 interface SnapshotWire {
   bridge?: string;
-  agents?: { paneId?: string; agent?: string; kind?: string; hasSession?: boolean }[];
+  agents?: { paneId?: string; agent?: string; kind?: string; hasSession?: boolean; sleeping?: boolean }[];
 }
 
 /**
@@ -138,7 +142,7 @@ export function parseSnapshotPanes(text: string): SnapshotPane[] | null {
     const paneId = pane.paneId ?? "";
     const agent = pane.agent ?? "";
     if (paneId === "" || agent === "") continue;
-    panes.push({ paneId, agent, hasSession: pane.hasSession === true });
+    panes.push({ paneId, agent, hasSession: pane.hasSession === true, sleeping: pane.sleeping === true });
   }
   return panes;
 }
@@ -152,9 +156,18 @@ export function paneVerdicts(
   return panes.map((pane) => ({ pane, journalled: known.has(pane.agent) }));
 }
 
-/** The panes that would hide their History link silently: a journalled agent with no session ref. */
+/**
+ * The panes that would hide their History link silently: a journalled agent with no session ref. A
+ * sleeping pane hides its link too, but runs no agent that could report one, so it is not counted.
+ */
 export const silentPanes = (verdicts: readonly PaneVerdict[]): PaneVerdict[] =>
-  verdicts.filter((v) => v.journalled && !v.pane.hasSession);
+  verdicts.filter((v) => v.journalled && !v.pane.hasSession && !v.pane.sleeping);
+
+/** The note both findings append for sleeping panes with no session: counted, never a fault. */
+function sleepingNote(verdicts: readonly PaneVerdict[]): string {
+  const asleep = verdicts.filter((v) => v.journalled && !v.pane.hasSession && v.pane.sleeping).length;
+  return asleep === 0 ? "" : `; ${String(asleep)} sleeping, with no agent running to report a session until woken`;
+}
 
 /**
  * Whether `agent` reports its session only once its first prompt is submitted (issue #294, reason at
@@ -332,22 +345,24 @@ function integration(
       `upgrade Herdr (\`herdr --version\` names this build), or read that pane's history from the agent's own log`,
     );
   }
-  const affected = (verdicts ?? []).filter((v) => v.pane.agent === agent && !v.pane.hasSession);
+  const mine = (verdicts ?? []).filter((v) => v.pane.agent === agent);
+  const affected = mine.filter((v) => !v.pane.hasSession && !v.pane.sleeping);
+  const asleep = sleepingNote(mine);
   const running = affected.map((v) => v.pane.paneId).join(", ");
   if (line.state === "installed") {
-    if (affected.length === 0) return ok(check, "installed and current");
+    if (affected.length === 0) return ok(check, `installed and current${asleep}`);
     // A current hook under a pane that has had no turn yet is the normal state for these agents.
     if (reportsOnFirstPrompt(agent)) {
       return ok(
         check,
         `installed and current; ${String(affected.length)} ${agent} pane(s) report no session yet` +
-          ` (${running}) — ${firstPromptNote(agent)}`,
+          ` (${running}) — ${firstPromptNote(agent)}${asleep}`,
       );
     }
     return warn(
       check,
       `installed and current, and ${String(affected.length)} ${agent} pane(s) still report no` +
-        ` session (${running}) — those sessions started before the hook did`,
+        ` session (${running}) — those sessions started before the hook did${asleep}`,
       `restart ${agent} in ${running}; \`herdr integration status\` confirms the hook is current`,
     );
   }
@@ -366,7 +381,7 @@ function integration(
     return bad(
       check,
       `${what}; ${String(affected.length)} ${agent} pane(s) report no session (${running}), so their` +
-        " History link and icon are hidden with no explanation",
+        ` History link and icon are hidden with no explanation${asleep}`,
       install,
     );
   }
@@ -374,7 +389,7 @@ function integration(
   // on an agent this host does not run is not a fault — a red or yellow line for it teaches an
   // operator to skim past the one that means something — while a STALE one is ours and out of date,
   // which is a warning wherever it sits (`beacon-hooks-claude`'s own reading).
-  const idle = `no ${agent} pane is missing a session right now, so nothing is hidden yet`;
+  const idle = `no ${agent} pane is missing a session right now, so nothing is hidden yet${asleep}`;
   return line.state === "missing"
     ? ok(check, `${what}; ${idle} — nothing here needs it`)
     : warn(check, `${what}; ${idle}`, install);
@@ -432,11 +447,14 @@ function sessions(verdicts: readonly PaneVerdict[] | null, read: SnapshotRead): 
   }
   if (verdicts.length === 0) return skipped(check, "the bridge reports no agent panes", "start an agent in a pane, then re-run `collie doctor`");
   const silent = silentPanes(verdicts);
+  const asleep = sleepingNote(verdicts);
   const journalled = verdicts.filter((v) => v.journalled).length;
   const summary =
     `${String(verdicts.length)} agent pane(s), ${String(journalled)} of them on an agent this build can` +
     " read a journal for";
-  if (silent.length === 0) return ok(check, `${summary} — every one of those reports a session`);
+  if (silent.length === 0) {
+    return ok(check, `${summary} — every ${asleep === "" ? "" : "awake "}one of those reports a session${asleep}`);
+  }
   // Issue #294: a pane of an agent that reports only on its first prompt may just not have had a turn.
   // It is named and explained, and it never makes this line an error on its own.
   const waiting = silent.filter((v) => reportsOnFirstPrompt(v.pane.agent));
@@ -447,11 +465,11 @@ function sessions(verdicts: readonly PaneVerdict[] | null, read: SnapshotRead): 
       ? ""
       : `; ${String(waiting.length)} report no session YET: ${namePanes(waiting)} — ` +
         waitingAgents.map((agent) => firstPromptNote(agent)).join("; ");
-  if (faulty.length === 0) return ok(check, `${summary}${notYet}`);
+  if (faulty.length === 0) return ok(check, `${summary}${notYet}${asleep}`);
   return bad(
     check,
     `${summary}; ${String(faulty.length)} report NO session: ${namePanes(faulty)} — their History link and icon are` +
-      ` hidden, and the pane looks otherwise normal${notYet}`,
+      ` hidden, and the pane looks otherwise normal${notYet}${asleep}`,
     `\`herdr integration install <agent>\` for each agent named above (the \`integration-…\` lines say which),` +
       ` ${INSTALL_NOTE}`,
   );

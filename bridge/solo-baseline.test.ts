@@ -360,6 +360,9 @@ const PANE_WIRE_KEYS = {
   // Not a crew dimension: the pane's held sends (M56 spec 15). They ride with `sendProtocol` and only
   // when a send is held, and this harness builds no Send Protocol, so no golden byte moved.
   held: true,
+  // Not a crew dimension: Herdr parked this pane's omp (`omp (sleeping)`), read by `collie doctor`.
+  // Set only on a parked pane, and this baseline parks none, so no golden byte moved.
+  sleeping: true,
 } satisfies Record<keyof PaneWire, true>;
 
 const DEVICE_AUTH_KEYS = {
@@ -500,6 +503,7 @@ describe("solo zero-tax — wire shapes carry no crew dimension", () => {
       "sendProtocol",
       "session",
       "sessionName",
+      "sleeping",
       "soleTabName",
       "status",
       "subtitle",
