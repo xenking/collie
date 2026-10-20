@@ -23,9 +23,11 @@ Running a crew? Update the lead first; members follow on their own. Details:
 
 ## [Unreleased]
 
+## [1.22.8] - 2026-10-21
+
 ### Fixed
 
-- **A text sent to a sleeping omp pane wakes it first.** Herdr parks an idle omp pane as `omp (sleeping)`, and a send from the phone found no input box there and was held or refused. Collie now checks a fresh pane listing, presses one Enter as your tap when the pane sleeps, waits up to 15 seconds for omp to report its session and draw its box, then sends as usual. A message held for such a pane wakes it the same way when it goes out. When omp does not come back in time, the send is refused with its own reason and nothing is typed into the parked screen. Voice uses the same wake.
+- **A text sent to a sleeping omp pane wakes it first.** Herdr parks an idle omp pane as `omp (sleeping)`, and a send from the phone found no input box there and was held or refused. Collie now checks a fresh pane listing, presses one Enter as your tap when the pane sleeps, waits up to 15 seconds for omp to report its session and draw its box, then sends as usual. A message held for such a pane wakes it the same way when it goes out. When omp does not come back in time, the send is refused with its own reason and nothing is typed into the parked screen. Voice uses the same wake. ([1c7cfa5](https://github.com/xenking/collie/commit/1c7cfa5))
 
 ## [1.22.7] - 2026-10-20
 
