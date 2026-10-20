@@ -213,6 +213,7 @@ export type SendNote =
   | "reservedLead"
   | "moved"
   | "paneGone"
+  | "wakeTimeout"
   | "writeFailed"
   | "idReused"
   | "refused";
@@ -292,6 +293,8 @@ function refusalNote(reason: SendReason | null): SendNote {
       return "moved";
     case "pane_gone":
       return "paneGone";
+    case "wake_timeout":
+      return "wakeTimeout";
     case "write_failed":
       return "writeFailed";
     case "id_reused":
@@ -416,11 +419,11 @@ export function readSend(reply: SendReply): SendReading {
  * Whether the phone's own sentence already says what the bridge's English detail says (the
  * 2026-10-16 field case, "Collie cannot read this screen" twice). Only for a refusal, and only for
  * the reasons whose bridge line repeats the phone's sentence: `unconfirmed`, `stale_surface`, `busy`,
- * `pane_gone`, `draft_present`, and `not_free` when the line is the plain one. Every other reason,
+ * `pane_gone`, `draft_present`, `wake_timeout`, and `not_free` when the line is the plain one. Every other reason,
  * and every outcome that is no refusal, keeps the line: it says what the phone's sentence does not
  * (a `not_free` that names what is open, a dialog that Enter may have answered).
  */
-const REPEATS_THE_NOTE: ReadonlySet<SendReason> = new Set(["unconfirmed", "stale_surface", "busy", "pane_gone", "draft_present"]);
+const REPEATS_THE_NOTE: ReadonlySet<SendReason> = new Set(["unconfirmed", "stale_surface", "busy", "pane_gone", "draft_present", "wake_timeout"]);
 const PLAIN_NOT_FREE = "The input box is not free.";
 
 function ownSentence(reply: SendReply): boolean {

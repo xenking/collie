@@ -353,6 +353,7 @@ export const pt: Dictionary = {
   "composer.protocol.reservedLead": "Um texto que começa com / ! ou @ tem seu próprio caminho. Nada foi digitado.",
   "composer.protocol.moved": "A tela mudou. Confira o painel e envie de novo.",
   "composer.protocol.paneGone": "Este painel não existe mais. Nada foi digitado.",
+  "composer.protocol.wakeTimeout": "O agente estava dormindo e não acordou a tempo. Nada foi digitado. Envie de novo em instantes.",
   "composer.protocol.writeFailed": "A digitação falhou. Nada foi digitado.",
   "composer.protocol.idReused": "Esta solicitação já foi usada para outro texto. Envie de novo.",
   "composer.protocol.refused": "Envio recusado. Nada foi digitado.",

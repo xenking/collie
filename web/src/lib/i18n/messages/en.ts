@@ -447,6 +447,7 @@ export const en = {
   "composer.protocol.reservedLead": "A text that starts with / ! or @ has its own route. Nothing was typed.",
   "composer.protocol.moved": "The screen changed. Check the pane, then send again.",
   "composer.protocol.paneGone": "This pane is gone. Nothing was typed.",
+  "composer.protocol.wakeTimeout": "The agent was asleep and did not wake in time. Nothing was typed. Send again in a moment.",
   "composer.protocol.writeFailed": "Typing failed. Nothing was typed.",
   "composer.protocol.idReused": "This request was already used for another text. Send again.",
   "composer.protocol.refused": "The send was refused. Nothing was typed.",

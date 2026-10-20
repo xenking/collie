@@ -213,6 +213,7 @@ import { collieVersion, collieVersionBare } from "./version.ts";
 import { SurfaceShadow, type ShadowOptions } from "./surface/shadow.ts";
 import { AskAnswerer, AskBook } from "./surface/ask.ts";
 import { gateFor } from "./surface/key-gate.ts";
+import { findPane, wakePane } from "./pane-wake.ts";
 import { RowRing, SendProtocol, SessionLocks } from "./surface/protocol.ts";
 import { ProgramDriver, type ProgramPort } from "./surface/durable-driver.ts";
 import { RequestStore } from "./surface/requests.ts";
@@ -1489,6 +1490,16 @@ const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
           generation: generationOf,
           asks: askBook,
           holds: holdStore ?? undefined,
+          // A parked omp pane wakes on the operator's own send: awake once omp reports its session and
+          // the poll's Surface finds its input box.
+          waker: {
+            asleep: (paneId) => findPane({ engine }, paneId)?.sleeping === true,
+            wake: (paneId) =>
+              wakePane({ engine, herdr }, paneId, (pane) => {
+                const composer = surface?.surfaceOf(pane.paneId)?.composer;
+                return pane.agentSession?.kind === "path" && (surface === undefined || composer === "empty" || composer === "draft");
+              }),
+          },
         })
       : undefined;
   const asks =

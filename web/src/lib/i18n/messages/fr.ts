@@ -353,6 +353,7 @@ export const fr: Dictionary = {
   "composer.protocol.reservedLead": "Un texte qui commence par / ! ou @ a sa propre voie. Rien n'a été tapé.",
   "composer.protocol.moved": "L'écran a changé. Vérifiez le volet, puis renvoyez.",
   "composer.protocol.paneGone": "Ce volet n'existe plus. Rien n'a été tapé.",
+  "composer.protocol.wakeTimeout": "L'agent était en veille et ne s'est pas réveillé à temps. Rien n'a été tapé. Renvoyez dans un instant.",
   "composer.protocol.writeFailed": "La saisie a échoué. Rien n'a été tapé.",
   "composer.protocol.idReused": "Cette requête a déjà servi pour un autre texte. Renvoyez.",
   "composer.protocol.refused": "Envoi refusé. Rien n'a été tapé.",

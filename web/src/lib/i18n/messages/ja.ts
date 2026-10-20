@@ -410,6 +410,7 @@ export const ja: Dictionary = {
   "composer.protocol.reservedLead": "/ ! @ で始まるテキストには専用の経路があります。何も入力していません。",
   "composer.protocol.moved": "画面が変わりました。ペインを確認してから再送してください。",
   "composer.protocol.paneGone": "このペインはもうありません。何も入力していません。",
+  "composer.protocol.wakeTimeout": "エージェントはスリープ中で、時間内に起動しませんでした。何も入力していません。少し待ってからもう一度送信してください。",
   "composer.protocol.writeFailed": "入力に失敗しました。何も入力していません。",
   "composer.protocol.idReused": "このリクエストは別のテキストに使用済みです。もう一度送信してください。",
   "composer.protocol.refused": "送信は拒否されました。何も入力していません。",

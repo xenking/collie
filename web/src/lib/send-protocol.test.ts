@@ -122,7 +122,7 @@ describe("readSend", () => {
     const detail = "Collie cannot read this screen. Check the pane, then tap Type here.";
     const unreadable: Surface = { revision: 1, turn: "idle", modal: "unreadable", composer: "empty" };
     expect(readSend(reply("refused", "unconfirmed", ["commit", "keys"], { surface: unreadable, detail })).detail).toBeNull();
-    for (const reason of ["stale_surface", "busy", "pane_gone", "draft_present"]) {
+    for (const reason of ["stale_surface", "busy", "pane_gone", "draft_present", "wake_timeout"]) {
       expect(readSend(reply("refused", reason, ["commit"], { detail: "The bridge's line." })).detail).toBeNull();
     }
     // not_free: the plain line goes, a line that names what is open stays.
@@ -177,6 +177,7 @@ describe("readSend", () => {
     expect(sendNote("refused", "probe_failed")).toBe("probeFailed");
     expect(sendNote("refused", "multiline")).toBe("refused");
     expect(sendNote("unknown", "no_evidence")).toBe("unknown");
+    expect(sendNote("refused", "wake_timeout")).toBe("wakeTimeout");
     expect(sendNote(null, null)).toBe("unknown");
   });
 

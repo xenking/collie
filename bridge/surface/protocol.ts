@@ -120,6 +120,7 @@ import { askLifetimeOf, type AskBook } from "./ask.ts";
 import type { KeyGate } from "./key-gate.ts";
 import type { RequestStore, SendRecord } from "./requests.ts";
 import { HOLD_BRIDGE_MAX, HOLD_PANE_MAX, heldRow, type HeldEntry, type HoldStore } from "./holds.ts";
+import type { PaneWake } from "../pane-wake.ts";
 
 /** The step bounds, written as (max reads, max ms). */
 export const BOUNDS = {
@@ -255,6 +256,13 @@ export interface SendDeps {
    * `turn_running`.
    */
   readonly holds?: HoldStore;
+  /**
+   * Wakes a pane Herdr parked (`omp (sleeping)`, `bridge/pane-wake.ts`) before a send runs on it.
+   * `wake` decides from a fresh listing and presses the one Enter as the operator's tap; `asleep` is
+   * the poll's cached view, read only to let the hold tick start a release on a parked pane, which
+   * never reads free. Absent: a parked pane is a screen like any other.
+   */
+  readonly waker?: { readonly asleep: (paneId: string) => boolean; readonly wake: (paneId: string) => Promise<PaneWake> };
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
 }
@@ -1042,6 +1050,20 @@ const NOT_YET: ReadonlySet<SendReason> = new Set<SendReason>(["turn_running", "b
 /** How often a release may go back to the queue before it ends with the refusal it met. */
 const HOLD_TRIES = 5;
 
+/** A parked pane that did not wake in time: nothing of the text went to it. */
+const WAKE_TIMEOUT = "The agent was asleep and did not wake in time. Nothing was typed.";
+/** A parked pane whose wake Enter the multiplexer refused. */
+const WAKE_FAILED = "Collie could not press Enter to wake the agent. Nothing was typed.";
+
+/**
+ * The end a wake takes, or null when the steps go ahead: an awake pane, a woken one, and a listing that
+ * failed or does not name the pane (the steps' own read says what is there).
+ */
+function wakeRefusal(wake: PaneWake): Ended | null {
+  if (wake.ok || wake.why === "unavailable" || wake.why === "gone") return null;
+  return wake.why === "timeout" ? new Ended("refused", "wake_timeout", { detail: WAKE_TIMEOUT }) : new Ended("refused", "write_failed", { detail: WAKE_FAILED });
+}
+
 /** The detail of a send into a turn refused because something is open at the box (a popup over or under it). */
 const OPEN_AT_BOX = "Something is open at the input box.";
 /**
@@ -1665,6 +1687,30 @@ export class SendProtocol {
       await running;
       return this.handle(request, target);
     }
+    const waker = this.deps.waker;
+    // A parked pane wakes before the request is taken, so its bound and its pane generation start on the
+    // woken pane. A new id only, and one that runs now: a replay presses no key, and a send that joins
+    // held ones leaves the wake to their release. The wake counts as running, so the same id waits for it.
+    if (waker !== undefined && this.deps.store.get(request.id) === null && !this.joinsHeld(request, target)) {
+      const work = waker.wake(target.paneId).then((wake) => this.take(request, target, wakeRefusal(wake)));
+      this.inFlight.set(request.id, work);
+      try {
+        return await work;
+      } finally {
+        if (this.inFlight.get(request.id) === work) this.inFlight.delete(request.id);
+      }
+    }
+    return this.take(request, target, null);
+  }
+
+  /** Whether a new message or command on this pane joins the end of its held queue instead of running. */
+  private joinsHeld(request: SendRequest, target: SendTarget): boolean {
+    const holds = this.deps.holds;
+    return holds !== undefined && JOINS.has(request.mode) && holds.waiting(target.session, target.paneId).length > 0;
+  }
+
+  /** {@link handle} past the wake: the request is taken, replayed, refused by its wake, held or run. */
+  private async take(request: SendRequest, target: SendTarget, wakeEnd: Ended | null): Promise<SendAnswer> {
     const generation = this.deps.generation(target.paneId) ?? "gone";
     const accepted = this.deps.store.accept({
       id: request.id,
@@ -1699,11 +1745,11 @@ export class SendProtocol {
       this.count(state, receipt);
       return withLook({ receipt, offers: offersFor("unknown", "crash", false), replayed: true }, look);
     }
+    if (wakeEnd !== null) return this.settle(this.bareState(request, accepted.record, target, await this.deps.profile(target.harness)), wakeEnd);
     // A pane with held sends: a new message or command joins the end of its queue, it never jumps. A
     // manual send joins too: the screen the person confirmed is not the one its turn will come on.
     // A pane with no profile never holds: its send goes in blind (see the header), so it skips this.
-    const holds = this.deps.holds;
-    const joins = holds !== undefined && JOINS.has(request.mode) && holds.waiting(target.session, target.paneId).length > 0;
+    const joins = this.joinsHeld(request, target);
     const match = joins ? await this.deps.profile(target.harness) : null;
     if (match !== null) {
       const state = this.bareState(request, accepted.record, target, match);
@@ -1834,6 +1880,20 @@ export class SendProtocol {
     watch.freeReads = 0;
     watch.freeSince = null;
     watch.pollSawRunning = false;
+    // A parked pane wakes before the run is armed, so the run's bound starts on the woken pane.
+    if (this.deps.waker !== undefined) {
+      let wakeEnd: Ended | null;
+      try {
+        wakeEnd = wakeRefusal(await this.deps.waker.wake(entry.paneId));
+      } catch (err) {
+        holds.putBack(id);
+        throw err;
+      }
+      if (wakeEnd !== null) {
+        const receipt = this.endHeld(entry, "refused", wakeEnd.reason, wakeEnd.extra.detail);
+        return receipt === null ? null : answerWith({ receipt, offers: offersFor("refused", wakeEnd.reason, false) }, wakeEnd.extra);
+      }
+    }
     const record = this.deps.store.rearm(id, this.deps.generation(entry.paneId) ?? undefined);
     if (record === null) {
       holds.remove(id);
@@ -1874,6 +1934,7 @@ export class SendProtocol {
    *    then two polls in a row read the pane free; or, with no turn read, once five polls in a row read
    *    it free over at least ten seconds. A command whose Enter could steer a turn takes neither the
    *    quiet path nor the hold's own read: a poll must read the turn. A release starts that wait again.
+   *  - on a pane Herdr parked, the oldest held request goes at once: its release wakes the pane first.
    * Every end keeps the text. Returns the releases it started, for a test to wait on. Never throws: a
    * release that fails is a warning.
    */
@@ -1917,6 +1978,11 @@ export class SendProtocol {
         this.watches.delete(`${session}\u0000${paneId}`);
         continue;
       }
+      // A parked pane never reads free: its release goes at once and wakes it first.
+      if (this.deps.waker?.asleep(paneId) === true) {
+        if (!busy) started.push(this.releaseQuietly(next.id));
+        continue;
+      }
       const surface = generation === null ? undefined : surfaceOf(paneId);
       if (surface !== undefined && isFree(surface)) {
         watch.freeReads += 1;
@@ -1949,11 +2015,12 @@ export class SendProtocol {
   }
 
   /**
-   * A held request ends without a run: `expired`, `cancelled`, or `refused(pane_gone)`. Its receipt is
-   * the held one with the new outcome; the counters take it. A cancel leaves no file; the others keep
-   * the text for a Resend.
+   * A held request ends without a run: `expired`, `cancelled`, `refused(pane_gone)`, or a refusal its
+   * release met before the run (a parked pane that did not wake, with its `detail`). Its receipt is the
+   * held one with the new outcome; the counters take it. A cancel leaves no file; the others keep the
+   * text for a Resend.
    */
-  private endHeld(entry: HeldEntry, outcome: "expired" | "cancelled" | "refused", reason: SendReason | undefined): SendReceipt | null {
+  private endHeld(entry: HeldEntry, outcome: "expired" | "cancelled" | "refused", reason: SendReason | undefined, detail?: string): SendReceipt | null {
     const holds = this.deps.holds!;
     const record = this.deps.store.get(entry.id);
     const held = record?.receipt;
@@ -1963,6 +2030,7 @@ export class SendProtocol {
     const { reason: _none, queued: _never, detail: _noDetail, saw: _noSaw, ...rest } = held;
     let receipt: SendReceipt = reason === undefined ? { ...rest, outcome } : { ...rest, outcome, reason };
     if (outcome === "refused" && reason === "pane_gone") receipt = { ...receipt, detail: HELD_PANE_GONE };
+    else if (detail !== undefined) receipt = { ...receipt, detail };
     this.deps.store.settle(entry.id, receipt);
     const ledger = this.deps.ledger;
     try {

@@ -414,6 +414,7 @@ export const es: Dictionary = {
   "composer.protocol.reservedLead": "Un texto que empieza por / ! o @ tiene su propia ruta. No se escribió nada.",
   "composer.protocol.moved": "La pantalla cambió. Revisa el panel y envía de nuevo.",
   "composer.protocol.paneGone": "Este panel ya no existe. No se escribió nada.",
+  "composer.protocol.wakeTimeout": "El agente estaba dormido y no despertó a tiempo. No se escribió nada. Envía de nuevo en un momento.",
   "composer.protocol.writeFailed": "Falló la escritura. No se escribió nada.",
   "composer.protocol.idReused": "Esta solicitud ya se usó para otro texto. Envía de nuevo.",
   "composer.protocol.refused": "Envío rechazado. No se escribió nada.",

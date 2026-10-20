@@ -411,6 +411,7 @@ export const ko: Dictionary = {
   "composer.protocol.reservedLead": "/ ! @ 로 시작하는 텍스트는 따로 처리됩니다. 아무것도 입력하지 않았습니다.",
   "composer.protocol.moved": "화면이 바뀌었습니다. 창을 확인한 뒤 다시 보내세요.",
   "composer.protocol.paneGone": "이 창이 사라졌습니다. 아무것도 입력하지 않았습니다.",
+  "composer.protocol.wakeTimeout": "에이전트가 잠자기 상태였고 제때 깨어나지 않았습니다. 아무것도 입력하지 않았습니다. 잠시 후 다시 보내세요.",
   "composer.protocol.writeFailed": "입력에 실패했습니다. 아무것도 입력하지 않았습니다.",
   "composer.protocol.idReused": "이 요청은 이미 다른 텍스트에 쓰였습니다. 다시 보내세요.",
   "composer.protocol.refused": "보내기가 거부되었습니다. 아무것도 입력하지 않았습니다.",

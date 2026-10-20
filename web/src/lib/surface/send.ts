@@ -43,6 +43,9 @@ export const SEND_REASONS = [
   // does not say it queues), or the text is a command its profile does not queue. A bridge with a
   // hold queue (M56 spec 15) holds such a send instead; only a Submit of a box in a turn is refused.
   "turn_running",
+  // refused: the pane was parked (Herdr's `omp (sleeping)`) and did not wake inside the bridge's
+  // deadline after its one wake Enter; nothing of the text was written
+  "wake_timeout",
   // typed_not_submitted: the text is in the box, Enter was not sent
   "mismatch",
   "changed",

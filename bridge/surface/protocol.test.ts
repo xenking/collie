@@ -19,6 +19,7 @@ import { boxMatches, commandBoxMatches, GENERIC_PROBE, LOCK_BOUND_MS, locateText
 import { RequestStore } from "./requests.ts";
 import { SurfaceLedger } from "./counters.ts";
 import { HoldStore } from "./holds.ts";
+import type { PaneWake } from "../pane-wake.ts";
 
 const RULE = "─".repeat(40);
 const WIDTH = 38;
@@ -321,6 +322,7 @@ function rig(
     holds?: HoldStore;
     generation?: () => string | null;
     clock?: { now: number };
+    waker?: SendDeps["waker"];
   } = {},
 ): Rig {
   const pane = options.pane ?? new FakePane(options.mode ?? "claude");
@@ -353,6 +355,7 @@ function rig(
     generation: options.generation ?? (() => "gen-1"),
     ledger: options.ledger,
     holds: options.holds,
+    waker: options.waker,
     now,
     sleep: (ms: number) => {
       clock.now += ms;
@@ -5517,5 +5520,109 @@ describe("S1 reads the turn again before the commit key (PR 491): a turn starts 
     };
     const answer = await send("/model", { mode: "command" });
     expect({ steered: pane.steered, outcome: answer.receipt?.outcome }).toEqual({ steered: [], outcome: "typed_not_submitted" });
+  });
+});
+
+describe("a parked pane wakes before the send (Herdr's `omp (sleeping)`)", () => {
+  const RUNNING = { revision: 1, turn: "running", modal: "none", composer: "empty" } as const;
+  /**
+   * A waker over a fake pane, standing for `wakePane`: an awake pane answers ok with no key; a parked
+   * one notes its wake in the pane's calls and answers `answer`. A wake that worked moves the pane's
+   * generation to the session omp reports once awake, and runs `woke`.
+   */
+  const parked = (pane: FakePane, answer: PaneWake, woke?: (pane: FakePane) => void) => {
+    const state = { asleep: true, wakes: 0, generation: "omp:-" };
+    const waker = {
+      asleep: () => state.asleep,
+      wake: (): Promise<PaneWake> => {
+        if (!state.asleep) return Promise.resolve({ ok: true });
+        state.wakes++;
+        pane.calls.push("wake");
+        if (answer.ok) {
+          state.asleep = false;
+          state.generation = "omp:/s.jsonl";
+          woke?.(pane);
+        }
+        return Promise.resolve(answer);
+      },
+    };
+    return { state, waker, generation: () => state.generation };
+  };
+
+  test("a send to a parked pane wakes it first, then runs on the woken pane under its new generation", async () => {
+    const pane = new FakePane("claude");
+    const { waker, generation } = parked(pane, { ok: true });
+    const { send } = rig({ pane, waker, generation });
+    const answer = await send("hello from the phone");
+    expect(answer.receipt).toMatchObject({ outcome: "sent" });
+    expect(answer.receipt?.keys.at(-1)).toBe("Enter");
+    expect(pane.calls[0]).toBe("wake");
+    expect(pane.transcript.at(-1)).toBe("> hello from the phone");
+  });
+
+  test("a wake that times out refuses wake_timeout: nothing typed, no key, and the same id does not wake again", async () => {
+    const pane = new FakePane("claude");
+    const { state, waker, generation } = parked(pane, { ok: false, why: "timeout" });
+    const { send } = rig({ pane, waker, generation });
+    const answer = await send("hello from the phone", { id: "wake-timeout-1" });
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "wake_timeout", keys: [] });
+    expect(answer.detail).toBe("The agent was asleep and did not wake in time. Nothing was typed.");
+    expect(answer.offers).toEqual(["keys"]);
+    expect(pane.calls).toEqual(["wake"]);
+    expect(pane.keysSeen).toEqual([]);
+    const again = await send("hello from the phone", { id: "wake-timeout-1" });
+    expect(again).toMatchObject({ replayed: true, receipt: { outcome: "refused", reason: "wake_timeout" } });
+    expect(state.wakes).toBe(1);
+  });
+
+  test("a wake Enter the multiplexer refused is write_failed, nothing typed", async () => {
+    const pane = new FakePane("claude");
+    const { waker, generation } = parked(pane, { ok: false, why: "failed", detail: "no room" });
+    const { send } = rig({ pane, waker, generation });
+    expect((await send("hello from the phone")).receipt).toMatchObject({ outcome: "refused", reason: "write_failed", keys: [] });
+    expect(pane.calls).toEqual(["wake"]);
+  });
+
+  test("a held send on a pane that parked goes at once: its release wakes the pane, then sends", async () => {
+    const clock = { now: 1_000_000 };
+    const holds = new HoldStore(join(dir, "held"), () => clock.now);
+    const pane = new FakePane("claude");
+    pane.over = [LIVE_ROW];
+    const { state, waker, generation } = parked(pane, { ok: true }, (p) => {
+      p.over = [];
+    });
+    state.asleep = false;
+    const r = rig({ pane, waker, generation, holds, clock, version: "no version here" });
+    expect((await r.send("then give it a title", { id: "wake-held-01" })).receipt).toMatchObject({ outcome: "held" });
+    // Parked now. A later send joins the queue and wakes nothing: the wake is the release's.
+    state.asleep = true;
+    expect((await r.send("and a second", { id: "wake-held-02" })).receipt).toMatchObject({ outcome: "held" });
+    expect(state.wakes).toBe(0);
+    expect(pane.calls).toEqual([]);
+    // A parked pane's Surface never reads free; the release goes anyway and wakes it first.
+    const [released] = await Promise.all(r.protocol.tickHolds("main", () => RUNNING));
+    expect(released?.receipt).toMatchObject({ requestId: "wake-held-01", outcome: "sent" });
+    expect(state.wakes).toBe(1);
+    expect(pane.calls[0]).toBe("wake");
+    expect(pane.transcript.at(-1)).toBe("> then give it a title");
+    expect(r.deps.store.get("wake-held-01")?.paneGeneration).toBe("omp:/s.jsonl");
+  });
+
+  test("a held send whose release cannot wake the pane ends wake_timeout, the text kept for a Resend", async () => {
+    const clock = { now: 1_000_000 };
+    const holds = new HoldStore(join(dir, "held"), () => clock.now);
+    const pane = new FakePane("claude");
+    pane.over = [LIVE_ROW];
+    const { state, waker } = parked(pane, { ok: false, why: "timeout" });
+    state.asleep = false;
+    const r = rig({ pane, waker, holds, clock, version: "no version here" });
+    expect((await r.send("then give it a title", { id: "wake-held-03" })).receipt).toMatchObject({ outcome: "held" });
+    state.asleep = true;
+    const [released] = await Promise.all(r.protocol.tickHolds("main", () => RUNNING));
+    expect(released?.receipt).toMatchObject({ requestId: "wake-held-03", outcome: "refused", reason: "wake_timeout", keys: [] });
+    expect(pane.calls).toEqual(["wake"]);
+    expect(pane.keysSeen).toEqual([]);
+    expect(r.protocol.heldOf("main", "%1")).toEqual([expect.objectContaining({ state: "ended", outcome: "refused", reason: "wake_timeout", text: "then give it a title" })]);
+    expect(r.deps.store.get("wake-held-03")?.receipt).toMatchObject({ reason: "wake_timeout", detail: "The agent was asleep and did not wake in time. Nothing was typed." });
   });
 });

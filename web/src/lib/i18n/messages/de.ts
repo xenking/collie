@@ -416,6 +416,7 @@ export const de: Dictionary = {
   "composer.protocol.reservedLead": "Ein Text, der mit / ! oder @ beginnt, hat einen eigenen Weg. Es wurde nichts getippt.",
   "composer.protocol.moved": "Der Bildschirm hat sich geändert. Prüfe den Bereich und sende erneut.",
   "composer.protocol.paneGone": "Dieser Bereich ist weg. Es wurde nichts getippt.",
+  "composer.protocol.wakeTimeout": "Der Agent schlief und ist nicht rechtzeitig aufgewacht. Es wurde nichts getippt. Sende gleich noch einmal.",
   "composer.protocol.writeFailed": "Tippen fehlgeschlagen. Es wurde nichts getippt.",
   "composer.protocol.idReused": "Diese Anfrage wurde schon für einen anderen Text verwendet. Sende erneut.",
   "composer.protocol.refused": "Senden abgelehnt. Es wurde nichts getippt.",

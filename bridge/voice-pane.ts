@@ -1,75 +1,43 @@
-import type { MuxAdapter } from "./mux/types.ts";
-import { gateFor } from "./surface/key-gate.ts";
-import type { StateEngine } from "./state-engine.ts";
+import { findPane, wakePane, type PaneWake, type PaneWakeRuntime } from "./pane-wake.ts";
 import type { AgentView } from "./types.ts";
 
 /** What the realtime-voice handshake needs from a pane's runtime. */
-export interface VoicePaneRuntime {
-  readonly engine: Pick<StateEngine, "current" | "pokeNow">;
-  readonly herdr: Pick<MuxAdapter, "snapshot" | "refresh" | "writeKeys">;
-}
+export type VoicePaneRuntime = PaneWakeRuntime;
 
 export type VoicePaneOutcome =
   | { ok: true; sessionFile: string | null }
   | { ok: false; detail: string };
 
-const WAKE_DEADLINE_MS = 15_000;
-const WAKE_POLL_MS = 250;
+function sessionFileOf(pane: AgentView | undefined): string | null {
+  return pane?.agent === "omp" && pane.agentSession?.kind === "path" ? pane.agentSession.value : null;
+}
 
-function findPane(rt: VoicePaneRuntime, paneId: string): AgentView | undefined {
-  // Agent panes and bare shells are separate collections; STT-only voice supports both.
-  const { agents, shellPanes } = rt.engine.current();
-  return agents.find((candidate) => candidate.paneId === paneId) ??
-    shellPanes.find((candidate) => candidate.paneId === paneId);
+function wakeDetail(wake: Exclude<PaneWake, { ok: true }>): string {
+  switch (wake.why) {
+    case "unavailable":
+      return "voice pane state unavailable";
+    case "gone":
+      return "voice requires a live pane";
+    case "failed":
+      return `voice wake failed: ${wake.detail ?? ""}`;
+    case "timeout":
+      return "voice wake timed out";
+  }
 }
 
 /**
- * Resolve the pane a voice socket will serve, waking a parked OMP pane first. `sessionFile` is the
- * OMP session path when the pane can speak replies, and null for STT-only (shells, other agents).
- *
- * The wake Enter is the operator's own tap (the key gate's `person_tap` door). It is decided from a FRESH multiplexer listing, never from the engine's cached `sleeping`:
- * a pane someone woke after the last poll would otherwise get an Enter in its live composer, which
- * submits a draft or accepts a completion.
+ * Resolve the pane a voice socket will serve, waking a parked OMP pane first (see {@link wakePane}).
+ * `sessionFile` is the OMP session path when the pane can speak replies, and null for STT-only
+ * (shells, other agents).
  */
 export async function prepareVoicePane(
   rt: VoicePaneRuntime,
   paneId: string,
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  now: () => number = Date.now,
+  sleep?: (ms: number) => Promise<void>,
+  now?: () => number,
 ): Promise<VoicePaneOutcome> {
-  const cached = findPane(rt, paneId);
-  if (!cached) return { ok: false, detail: "voice requires a live pane" };
-
-  let waking = false;
-  if (cached.agent === "omp") {
-    let fresh;
-    try {
-      fresh = (await rt.herdr.snapshot()).panes.find((candidate) => candidate.paneId === paneId);
-    } catch {
-      return { ok: false, detail: "voice pane state unavailable" };
-    }
-    if (!fresh) return { ok: false, detail: "voice requires a live pane" };
-    waking = fresh.sleeping === true;
-  }
-  if (waking) {
-    const sent = await gateFor(rt.herdr).press(paneId, ["Enter"], "person_tap");
-    if (!sent.ok) return { ok: false, detail: `voice wake failed: ${sent.detail}` };
-    const deadline = now() + WAKE_DEADLINE_MS;
-    while (now() < deadline) {
-      try {
-        await rt.herdr.refresh();
-        rt.engine.pokeNow();
-      } catch {
-        // Keep the bounded wake wait; the next poll may recover the adapter.
-      }
-      const pane = findPane(rt, paneId);
-      if (pane && pane.agent === "omp" && pane.agentSession?.kind === "path") break;
-      await sleep(WAKE_POLL_MS);
-    }
-  }
-
-  const pane = findPane(rt, paneId);
-  const sessionFile = pane?.agent === "omp" && pane.agentSession?.kind === "path" ? pane.agentSession.value : null;
-  if (waking && sessionFile === null) return { ok: false, detail: "voice wake timed out" };
-  return { ok: true, sessionFile };
+  if (!findPane(rt, paneId)) return { ok: false, detail: "voice requires a live pane" };
+  const wake = await wakePane(rt, paneId, (pane) => sessionFileOf(pane) !== null, sleep, now);
+  if (!wake.ok) return { ok: false, detail: wakeDetail(wake) };
+  return { ok: true, sessionFile: sessionFileOf(findPane(rt, paneId)) };
 }

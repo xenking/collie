@@ -359,6 +359,7 @@ export const ru: Dictionary = {
   "composer.protocol.reservedLead": "У текста, начинающегося с / ! или @, свой путь. Ничего не введено.",
   "composer.protocol.moved": "Экран изменился. Проверьте панель и отправьте снова.",
   "composer.protocol.paneGone": "Этой панели больше нет. Ничего не введено.",
+  "composer.protocol.wakeTimeout": "Агент спал и не проснулся вовремя. Ничего не введено. Отправьте ещё раз через пару секунд.",
   "composer.protocol.writeFailed": "Ввод не удался. Ничего не введено.",
   "composer.protocol.idReused": "Этот запрос уже использован для другого текста. Отправьте снова.",
   "composer.protocol.refused": "Отправка отклонена. Ничего не введено.",

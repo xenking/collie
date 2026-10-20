@@ -399,6 +399,7 @@ export const zhTW: Dictionary = {
   "composer.protocol.reservedLead": "以 / ! 或 @ 開頭的文字有自己的通道。未輸入任何內容。",
   "composer.protocol.moved": "畫面已變更。請檢查窗格後再次傳送。",
   "composer.protocol.paneGone": "此窗格已不存在。未輸入任何內容。",
+  "composer.protocol.wakeTimeout": "代理程式處於休眠狀態，未能及時喚醒。未輸入任何內容。請稍後再次傳送。",
   "composer.protocol.writeFailed": "輸入失敗。未輸入任何內容。",
   "composer.protocol.idReused": "此請求已用於其他文字。請再次傳送。",
   "composer.protocol.refused": "傳送被拒絕。未輸入任何內容。",

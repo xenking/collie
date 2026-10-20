@@ -353,6 +353,7 @@ export const it: Dictionary = {
   "composer.protocol.reservedLead": "Un testo che inizia con / ! o @ ha un suo percorso. Non è stato scritto nulla.",
   "composer.protocol.moved": "La schermata è cambiata. Controlla il riquadro, poi invia di nuovo.",
   "composer.protocol.paneGone": "Questo riquadro non c'è più. Non è stato scritto nulla.",
+  "composer.protocol.wakeTimeout": "L'agente era sospeso e non si è risvegliato in tempo. Non è stato scritto nulla. Invia di nuovo tra poco.",
   "composer.protocol.writeFailed": "Scrittura non riuscita. Non è stato scritto nulla.",
   "composer.protocol.idReused": "Questa richiesta è già stata usata per un altro testo. Invia di nuovo.",
   "composer.protocol.refused": "Invio rifiutato. Non è stato scritto nulla.",

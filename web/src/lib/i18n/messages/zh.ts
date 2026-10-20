@@ -400,6 +400,7 @@ export const zh: Dictionary = {
   "composer.protocol.reservedLead": "以 / ! 或 @ 开头的文本有自己的通道。未输入任何内容。",
   "composer.protocol.moved": "屏幕已变化。请检查窗格后再次发送。",
   "composer.protocol.paneGone": "此窗格已不存在。未输入任何内容。",
+  "composer.protocol.wakeTimeout": "代理处于休眠状态，未能及时唤醒。未输入任何内容。请稍后再次发送。",
   "composer.protocol.writeFailed": "输入失败。未输入任何内容。",
   "composer.protocol.idReused": "此请求已用于其他文本。请再次发送。",
   "composer.protocol.refused": "发送被拒绝。未输入任何内容。",

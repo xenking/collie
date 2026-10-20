@@ -353,6 +353,7 @@ export const tr: Dictionary = {
   "composer.protocol.reservedLead": "/ ! veya @ ile başlayan metnin kendi yolu var. Hiçbir şey yazılmadı.",
   "composer.protocol.moved": "Ekran değişti. Bölmeyi kontrol et, sonra yeniden gönder.",
   "composer.protocol.paneGone": "Bu bölme artık yok. Hiçbir şey yazılmadı.",
+  "composer.protocol.wakeTimeout": "Ajan uykudaydı ve zamanında uyanmadı. Hiçbir şey yazılmadı. Birazdan yeniden gönder.",
   "composer.protocol.writeFailed": "Yazma başarısız. Hiçbir şey yazılmadı.",
   "composer.protocol.idReused": "Bu istek başka bir metin için kullanıldı. Yeniden gönder.",
   "composer.protocol.refused": "Gönderim reddedildi. Hiçbir şey yazılmadı.",
