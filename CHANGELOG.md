@@ -23,10 +23,12 @@ Running a crew? Update the lead first; members follow on their own. Details:
 
 ## [Unreleased]
 
+## [1.22.9] - 2026-10-21
+
 ### Fixed
 
-- **A long draft in an omp box no longer reads as a dialog.** OMP 18 draws its prompt as `❯`, the glyph a select list points with, and the read from the box's top edge down took the prompt row and the draft rows under it for a pointed list. Such a screen read as unreadable and every send was refused with "Collie cannot read this screen". The box's own prompt glyph no longer counts as a list pointer; the model picker and other dialogs drawn in the box's place still read as dialogs.
-- **Send again commits a send Collie could not confirm.** When Collie cannot read the pane, the strip's commit button reads "Type here" and now looks like a button. Tapping Send a second time on the same text does the same commit, so a repeated Send no longer refuses the same message over and over, and the notice says so.
+- **A long draft in an omp box no longer reads as a dialog.** OMP 18 draws its prompt as `❯`, the glyph a select list points with, and the read from the box's top edge down took the prompt row and the draft rows under it for a pointed list. Such a screen read as unreadable and every send was refused with "Collie cannot read this screen". The box's own prompt glyph no longer counts as a list pointer; the model picker and other dialogs drawn in the box's place still read as dialogs. ([1b6ee58](https://github.com/xenking/collie/commit/1b6ee58))
+- **Send again commits a send Collie could not confirm.** When Collie cannot read the pane, the strip's commit button reads "Type here" and now looks like a button. Tapping Send a second time on the same text does the same commit, so a repeated Send no longer refuses the same message over and over, and the notice says so. ([1b6ee58](https://github.com/xenking/collie/commit/1b6ee58))
 
 ## [1.22.8] - 2026-10-21
 
