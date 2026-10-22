@@ -399,7 +399,7 @@ export const ko: Dictionary = {
   "composer.protocol.discarded": "입력란에서 텍스트를 지웠습니다. 초안은 여기에 남아 있습니다.",
   "composer.protocol.draft": "입력란에 이미 초안이 있습니다. 추가, 교체 또는 취소하세요.",
   "composer.protocol.typed": "텍스트를 입력했지만 Enter는 누르지 않았습니다. 제출하거나 삭제하세요.",
-  "composer.protocol.unconfirmed": "Collie가 이 화면을 읽을 수 없습니다. 창을 확인한 뒤 ‘여기에 입력’을 누르세요.",
+  "composer.protocol.unconfirmed": "Collie가 이 화면을 읽을 수 없습니다. 창을 확인한 뒤 ‘여기에 입력’을 누르거나 보내기를 다시 누르세요.",
   "composer.protocol.noticeKey": "그 숫자는 입력란 위의 알림에 대한 응답이 됩니다. 창을 확인한 뒤 ‘여기에 입력’을 누르세요.",
   "composer.protocol.noticeKeyHeld": "그 숫자는 입력란 위의 알림에 대한 응답이 됩니다. 알림 카드에서 응답하거나, 턴이 끝난 뒤 숫자를 보내세요.",
   "composer.protocol.unknown": "전송되었는지 확인할 수 없습니다. 화면을 확인하고, 전송되지 않은 경우에만 다시 전송하세요. 작성 중인 초안은 유지됩니다.",

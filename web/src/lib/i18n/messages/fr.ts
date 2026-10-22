@@ -341,7 +341,7 @@ export const fr: Dictionary = {
   "composer.protocol.discarded": "Le texte a été retiré du champ. Votre brouillon est toujours ici.",
   "composer.protocol.draft": "Le champ contient déjà un brouillon. Ajoutez, remplacez ou annulez.",
   "composer.protocol.typed": "Votre texte est dans le champ, mais Entrée n'a pas été pressée. Envoyez-le ou supprimez-le.",
-  "composer.protocol.unconfirmed": "Collie ne peut pas lire cet écran. Vérifiez le volet, puis touchez Taper ici.",
+  "composer.protocol.unconfirmed": "Collie ne peut pas lire cet écran. Vérifiez le volet, puis touchez Taper ici ou Envoyer à nouveau.",
   "composer.protocol.noticeKey": "Ce chiffre répondrait à l'avis au-dessus de la zone. Vérifiez le volet, puis touchez Taper ici.",
   "composer.protocol.noticeKeyHeld": "Ce chiffre répondrait à l'avis au-dessus de la zone. Répondez-y sur sa carte, ou envoyez le chiffre une fois le tour terminé.",
   "composer.protocol.unknown": "Collie ne peut pas savoir si l'envoi a réussi. Lisez l'écran, puis renvoyez si ce n'est pas parti. Votre brouillon est conservé.",

@@ -33,7 +33,8 @@ export function SendOfferStrip({ offers, disabled, onOffer, onDismiss, capConfir
   return (
     <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-md bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground" data-testid="send-offers">
       {offers.map((offer) => (
-        <Button key={offer} variant="ghost" size="sm" className="h-7 px-2 text-xs font-medium" disabled={disabled} onClick={() => onOffer(offer)}>
+        // The commit is the step the person came here for: a filled button, never a word on the strip.
+        <Button key={offer} variant={offer === "commit" ? "default" : "ghost"} size="sm" className="h-7 px-2 text-xs font-medium" disabled={disabled} onClick={() => onOffer(offer)}>
           {t(offer === "commit" && capConfirm ? "composer.protocol.commitCap" : LABEL_KEYS[offer])}
         </Button>
       ))}

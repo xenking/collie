@@ -388,7 +388,7 @@ export const zh: Dictionary = {
   "composer.protocol.discarded": "文本已从输入框中移除。你的草稿仍在这里。",
   "composer.protocol.draft": "输入框中已有草稿。可追加、替换或取消。",
   "composer.protocol.typed": "你的文本在输入框中，但没有按 Enter。请发送或丢弃。",
-  "composer.protocol.unconfirmed": "Collie 无法读取此屏幕。请检查窗格，然后点按“在此输入”。",
+  "composer.protocol.unconfirmed": "Collie 无法读取此屏幕。请检查窗格，然后点按“在此输入”或再次点按发送。",
   "composer.protocol.noticeKey": "这个数字会回答输入框上方的提示。请检查窗格，然后点按“在此输入”。",
   "composer.protocol.noticeKeyHeld": "这个数字会回答输入框上方的提示。请在提示的卡片上回答，或等这一轮结束后再发送数字。",
   "composer.protocol.unknown": "Collie 无法确认此内容是否已发送。请查看屏幕，若未送出请重新发送。您的草稿已保留。",

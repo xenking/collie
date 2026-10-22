@@ -2314,6 +2314,18 @@ here, not in `panes/`, so the harness readers' corpus lists stay as they are.
 | `pi--v0871-idle-windows-drive.txt` | `pi--v0871-idle.txt` | The folder row became `C:\work\pi-cap-cwd`, as pi prints a folder outside the home folder on Windows. 1.22.0 did not take a row that starts with a drive letter as pi's status row and found no box. Reads idle and free |
 | `omp--done-yn-question.txt` | `omp--done.txt` | The last transcript row became `Shall I push the branch now? (y/n)`, flush on the open box. The `(y/n)` reads as a single-key prompt and hides the box, so the screen is never free. 1.22.0 also called the whole box `torn` and refused every send; it now takes the confirm path, as pi and Muse do |
 
+**Derived, not captured: an omp 18.12 draft under the `❯` prompt (2026-10-21 field case).** Rebuilt by
+hand from a live omp 18.12.2 read (`herdr pane read --source visible --format ansi`) of a pane whose box
+held a four-row draft. The shape, the SGR colours and the status row's Nerd Font glyphs are the capture's;
+every word is replaced with neutral text, the folder is `~/projects/sample`, and the quota row became
+`usage 13% · 4h 11m`. Until 1.22.9 the read from the box's top edge down (`dialogsInBox`) took the
+prompt's `❯` for a list pointer and the draft rows for its entries, so the screen read `unreadable` and
+every send was refused `unconfirmed`.
+
+| Fixture | State | Reads as |
+|---|---|---|
+| `omp--v18-12-draft-numbered.txt` | The blank-topped box with `❯ I like your proposal…` and three `  N.text` rows, omp's two status rows under it | idle, a draft |
+
 ## A list in the turn's answer, and the agents panel (captured 2026-10-17, Claude Code 2.1.302, Herdr, lane 8788)
 
 Read through `GET /api/pane/:id` (the visible screen, 119 columns by 40 rows) from a throwaway pane in

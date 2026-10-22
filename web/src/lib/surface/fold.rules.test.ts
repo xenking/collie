@@ -307,6 +307,32 @@ describe("rows around an idle box that 1.21.3 sent to (1.22.1 audit)", () => {
   });
 });
 
+// omp draws its prompt as `❯`, the glyph a select list points with, and its dialogs where the box stands
+// (`dialogsInBox`). A draft of several rows under that prompt read as a pointed list, so a free box with
+// a draft read `unreadable` and every send was refused `unconfirmed` (2026-10-21 field case, omp 18.12.2).
+describe("an omp draft under its `❯` prompt is the box's own text, not an in-box dialog", () => {
+  const DRAFT = { revision: 1, turn: "idle", modal: "none", composer: "draft" };
+  const read = (name: string, dir?: string) => readScreen(fixtureRows(name, dir), agentOf("omp"), idleFor("omp"));
+
+  it("a numbered draft of four rows reads idle with a draft", () => {
+    expect(read("omp--v18-12-draft-numbered.txt", SURFACE_FIXTURES_DIR).surface).toEqual(DRAFT);
+  });
+
+  it("the wrapped drafts of the corpus read idle with a draft", () => {
+    for (const name of ["omp--v18-rule-wrapped.txt", "omp--v18-4-claude-wrapped.txt", "omp--v18-4-borderless-wrapped.txt"]) {
+      expect(read(name).surface, name).toEqual(DRAFT);
+    }
+  });
+
+  it("the model picker drawn in the box's place still reads as a dialog, never free", () => {
+    for (const name of ["omp--v18-4-switch.txt", "omp--v18-4-switch-ptr-haiku.txt", "omp--v18-4-switch-narrow.txt"]) {
+      const surface = read(name).surface;
+      expect(surface.modal, name).not.toBe("none");
+      expect(isFree(surface), name).toBe(false);
+    }
+  });
+});
+
 // Claude Code 2.1.302's "Heads up" notice above a live box: its keys act only on a box that holds one
 // digit, so the box stays free. The rating survey over the box is another shape and stays unreadable.
 describe("a notice above a live box (Claude Code 2.1.302)", () => {

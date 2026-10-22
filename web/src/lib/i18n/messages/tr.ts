@@ -341,7 +341,7 @@ export const tr: Dictionary = {
   "composer.protocol.discarded": "Metin kutudan kaldırıldı. Taslağın hâlâ burada.",
   "composer.protocol.draft": "Kutuda zaten bir taslak var. Ekle, değiştir veya iptal et.",
   "composer.protocol.typed": "Metnin kutuda, ama Enter'a basılmadı. Gönder veya at.",
-  "composer.protocol.unconfirmed": "Collie bu ekranı okuyamıyor. Bölmeyi kontrol et, sonra Buraya yaz'a dokun.",
+  "composer.protocol.unconfirmed": "Collie bu ekranı okuyamıyor. Bölmeyi kontrol et, sonra Buraya yaz'a ya da yeniden Gönder'e dokun.",
   "composer.protocol.noticeKey": "Bu rakam kutunun üstündeki bildirimi yanıtlar. Bölmeyi kontrol et, sonra Buraya yaz'a dokun.",
   "composer.protocol.noticeKeyHeld": "Bu rakam kutunun üstündeki bildirimi yanıtlar. Bildirimi kartından yanıtla ya da tur bitince rakamı gönder.",
   "composer.protocol.unknown": "Collie bunun gönderilip gönderilmediğini belirleyemiyor. Ekranı okuyun, gitmediyse tekrar gönderin. Taslağınız saklanır.",

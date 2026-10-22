@@ -437,6 +437,34 @@ export function withoutCommandList(rows: readonly FrameRow[], list: CommandListR
   return withoutSpan(rows, list);
 }
 
+/** A second column: text after a run of eight blanks or more, the way a list entry sets its description. */
+const SECOND_COLUMN = /\S {8,}\S/u;
+
+/**
+ * The rows with the pointer glyph that leads row `at` read as a blank cell, the rest of the row kept.
+ * A row whose first non-blank cell is no pointer glyph is kept as it is, and so is a row with a second
+ * column: that is a list entry and its description (a palette a frame walk took for the box), not a
+ * prompt and its draft.
+ */
+function withoutLeadingPointer(rows: readonly FrameRow[], at: number): readonly FrameRow[] {
+  const row = rows[at];
+  const text = row === undefined ? "" : rowText(row);
+  const lead = POINTER_ROW.exec(text);
+  if (row === undefined || lead === null || SECOND_COLUMN.test(text)) return rows;
+  // The glyph's offset in the row's text: the blanks before it. Only the run that holds it is copied.
+  const segments = [...row.segments];
+  let offset = lead[1]!.length;
+  for (const [i, run] of segments.entries()) {
+    if (offset >= run.text.length) {
+      offset -= run.text.length;
+      continue;
+    }
+    segments[i] = { ...run, text: `${run.text.slice(0, offset)} ${run.text.slice(offset + lead[2]!.length)}` };
+    break;
+  }
+  return rows.map((candidate, i) => (i === at ? { segments } : candidate));
+}
+
 /**
  * The notice the profile names over a found frame's top edge (`idle.notices`, {@link readAboveNotice}),
  * or null. Every cue read takes it ({@link readCues}) and leaves its rows out: the box keeps its keys.
@@ -451,6 +479,12 @@ export function noticeOver(texts: readonly string[], frame: Frame | null, idle: 
  * dialogs where the box stands (`idle.dialogsInBox`), the cues of the rows from the box's top edge down,
  * the box rows included. The typed command's own list on either side of the box ({@link ownCommandList})
  * and a notice over the box ({@link noticeOver}) are left out of both.
+ *
+ * In the read from the top edge down, the pointer glyph that leads the found frame's prompt row reads as
+ * a blank cell: it is the box's own prompt, never a dialog's pointer. OMP draws its prompt as `❯` (or
+ * `›`), the glyph a select list points with, so a draft of several rows read as a pointed list there,
+ * and a free box with a long draft read as a dialog nobody could send past (2026-10-21 field case). The
+ * row's text stays: a typed `/mod` over a list that points elsewhere is still read.
  */
 export function readCuesFor(allRows: readonly FrameRow[], frame: Frame | null, idle: IdleProfile | null): CueRead {
   const texts = allRows.map(rowText);
@@ -459,7 +493,7 @@ export function readCuesFor(allRows: readonly FrameRow[], frame: Frame | null, i
   if (idle?.dialogsInBox !== true || frame === null) return plain;
   // From the top edge down: a dialog in the box's place lies there, and the transcript above is no part of it.
   const at = frame.top;
-  const down = readCues(rows.slice(at), null, null);
+  const down = readCues(withoutLeadingPointer(rows, frame.interior.prompt).slice(at), null, null);
   // A weak shape inside the box is the box's own hint row (OMP draws "to change thinking effort" there).
   if (down.strength !== "strong" || plain.strength === "strong") return plain;
   return { ...down, cluster: down.cluster.map((i) => i + at), cues: down.cues.map((cue) => ({ kind: cue.kind, row: cue.row + at })) };

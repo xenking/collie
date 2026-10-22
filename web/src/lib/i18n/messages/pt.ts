@@ -341,7 +341,7 @@ export const pt: Dictionary = {
   "composer.protocol.discarded": "O texto foi removido da caixa. Seu rascunho continua aqui.",
   "composer.protocol.draft": "A caixa já tem um rascunho. Acrescente, substitua ou cancele.",
   "composer.protocol.typed": "Seu texto está na caixa, mas o Enter não foi pressionado. Envie ou descarte.",
-  "composer.protocol.unconfirmed": "O Collie não consegue ler esta tela. Confira o painel e toque em Digitar aqui.",
+  "composer.protocol.unconfirmed": "O Collie não consegue ler esta tela. Confira o painel e toque em Digitar aqui ou em Enviar de novo.",
   "composer.protocol.noticeKey": "Esse número responderia ao aviso acima da caixa. Confira o painel e toque em Digitar aqui.",
   "composer.protocol.noticeKeyHeld": "Esse número responderia ao aviso acima da caixa. Responda no cartão dele ou envie o número quando o turno terminar.",
   "composer.protocol.unknown": "O Collie não consegue identificar se isso foi enviado. Leia a tela e tente enviar novamente se o envio não tiver ocorrido. Seu rascunho foi mantido.",

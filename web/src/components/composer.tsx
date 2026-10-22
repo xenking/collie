@@ -527,7 +527,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [sending, setSending] = useState(false);
   // The Send Protocol's held intent (its request id) and the offers its last answer made (M56 spec 05).
   const protocolIntent = useRef<IntentId | null>(null);
-  const [protocolOffer, setProtocolOffer] = useState<{ text: string; isDraft: boolean; rowsHash: string | null; offers: readonly SendOffer[]; capAck: boolean } | null>(null);
+  // `sendCommits`: the answer was the plain `unconfirmed` of a screen Collie cannot read, so Send on the
+  // same text is the second tap, the commit with the rows hash the person read (send-slot.ts, `manual`).
+  const [protocolOffer, setProtocolOffer] = useState<{ text: string; isDraft: boolean; rowsHash: string | null; offers: readonly SendOffer[]; capAck: boolean; sendCommits: boolean } | null>(null);
   const [uploading, setUploading] = useState(false);
   // Pending-send preview: set on a successful send, cleared when the mirror catches up (next text
   // update) or after a 6s safety timeout. Shows "You sent: …" so the user knows the message landed.
@@ -1193,6 +1195,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       setSendRefusal(phoneRefusal(translate("composer.status.dialogWaiting"), true));
       return false;
     }
+    // The manual Send's second tap: Send on the text the bridge just refused `unconfirmed` is the commit,
+    // bound to the rows hash of that answer, as Type here is. A changed text is a new first tap.
+    const pending = protocolOffer;
+    if (pending !== null && pending.sendCommits && pending.rowsHash !== null && pending.text === t) {
+      setProtocolOffer(null);
+      setSendRefusal(null);
+      return sendThroughProtocol(t, isDraft, modeFor(t), pending.rowsHash);
+    }
     return sendThroughProtocol(t, isDraft, modeFor(t), null);
   }
 
@@ -1231,7 +1241,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
       // A resend makes no offer: an offer would carry the row's text, which may be masked.
       const offered = reading.offers.length > 0 && resend === undefined;
-      setProtocolOffer(offered ? { text: t, isDraft, rowsHash: reply.rowsHash, offers: reading.offers, capAck: reading.cap !== null } : null);
+      setProtocolOffer(
+        offered
+          ? { text: t, isDraft, rowsHash: reply.rowsHash, offers: reading.offers, capAck: reading.cap !== null, sendCommits: reading.note === "unconfirmed" && reading.offers.includes("commit") }
+          : null,
+      );
       setSendRefusal(readingRefusal(reading), reply.surface ?? shownSurface, offered);
       // A password prompt on the screen the composer already shows (#103): the bridge could not see
       // the text land, because the prompt never echoes it. Say so, drop the stored draft, offer Type.

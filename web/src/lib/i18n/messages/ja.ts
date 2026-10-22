@@ -398,7 +398,7 @@ export const ja: Dictionary = {
   "composer.protocol.discarded": "入力欄からテキストを削除しました。下書きはここに残っています。",
   "composer.protocol.draft": "入力欄にはすでに下書きがあります。追加、置換、またはキャンセルしてください。",
   "composer.protocol.typed": "テキストは入力欄にありますが、Enter は押されていません。送信するか破棄してください。",
-  "composer.protocol.unconfirmed": "Collie はこの画面を読めません。ペインを確認してから「ここに入力」をタップしてください。",
+  "composer.protocol.unconfirmed": "Collie はこの画面を読めません。ペインを確認してから「ここに入力」をタップするか、もう一度送信してください。",
   "composer.protocol.noticeKey": "その数字は入力欄の上のお知らせへの回答になります。ペインを確認してから「ここに入力」をタップしてください。",
   "composer.protocol.noticeKeyHeld": "その数字は入力欄の上のお知らせへの回答になります。お知らせのカードで回答するか、ターンが終わってから数字を送ってください。",
   "composer.protocol.unknown": "Collieはこれが送信されたかどうかを判断できません。画面を確認し、送信されていなければもう一度送信してください。下書きは保持されています。",

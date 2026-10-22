@@ -402,7 +402,7 @@ export const es: Dictionary = {
   "composer.protocol.discarded": "El texto se quitó del cuadro. Tu borrador sigue aquí.",
   "composer.protocol.draft": "El cuadro ya tiene un borrador. Añade, reemplaza o cancela.",
   "composer.protocol.typed": "Tu texto está en el cuadro, pero no se pulsó Intro. Envíalo o descártalo.",
-  "composer.protocol.unconfirmed": "Collie no puede leer esta pantalla. Revisa el panel y toca Escribir aquí.",
+  "composer.protocol.unconfirmed": "Collie no puede leer esta pantalla. Revisa el panel y toca Escribir aquí o Enviar otra vez.",
   "composer.protocol.noticeKey": "Ese número respondería al aviso sobre la caja. Revisa el panel y toca Escribir aquí.",
   "composer.protocol.noticeKeyHeld": "Ese número respondería al aviso sobre la caja. Respóndelo en su tarjeta o envía el número cuando termine el turno.",
   "composer.protocol.unknown": "Collie no puede determinar si esto se envió. Lea la pantalla y vuelva a enviar si no se envió. Su borrador se conserva.",

@@ -151,6 +151,58 @@ describe("Composer on the Send Protocol (M56 specs 05 and 06)", () => {
     expect(sends[1]).toMatchObject({ text: "go ahead", mode: "send", rowsHash: "0abc12" });
   });
 
+  // The 2026-10-21 field case: the person read "tap Type here" and tapped Send again, seven times, and
+  // each tap was a new first tap that the bridge refused `unconfirmed` again.
+  it("Send again on the same text after an unconfirmed answer is the commit: it carries the rows hash", async () => {
+    const user = userEvent.setup();
+    const unreadable = { revision: 3, turn: "unknown", modal: "unreadable", composer: "unknown" } as const;
+    const { sends } = bridge([
+      { body: { receipt: receipt("refused", "unconfirmed"), offers: ["commit", "keys"], rowsHash: "0abc12", surface: unreadable } },
+      { body: { receipt: receipt("sent"), offers: [] } },
+    ]);
+    renderComposer({ surface: unreadable });
+    await user.type(screen.getByPlaceholderText(/type a reply/i), "go ahead");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Type here" });
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(sends).toHaveLength(2));
+    expect(sends[1]).toMatchObject({ text: "go ahead", mode: "send", rowsHash: "0abc12" });
+    expect(sends[1]!.id).not.toBe(sends[0]!.id);
+  });
+
+  it("Send on a changed text after an unconfirmed answer is a new first tap, with no rows hash", async () => {
+    const user = userEvent.setup();
+    const { sends } = bridge([
+      { body: { receipt: receipt("refused", "unconfirmed"), offers: ["commit", "keys"], rowsHash: "0abc12" } },
+      { body: { receipt: receipt("refused", "unconfirmed"), offers: ["commit", "keys"], rowsHash: "0abc13" } },
+    ]);
+    renderComposer();
+    const field = screen.getByPlaceholderText(/type a reply/i);
+    await user.type(field, "go ahead");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Type here" });
+    await user.type(field, " now");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(sends).toHaveLength(2));
+    expect(sends[1]).toMatchObject({ text: "go ahead now", mode: "send" });
+    expect(sends[1]!.rowsHash).toBeUndefined();
+  });
+
+  it("Send again after a draft refusal is no commit: it asks again with no rows hash", async () => {
+    const user = userEvent.setup();
+    const { sends } = bridge([
+      { body: { receipt: receipt("refused", "draft_present"), offers: ["append", "replace", "cancel"], rowsHash: "0abc12" } },
+      { body: { receipt: receipt("refused", "draft_present"), offers: ["append", "replace", "cancel"] } },
+    ]);
+    renderComposer();
+    await user.type(screen.getByPlaceholderText(/type a reply/i), "new words");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByTestId("send-offers");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(sends).toHaveLength(2));
+    expect(sends[1]!.rowsHash).toBeUndefined();
+  });
+
   it("typed but not submitted offers Submit and Discard, and keeps the draft", async () => {
     const user = userEvent.setup();
     const { sends } = bridge([

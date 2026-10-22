@@ -404,7 +404,7 @@ export const de: Dictionary = {
   "composer.protocol.discarded": "Der Text wurde aus dem Feld entfernt. Dein Entwurf ist noch hier.",
   "composer.protocol.draft": "Im Feld steht schon ein Entwurf. Ergänzen, ersetzen oder abbrechen.",
   "composer.protocol.typed": "Dein Text steht im Feld, aber Enter wurde nicht gedrückt. Absenden oder verwerfen.",
-  "composer.protocol.unconfirmed": "Collie kann diesen Bildschirm nicht lesen. Prüfe den Bereich und tippe dann auf Hier tippen.",
+  "composer.protocol.unconfirmed": "Collie kann diesen Bildschirm nicht lesen. Prüfe den Bereich und tippe dann auf Hier tippen oder noch einmal auf Senden.",
   "composer.protocol.noticeKey": "Diese Zahl würde den Hinweis über dem Eingabefeld beantworten. Prüfe den Bereich und tippe dann auf Hier tippen.",
   "composer.protocol.noticeKeyHeld": "Diese Zahl würde den Hinweis über dem Eingabefeld beantworten. Beantworte ihn auf seiner Karte oder sende die Zahl, wenn der Durchlauf beendet ist.",
   "composer.protocol.unknown": "Collie kann nicht feststellen, ob dies gesendet wurde. Lies den Bildschirm und sende erneut, falls es nicht übertragen wurde. Dein Entwurf bleibt erhalten.",
