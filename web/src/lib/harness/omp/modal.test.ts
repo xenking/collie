@@ -108,7 +108,8 @@ const NO_WAY_OUT = [...TREE, ...CLIPPED];
 
 const OMP = ALL.filter((f) => f.startsWith("omp--"));
 const OMP_WITHOUT_A_MODAL = OMP.filter((f) => !MODALS_WITH_A_WAY_OUT.includes(f));
-const FOREIGN = ALL.filter((f) => !f.startsWith("omp--"));
+// `omp-lab--` captures are omp's too: scratch-lab captures kept out of the adapter's own corpus lists.
+const FOREIGN = ALL.filter((f) => !f.startsWith("omp--") && !f.startsWith("omp-lab--"));
 
 describe("ompModalOnScreen on the omp corpus", () => {
   it.each(MODALS_WITH_A_WAY_OUT)("%s: a modal that names its way out ⇒ true", (name) => {

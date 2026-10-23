@@ -80,6 +80,10 @@ export interface Frame {
     readonly named: readonly NamedRow[];
   };
   readonly anchorsHit: readonly FrameAnchorHit[];
+  /** The interior walk's trailer rows (`idle.frame.trailer`): the row the box draws under the draft and its padding. No modal cue reads them. */
+  readonly trailer?: RowSpan;
+  /** The box closes once the submit key takes its text (`idle.frame.submitCloses`). */
+  readonly submitCloses?: true;
 }
 
 /** A row under the bottom edge that a named footer row of the profile matches. */
@@ -604,6 +608,7 @@ function interiorFrameAt(rows: readonly FrameRow[], bottom: number, idle: IdlePr
 
   // The last row of the box's interior: the bottom edge itself on an open box.
   let last = open ? bottom : bottom - 1;
+  const innerLast = last;
   if (c.interior.trailerRow !== null) {
     let pads = 0;
     while (last >= 0 && c.interior.trailerPad !== null && pads < c.interior.maxPad && c.interior.trailerPad.test(texts[last]!.trimEnd())) {
@@ -676,7 +681,7 @@ function interiorFrameAt(rows: readonly FrameRow[], bottom: number, idle: IdlePr
   const { status, footer, named } = open ? { status: null, footer: null, named: [] } : walkBelowNamed(texts, bottom, end, idle, c.footerRows);
   const above = bandAbove(texts, top, idle);
 
-  return {
+  const frame: Frame = {
     top,
     bottom,
     label: label.length > 0 ? label : null,
@@ -685,6 +690,10 @@ function interiorFrameAt(rows: readonly FrameRow[], bottom: number, idle: IdlePr
     volatile: { above, status, footer, named },
     anchorsHit,
   };
+  // The two optional fields are set only where the profile names them, so every other frame keeps its shape.
+  if (c.interior.trailerRow !== null) Object.assign(frame, { trailer: { first: last + 1, last: innerLast } });
+  if (idle.frame.submitCloses === true) Object.assign(frame, { submitCloses: true });
+  return frame;
 }
 
 const compiledOverlays = new WeakMap<IdleProfile, readonly RegExp[]>();

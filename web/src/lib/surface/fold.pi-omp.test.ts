@@ -97,3 +97,45 @@ describe("the typed command's own list under pi's and omp's box (field case 2026
     }
   });
 });
+
+// The field case of 2026-10-23: `Other (type your own)` opens omp's answer editor, and the phone's Send
+// met "Collie cannot read this screen" there, because its hint row names two keys. The editor is a
+// box now (`submitCloses`), in the running turn of the Ask call, so Send types into it.
+describe("omp's answer editor reads as a box in the running turn (18.4.4 and 18.12.2)", () => {
+  const EDITORS: readonly [string, string][] = [
+    ["omp--answer-editor-empty.txt", ""],
+    ["omp--answer-editor-typed.txt", "a deep teal, like the sea at dusk"],
+    ["omp--answer-editor-note.txt", "only if it is a warm blue"],
+    ["omp-lab--v18-12-answer-editor-empty.txt", ""],
+    ["omp-lab--v18-12-answer-editor-typed.txt", "a deep teal, like the sea at dusk"],
+  ];
+  for (const [name, text] of EDITORS) {
+    it(`${name}: the box holds ${JSON.stringify(text)}, and its hint row is no dialog`, () => {
+      const read = own(name);
+      expect(read.surface).toMatchObject({ turn: "running", modal: "none", composer: text === "" ? "empty" : "draft" });
+      expect(read.frame?.interior.text).toBe(text);
+      expect(read.frame?.submitCloses).toBe(true);
+      expect(read.cues?.strength).toBe("none");
+    });
+  }
+
+  it("a 700-word answer over 37 rows is one box, its wrapped rows no pointed list", () => {
+    const read = own("omp--answer-editor-long.txt");
+    expect(read.surface).toMatchObject({ turn: "running", modal: "none", composer: "draft" });
+    expect(read.frame?.interior.text.startsWith("word0000 word0001")).toBe(true);
+    expect(read.frame?.interior.text.endsWith("word0699")).toBe(true);
+  });
+
+  it("the Ask dialog before it is still the ask, and the editor's going leaves no such box", () => {
+    expect(own("omp-lab--v18-12-ask-other-pointed.txt").surface.modal).toMatchObject({ ask: { options: expect.arrayContaining([expect.objectContaining({ label: "Other (type your own)" })]) } });
+    expect(own("omp-lab--v18-12-answer-editor-sent.txt").frame?.submitCloses).toBeUndefined();
+  });
+
+  it("a hint row without `or … submit` (the hook-style editor, where Enter is a newline) keeps the screen unread", () => {
+    const rows = fixtureRows("omp-lab--v18-12-answer-editor-typed.txt").map((row) => ({
+      segments: row.segments.map((run) => ({ ...run, text: run.text.replace(/ or (\S+ Q) submit/u, "/$1 submit") })),
+    }));
+    expect(findInputFrame(rows, idleFor("omp")!)?.submitCloses).toBeUndefined();
+    expect(isFree(own("omp-lab--v18-12-answer-editor-typed.txt").surface)).toBe(false);
+  });
+});

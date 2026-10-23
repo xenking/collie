@@ -2367,7 +2367,7 @@ export class SendProtocol {
   private async steps(state: RunState): Promise<void> {
     const { request, match } = state;
     const profile = match?.profile ?? null;
-    const lines = sendLines(request.text);
+    let lines = sendLines(request.text);
     const leads = profile?.reservedLeads ?? GENERIC_LEADS;
     const writes = request.mode === "send" || request.mode === "command" || request.mode === "append" || request.mode === "replace";
 
@@ -2441,6 +2441,9 @@ export class SendProtocol {
         return;
     }
     if (request.mode !== "replace") this.lap(state, "s0");
+    // A dialog's own text field (`idle.frame.submitCloses`) may take a line break as its submit key, so
+    // its text goes in as one line, the lines joined with a space: the newline key never reaches it.
+    if (s0.frame?.submitCloses === true && lines.length > 1) lines = [lines.join(" ")];
 
     const prefix = request.mode === "append" && s0.frame !== null ? boxText(s0.frame) : "";
     const text = lines.join("");
@@ -3253,6 +3256,10 @@ export class SendProtocol {
     let witnessed = false;
     const result = await this.poll(state, "s2", BOUNDS.s2, (snap) => {
       if (!command && !witnessed && (labelFromWitness(state.match) || (!state.queued && enterQueues(state.match)))) witnessed = showsQueued(snap, state.match?.profile.keys.queuedRow, sentText);
+      // A dialog's own text field closes once the submit key takes its text (`idle.frame.submitCloses`),
+      // and Escape is never sent: a read without it is the evidence, whatever stands there now (the
+      // next question, the box behind it). Only a read cut inside a box waits.
+      if (s0.frame?.submitCloses === true) return snap.frame?.submitCloses === true || snap.surface.reason === "torn" ? "wait" : "pass";
       if (s0.frame !== null) {
         // Queued behind a running turn: a dialog that opened as the Enter went out may have taken it.
         // The Surface claiming a modal, or two reads in a row with no box, end the request on their

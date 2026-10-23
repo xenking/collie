@@ -2679,17 +2679,17 @@
   "omp--answer-editor-empty.txt": {
    "harness": "omp",
    "version": "unversioned",
-   "state": "dialog"
+   "state": "running"
   },
   "omp--answer-editor-long.txt": {
    "harness": "omp",
    "version": "unversioned",
-   "state": "dialog"
+   "state": "draft"
   },
   "omp--answer-editor-note.txt": {
    "harness": "omp",
    "version": "unversioned",
-   "state": "dialog"
+   "state": "draft"
   },
   "omp--answer-editor-typed.txt": {
    "harness": "omp",
@@ -2699,7 +2699,7 @@
   "omp--answer-editor-wrapped.txt": {
    "harness": "omp",
    "version": "unversioned",
-   "state": "dialog"
+   "state": "draft"
   },
   "omp--approval-bash.txt": {
    "harness": "omp",
@@ -3194,7 +3194,7 @@
   "omp--v18-4-ask-note-editor.txt": {
    "harness": "omp",
    "version": "18.4",
-   "state": "dialog"
+   "state": "idle"
   },
   "omp--v18-4-ask-single-moved.txt": {
    "harness": "omp",
@@ -4230,6 +4230,26 @@
    "harness": "shell",
    "version": "unversioned",
    "state": "screen"
+  },
+  "omp-lab--v18-12-ask-other-pointed.txt": {
+   "harness": "omp",
+   "version": "18.12.2",
+   "state": "dialog"
+  },
+  "omp-lab--v18-12-answer-editor-empty.txt": {
+   "harness": "omp",
+   "version": "18.12.2",
+   "state": "running"
+  },
+  "omp-lab--v18-12-answer-editor-typed.txt": {
+   "harness": "omp",
+   "version": "18.12.2",
+   "state": "draft"
+  },
+  "omp-lab--v18-12-answer-editor-sent.txt": {
+   "harness": "omp",
+   "version": "18.12.2",
+   "state": "running"
   }
  },
  "knownMismatches": {

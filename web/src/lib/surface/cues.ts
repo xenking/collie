@@ -449,7 +449,8 @@ const SECOND_COLUMN = /\S {8,}\S/u;
 function withoutLeadingPointer(rows: readonly FrameRow[], at: number): readonly FrameRow[] {
   const row = rows[at];
   const text = row === undefined ? "" : rowText(row);
-  const lead = POINTER_ROW.exec(text);
+  // A box side in front of the glyph (`│ > ` in OMP's answer editor) reads as a blank cell, the length kept.
+  const lead = POINTER_ROW.exec(unboxed(text));
   if (row === undefined || lead === null || SECOND_COLUMN.test(text)) return rows;
   // The glyph's offset in the row's text: the blanks before it. Only the run that holds it is copied.
   const segments = [...row.segments];
@@ -493,7 +494,10 @@ export function readCuesFor(allRows: readonly FrameRow[], frame: Frame | null, i
   if (idle?.dialogsInBox !== true || frame === null) return plain;
   // From the top edge down: a dialog in the box's place lies there, and the transcript above is no part of it.
   const at = frame.top;
-  const down = readCues(withoutLeadingPointer(rows, frame.interior.prompt).slice(at), null, null);
+  // The box's own trailer rows are the box's: the key hints of a dialog's text field (OMP's answer
+  // editor, `⏎ or ⌃Q submit  esc cancel`) name two keys, which would read as the dialog that hides the box.
+  const own = frame.trailer === undefined ? rows : withoutSpan(rows, frame.trailer);
+  const down = readCues(withoutLeadingPointer(own, frame.interior.prompt).slice(at), null, null);
   // A weak shape inside the box is the box's own hint row (OMP draws "to change thinking effort" there).
   if (down.strength !== "strong" || plain.strength === "strong") return plain;
   return { ...down, cluster: down.cluster.map((i) => i + at), cues: down.cues.map((cue) => ({ kind: cue.kind, row: cue.row + at })) };

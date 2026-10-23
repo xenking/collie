@@ -227,7 +227,13 @@ export interface FrameLayout {
    * list and a dialog's title too, and those stand apart by a blank row or run past the bound. Optional.
    */
   readonly underPainted?: boolean;
-
+  /**
+   * The interior walk only. The box is a dialog's own text field (OMP's answer editor), which closes
+   * once the submit key takes its text: after that key, a read where this box is gone is the evidence
+   * the text went. Its text goes in as one line, since such a field may submit on a line break.
+   * Optional.
+   */
+  readonly submitCloses?: true;
 }
 
 /** The ghost text after the cursor ({@link Profile.idle.inlineHint}). */
@@ -792,7 +798,7 @@ function parseFrame(frameNode: JsonObject): FrameLayout {
     maxTailRows: whole(field(frameNode, "maxTailRows", "idle.frame"), "idle.frame.maxTailRows", 0),
   };
   if (walk === "edges") {
-    for (const key of ["rows", "trailer", "continuation"] as const) {
+    for (const key of ["rows", "trailer", "continuation", "submitCloses"] as const) {
       if (frameNode[key] !== undefined) fail(`idle.frame.${key}`, "belongs to the interior walk");
     }
     const edgeBottom = anchor(field(frameNode, "bottom", "idle.frame"), "idle.frame.bottom", null, true);
@@ -808,10 +814,12 @@ function parseFrame(frameNode: JsonObject): FrameLayout {
   }
   if (frameNode.underPainted === true && frameNode.under === undefined) fail("idle.frame.underPainted", "needs an under pattern");
   const withPainted = frameNode.underPainted === true ? { ...withUnder, underPainted: true } : withUnder;
-  if (frameNode.continuation === undefined) return withPainted;
+  if (frameNode.submitCloses !== undefined && frameNode.submitCloses !== true) fail("idle.frame.submitCloses", "must be true");
+  const withCloses = frameNode.submitCloses === true ? { ...withPainted, submitCloses: true as const } : withPainted;
+  if (frameNode.continuation === undefined) return withCloses;
   const continuation = pattern(frameNode.continuation, "idle.frame.continuation");
   if (!continuation.source.includes("(?<text>")) fail("idle.frame.continuation", "must hold the named group text");
-  return { ...withPainted, continuation: continuation.source };
+  return { ...withCloses, continuation: continuation.source };
 }
 
 export function parseProfile(raw: JsonValue): Profile {

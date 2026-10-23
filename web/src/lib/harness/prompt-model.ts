@@ -49,6 +49,11 @@ export interface PromptOption {
    * Absent when `keys[0]` already is the badge.
    */
   keyLabel?: string;
+  /**
+   * Choosing it opens the harness's own text field for a typed answer (omp's `Other (type your own)`):
+   * the phone's composer takes the focus after the tap, and its Send fills the field.
+   */
+  opensInput?: true;
 }
 
 /**

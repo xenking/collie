@@ -703,14 +703,15 @@ describe("AgentChat — raw-terminal escape hatch", () => {
     expect(screen.getByText(/1\. Yes/)).toBeInTheDocument();
   });
 
-  it("the Screen pill shows the raw rows in one tap, without a stored preference, and a second tap brings the cards back", async () => {
+  // The dialog's card stays in the dock (field case 2026-10-23): the raw rows alone left "Answer the dialog" nowhere to go.
+  it("the Screen pill shows the raw rows in one tap, without a stored preference, and the dialog keeps its card at the thumb", async () => {
     const user = userEvent.setup();
     renderChat({ text: MENU_TEXT });
     expect(await screen.findByRole("button", { name: "Yes" })).toBeInTheDocument();
     const pill = screen.getByRole("button", { name: "Show the screen rows, without cards" });
     await user.click(pill);
-    expect(screen.queryByRole("button", { name: "Yes" })).not.toBeInTheDocument();
-    expect(screen.getByText(/1\. Yes/)).toBeInTheDocument();
+    expect(screen.getAllByText(/1\. Yes/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Yes" })).toBeInTheDocument();
     expect(localStorage.getItem("collie:display-prefs:v4")).toBeNull();
     await user.click(pill);
     expect(await screen.findByRole("button", { name: "Yes" })).toBeInTheDocument();

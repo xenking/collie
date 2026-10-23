@@ -281,6 +281,7 @@ export function detectAskSelectRegion(lines: StyledLine[]): AskSelectRegion | nu
       keyLabel: i === pointedAt ? POINTER_BADGE : "",
     };
     if (option.note) row.description = "✎ note";
+    if (option.label === OTHER_LABEL) row.opensInput = true;
     // A description omp printed under the row follows the note's mark, in screen order.
     if (option.description !== undefined) {
       row.description = option.note ? `✎ note · ${option.description}` : option.description;

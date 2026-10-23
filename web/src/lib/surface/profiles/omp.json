@@ -149,6 +149,32 @@
         "continuationIndent": 2,
         "maxDraftRows": 40,
         "maxTailRows": 3
+      },
+      {
+        "walk": "interior",
+        "top": {
+          "pattern": "^╭─ \\S.*╮$",
+          "column": 0
+        },
+        "prompt": {
+          "pattern": "^│ > ?(?<draft>.*?)\\s*│$",
+          "column": 0
+        },
+        "bottom": {
+          "pattern": "^╰─+╯$",
+          "minCells": 8,
+          "column": 0
+        },
+        "trailer": {
+          "row": "^│ \\S.*? or \\S.*? submit(?:\\s.*)?│$",
+          "pad": "^│\\s*│$",
+          "maxPad": 1
+        },
+        "continuation": "^│ {3}(?<text>.*?)\\s*│$",
+        "submitCloses": true,
+        "continuationIndent": 0,
+        "maxDraftRows": 200,
+        "maxTailRows": 3
       }
     ],
     "placeholders": {

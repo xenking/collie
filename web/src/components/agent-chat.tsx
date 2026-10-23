@@ -808,10 +808,21 @@ export function AgentChat({
       }),
     [display, mirrorAgent, grammarsOn, mirrorOverride],
   );
-  // Whether a card the mirror drew owns the keyboard. It no longer reaches the composer (M56 spec 06:
+  // THE DOCK KEEPS ITS DIALOG CARD IN SCREEN MODE (field case 2026-10-23). The Screen pill shows the
+  // raw rows, and an Ask on them still has its card at the thumb: without it "Answer the dialog" went
+  // nowhere, and `Other (type your own)` could only be reached through the Keys dock. The mirror
+  // above stays raw; only the Raw terminal setting turns the cards off everywhere.
+  const dockBlocks = useMemo(
+    () =>
+      grammarsOn || prefs.rawTerminal
+        ? blocks
+        : buildBlocks(splitLines(parseAnsi(display)), { agent: agent?.agent, grammars: true, nativeMirror: mirrorOverride }),
+    [blocks, grammarsOn, prefs.rawTerminal, display, agent?.agent, mirrorOverride],
+  );
+  // Whether a card the dock drew owns the keyboard. It no longer reaches the composer (M56 spec 06:
   // the composer reads the Surface only); it still keeps the queued-keys card and the dialog taps
   // from writing an unbound key into a dialog (below).
-  const dialogPresent = useMemo(() => blocks.some(blockOwnsKeyboard), [blocks]);
+  const dialogPresent = useMemo(() => dockBlocks.some(blockOwnsKeyboard), [dockBlocks]);
   // The composer's Surface (M56 spec 06): the bridge's read, with the facts the phone knows before
   // any read folded in as `composer: unreachable` (lib/send-slot.ts, `paneSurface`).
   const { surface: composerSurface, unreachableNote } = useMemo(
@@ -1328,7 +1339,12 @@ export function AgentChat({
           return false;
         }
         const tap = { card: "prompt-select", index: prompt.options.indexOf(action.option), label: action.option.label } as const;
-        if (askOptionFor(paneAsk, tap) !== null) return settleAskTap(paneAsk.id, await answerAsk({ paneId, scope, ask: paneAsk, tap }));
+        if (askOptionFor(paneAsk, tap) !== null) {
+          const sent = await settleAskTap(paneAsk.id, await answerAsk({ paneId, scope, ask: paneAsk, tap }));
+          // An option that opens the harness's own text field (omp's answer editor): the next Send fills it.
+          if (sent && action.option.opensInput === true) composerRef.current?.focusInput();
+          return sent;
+        }
         // A hook-held ask (M56 spec 12) never falls back to keys: a key would answer the held dialog
         // behind the hook's back. The card and the ask disagree, so nothing is sent.
         if (paneAsk.channel === "hook") {
@@ -1359,6 +1375,7 @@ export function AgentChat({
           "success",
         );
         await showAfterSend();
+        if (action.kind === "option" && action.option.opensInput === true) composerRef.current?.focusInput();
       } else if (result.status === "changed") {
         // Which step refused, for a person with the console open (`why` is a diagnosis, never UI
         // text). A harness drift shows up here as the one field that differed.
@@ -2685,7 +2702,7 @@ export function AgentChat({
           {display && (
             <CardDock
               ref={cardDockRef}
-              blocks={blocks}
+              blocks={dockBlocks}
               onPromptAction={handlePromptAction}
               onWizardAction={handleWizardAction}
               onPreviewAction={handlePreviewAction}
@@ -2921,7 +2938,7 @@ export function AgentChat({
                   readOnly={readOnly}
                   onAnswerDialog={answerDialog}
                   // The dock draws a dialog card only with a text to draw from (see the CardDock below).
-                  dialogCard={display ? hasDialogCard(blocks) : false}
+                  dialogCard={display ? hasDialogCard(dockBlocks) : false}
                   text={text}
                   terminalDraft={terminalDraft}
                   rawTerminalDraft={rawTerminalDraft}

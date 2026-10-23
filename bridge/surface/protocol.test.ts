@@ -5626,3 +5626,79 @@ describe("a parked pane wakes before the send (Herdr's `omp (sleeping)`)", () =>
     expect(r.deps.store.get("wake-held-03")?.receipt).toMatchObject({ reason: "wake_timeout", detail: "The agent was asleep and did not wake in time. Nothing was typed." });
   });
 });
+
+/**
+ * omp 18.12.2's answer editor, the box `Other (type your own)` opens (captured 2026-10-23), drawn from
+ * its capture with the box's text on its `> ` row. Ctrl+Q takes the text and closes it: the pane then
+ * draws `after`, the next screen of the capture set.
+ */
+class OmpEditorPane extends FakePane {
+  /** Texts the editor took as the answer. */
+  answers: string[] = [];
+  closed = false;
+  private readonly editor = plainCapture("omp-lab--v18-12-answer-editor-empty.txt");
+  private readonly next: string[];
+
+  constructor(after: string) {
+    super("generic");
+    this.next = plainCapture(after);
+    const base = this.writeKeys;
+    this.writeKeys = (paneId, keys) => {
+      for (const key of keys) {
+        if (key === "ctrl+q" && !this.closed) {
+          this.keysSeen.push(key);
+          this.answers.push(this.box);
+          this.box = "";
+          this.closed = true;
+          this.revision++;
+        } else void base(paneId, [key]);
+      }
+      return Promise.resolve(muxAck());
+    };
+  }
+
+  override render(): string {
+    if (this.closed) return this.next.join("\n");
+    return this.editor.map((row) => (row.startsWith("│ >") ? `${`│ > ${this.box}`.padEnd(row.length - 1)}│` : row)).join("\n");
+  }
+}
+
+/** An SGR sequence (ESC, `[`, parameters, `m`): the capture's colours, dropped for the fake pane's plain rows. */
+const SGR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;:]*m`, "gu");
+
+function plainCapture(name: string): string[] {
+  return fixture(name)
+    .split(/\r?\n/u)
+    .map((row) => row.replace(SGR, ""));
+}
+
+describe("omp's answer editor (field case 2026-10-23: Other (type your own) from the phone)", () => {
+  const editorRig = (after: string): Rig & { pane: OmpEditorPane } => {
+    const pane = new OmpEditorPane(after);
+    return { ...rig({ pane, harness: "omp", version: "18.12.2" }), pane };
+  };
+
+  test("Send types the answer into the editor and Ctrl+Q takes it: the editor's going is the evidence", async () => {
+    const { pane, send } = editorRig("omp-lab--v18-12-answer-editor-sent.txt");
+    const answer = await send("a deep teal, like the sea at dusk");
+    expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["probe", "Backspace", "ctrl+q"] });
+    expect(pane.answers).toEqual(["a deep teal, like the sea at dusk"]);
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+
+  test("the next question of the Ask call drawn where the editor stood is no dialog that took the key", async () => {
+    const { pane, send } = editorRig("omp-lab--v18-12-ask-other-pointed.txt");
+    const answer = await send("a deep teal");
+    expect(answer.receipt?.outcome).toBe("sent");
+    expect(pane.answers).toEqual(["a deep teal"]);
+  });
+
+  test("a text of two lines goes in as one line: the newline key never reaches the editor", async () => {
+    const { pane, send } = editorRig("omp-lab--v18-12-answer-editor-sent.txt");
+    const answer = await send("a deep teal\nlike the sea at dusk");
+    expect(answer.receipt?.outcome).toBe("sent");
+    expect(pane.answers).toEqual(["a deep teal like the sea at dusk"]);
+    expect(pane.keysSeen).not.toContain("ctrl+j");
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+});

@@ -2324,7 +2324,7 @@ every send was refused `unconfirmed`.
 
 | Fixture | State | Reads as |
 |---|---|---|
-| `omp--v18-12-draft-numbered.txt` | The blank-topped box with `❯ I like your proposal…` and three `  N.text` rows, omp's two status rows under it | idle, a draft |
+| `omp-lab--v18-12-draft-numbered.txt` | The blank-topped box with `❯ I like your proposal…` and three `  N.text` rows, omp's two status rows under it | idle, a draft |
 
 ## A list in the turn's answer, and the agents panel (captured 2026-10-17, Claude Code 2.1.302, Herdr, lane 8788)
 
@@ -2514,3 +2514,22 @@ Nerd Font glyph, so the box's top edge (`╭── ⠋ 13s …`, `1m` past a min
 | `omp--v18-11-nerd-running-tool-minute--w130.txt`, `--w80.txt` | The same turn past a minute: the top edge reads `⠋ 1m`. Labelled `running` |
 | `omp--v18-11-nerd-ghost-word--w130.txt`, `--w80.txt` | The box holds `please push` with the ghost `ed` after it. Labelled `draft` |
 | `omp--v18-11-ghost-word--w130.txt` | The same with the `unicode` preset. Labelled `draft` |
+
+## omp 18.12 Ask `Other (type your own)` and its answer editor (captured 2026-10-23, oh-my-pi `omp` v18.12.2, scratch tmux)
+
+Four captures of one Ask call at 120 columns, from a scratch tmux session with a local fake model
+that calls `ask` with three colours (`tmux capture-pane -p -e`, line ends written as `\r\n`). The
+model, the project folder (`/tmp/omp-lab/project`) and the session hold no personal data, and no
+username or hostname is on any row. They pin the field case of 2026-10-23: in the Screen view the
+person picked `Other (type your own)` and could not type the answer from the phone. The bridge read
+the answer editor as an overlay it cannot read, because its hint row names two keys and the profile
+named no box of that shape. omp's profile names it now (`frameAlternates`, `submitCloses`), so the
+editor reads as a box in a running turn and the composer's Send types into it with Ctrl+Q. The
+editor is drawn exactly as on 18.4.4 (`omp--answer-editor-*.txt` above).
+
+| Fixture | State / what's in it |
+|---|---|
+| `omp-lab--v18-12-ask-other-pointed.txt` | The Ask dialog with the Nerd Font pointer on `Other (type your own)`. Labelled `dialog` |
+| `omp-lab--v18-12-answer-editor-empty.txt` | Enter on it: `╭─ Custom answer: Pick a colour ─╮` with an empty `> ` row and the `⏎ or ⌃Q submit` hint, `Working…` above. Labelled `running` |
+| `omp-lab--v18-12-answer-editor-typed.txt` | The same editor holding `a deep teal, like the sea at dusk`. Labelled `draft` |
+| `omp-lab--v18-12-answer-editor-sent.txt` | After Ctrl+Q: the editor is gone, the transcript shows the answer, the turn runs on under the 18.12 status band box (`╰─ `), which the profile does not read yet. Labelled `running` |

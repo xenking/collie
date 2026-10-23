@@ -183,6 +183,29 @@ describe("AgentChat: a pending OMP ask", () => {
     for (const write of sent) expect(write.expected_prompt).toContain(QUESTION);
     await waitFor(() => expect(screen.queryByRole("group", { name: QUESTION })).toBeNull());
   });
+
+  // The field case of 2026-10-23: on the Screen view the card stays at the thumb, and `Other (type your
+  // own)` hands the keyboard to the composer once omp's answer editor is open, so the next Send fills it.
+  it("keeps its card in the Screen view, and Other puts the caret in the composer for the typed answer", async () => {
+    const user = userEvent.setup();
+    const asking = screenOf("omp--v18-10-ask-single");
+    const other = "Other (type your own)";
+    const sent = mountWorld({
+      chat: fixtureOmpAskSingleChat,
+      screens: { asking, other: pointerOn(asking, other), editor: screenOf("omp--answer-editor-empty") },
+      start: "asking",
+      script: [
+        { on: "asking", keys: ["Down", "Down"], to: "other" },
+        { on: "other", keys: ["Enter"], to: "editor" },
+      ],
+    });
+
+    await user.click(await screen.findByRole("button", { name: "Show the screen rows, without cards" }));
+    const dock = await screen.findByRole("group", { name: QUESTION });
+    await tap(user, dock, other);
+    await waitFor(() => expect(sent.map((write) => write.keys)).toEqual([["Down", "Down"], ["Enter"]]));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByPlaceholderText(/Type a reply/i)));
+  });
 });
 
 // ── Three questions ─────────────────────────────────────────────────────────────────────────────

@@ -642,6 +642,7 @@ describe("tail anchoring", () => {
 
 describe("the grammar claims nothing else in the corpus", () => {
   const CLAIMED = new Set([
+    "omp-lab--v18-12-ask-other-pointed.txt",
     "omp--select-menu-moved.txt",
     "omp--select-menu-noted.txt",
     "omp--select-menu-other.txt",
