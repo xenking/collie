@@ -23,9 +23,11 @@ Running a crew? Update the lead first; members follow on their own. Details:
 
 ## [Unreleased]
 
+## [1.22.10] - 2026-10-23
+
 ### Fixed
 
-- **An omp answer typed on the phone goes into the Ask's own text field.** Picking `Other (type your own)` (or `n note`) opens omp's answer editor, and Collie read that box as a screen it cannot read: Send took two taps and ended "Collie cannot tell if this was sent". The editor is an input box now. Send types the answer and presses Ctrl+Q, a text of several lines goes in as one line, and the editor closing counts as the proof that the answer went. The Screen view keeps the dialog's card at the thumb, so "Answer the dialog" leads to it, and a tap on `Other (type your own)` puts the caret in the box for the answer.
+- **An omp answer typed on the phone goes into the Ask's own text field.** Picking `Other (type your own)` (or `n note`) opens omp's answer editor, and Collie read that box as a screen it cannot read: Send took two taps and ended "Collie cannot tell if this was sent". The editor is an input box now. Send types the answer and presses Ctrl+Q, a text of several lines goes in as one line, and the editor closing counts as the proof that the answer went. The Screen view keeps the dialog's card at the thumb, so "Answer the dialog" leads to it, and a tap on `Other (type your own)` puts the caret in the box for the answer. ([61b5861](https://github.com/xenking/collie/commit/61b5861))
 
 ## [1.22.9] - 2026-10-21
 
