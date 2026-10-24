@@ -349,6 +349,10 @@ export class SurfaceShadow {
     state.read = read;
     if (state.countedRead === readKey) return;
     state.countedRead = readKey;
+    // A pane Herdr parked (`omp (sleeping)`) shows the pager's frozen transcript, never the harness's
+    // screen. The read stays unknown (a send wakes the pane first), but it is no failure of the
+    // grammar, so it is not counted: parked panes polled for hours drowned the live omp row in no-match.
+    if (agent.sleeping === true) return;
     this.count(agent.paneId, state, read);
   }
 

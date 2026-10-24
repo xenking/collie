@@ -203,6 +203,18 @@ describe("surface shadow", () => {
     await first;
   });
 
+  test("a parked pane (Herdr's `omp (sleeping)`) is read but not counted: its pager frame is no failure of the grammar", async () => {
+    const r = rig();
+    r.mux.set("w1:p1", "omp--working.txt", 4);
+    r.mux.set("w1:p2", "omp--working.txt", 5);
+    await r.shadow.observe([{ ...agent("w1:p1", "omp"), sleeping: true }]);
+    expect(r.shadow.surfaceOf("w1:p1")).toBeDefined();
+    expect(r.shadow.report().counters).toEqual({});
+    // The same screen on a pane that is awake counts as ever.
+    await r.shadow.observe([agent("w1:p2", "omp")]);
+    expect(Object.values(r.shadow.report().counters).map((c) => c.observed)).toEqual([1]);
+  });
+
   test("a harness with no profile reads unknown with no version, under its own counter", async () => {
     const r = rig();
     r.mux.set("w1:p2", "codex--fresh-idle.txt", 1);
