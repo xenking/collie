@@ -6,18 +6,20 @@ import type { SentEntry } from "@/lib/types";
 const getSent = vi.fn();
 vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/api")>()), getSent: (...args: unknown[]) => getSent(...args) }));
 
-import { useSentList } from "./use-sent-list";
+import { useSentList, type SentChoice } from "./use-sent-list";
 
-const entry = (id: string, at: number): SentEntry => ({ id, at, text: id, host: "m", cwd: "/p" }) as unknown as SentEntry;
+const entry = (id: string, at: number): SentEntry => ({ id, line: id, cwd: "/p", at, kind: "shell", count: 1, host: "m" });
 const page = (entries: SentEntry[], more: boolean) => ({ entries, more, off: false, machines: [] });
+
+const INITIAL: { choice: SentChoice } = { choice: "folder" };
 
 describe("useSentList", () => {
   beforeEach(() => getSent.mockReset());
 
   it("drops a Load more page that lands after the place changed", async () => {
-    let late: (value: unknown) => void = () => {};
+    let late: (value: ReturnType<typeof page>) => void = () => {};
     getSent.mockResolvedValueOnce(page([entry("a", 9)], true));
-    const { result, rerender } = renderHook((p: { choice: "here" | "all" }) => useSentList({ choice: p.choice, cwd: "/p", query: "", scope: undefined, lead: true } as never), { initialProps: { choice: "here" } });
+    const { result, rerender } = renderHook((p: { choice: SentChoice }) => useSentList({ choice: p.choice, cwd: "/p", query: "", scope: undefined, lead: undefined }), { initialProps: INITIAL });
     await waitFor(() => expect(result.current.view.phase).toBe("ready"));
     getSent.mockImplementationOnce(() => new Promise((resolve) => (late = resolve)));
     act(() => result.current.loadMore());
