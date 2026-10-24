@@ -114,7 +114,7 @@ import { pointerWalk } from "../menu-hints";
 import type { PromptModel, PromptOption } from "../prompt-model";
 import { isBlank, lineText, rstrip } from "./markers";
 import { isStatusRow } from "./glyph-prompt";
-import { HIDE_SEGMENTS, readOmpHintList } from "./modal";
+import { EXPAND_SEGMENT, HIDE_SEGMENTS, readOmpHintList } from "./modal";
 
 export interface AskSelectRegion {
   model: PromptModel;
@@ -225,8 +225,9 @@ export function detectAskSelectRegion(lines: StyledLine[]): AskSelectRegion | nu
   const tabbed = PRESETS.some((p) => p.tab !== undefined && footer.segments.includes(`${p.tab}/←/→ question`));
   const preset = PRESETS.find((p) => (!tabbed || p.tab !== undefined) && matchesAskFooter(footer.segments, footerOf(p, tabbed), true));
   if (preset === undefined) return readReview(lines, texts, end, footer.segments);
-  const truncated = footer.segments.at(-1) === "Ctrl+O expand";
-  const maxQuestionRows = footer.segments.at(-1) === "Ctrl+O collapse" ? MAX_BODY_ROWS : MAX_QUESTION_ROWS;
+  const expandWord = EXPAND_SEGMENT.exec(footer.segments.at(-1)!)?.[1];
+  const truncated = expandWord === "expand";
+  const maxQuestionRows = expandWord === "collapse" ? MAX_BODY_ROWS : MAX_QUESTION_ROWS;
   const lowerDivider = end - 2;
   if (!DIVIDER.test(texts[lowerDivider]!)) return null;
 
@@ -440,7 +441,7 @@ function readOption(row: string, preset: Preset, bodyRow: number, allowSelected:
 
 function matchesAskFooter(segments: string[], expected: string[], allowExpansion = false): boolean {
   let length = segments.length;
-  if (allowExpansion && /^Ctrl\+O (?:expand|collapse)$/.test(segments[length - 1]!)) length--;
+  if (allowExpansion && EXPAND_SEGMENT.test(segments[length - 1]!)) length--;
   if (HIDE_SEGMENTS.has(segments[length - 1]!)) length--;
   return length === expected.length && expected.every((segment, i) => segment === segments[i]);
 }

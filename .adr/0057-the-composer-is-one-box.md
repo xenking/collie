@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-22
-- **Amended in scope by:** [ADR 0111](./0111-a-tall-draft-stacks-the-composer-buttons.md), the buttons stand in a column beside a tall draft
+- **Amended in scope by:** [ADR 0114](./0114-a-tall-draft-stacks-the-composer-buttons.md), the buttons stand in a column beside a tall draft
 - **Shipped in:** pending (target 1.12.0)
 - **Trail:** `web/src/components/composer.tsx` · `web/src/components/ui/chat/chat-input.tsx` ·
   `web/src/components/actions-row.tsx` · `web/src/components/ui/anchored-menu.tsx` ·

@@ -1,4 +1,5 @@
-// Claude Code in the browser leg: the five scenarios on one session, on Haiku. About 6 model turns.
+// Claude Code in the browser leg: the five scenarios on one session, on Haiku, and case 22 (Model from
+// the belt over a draft), which spends no model turn. About 6 model turns.
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -15,6 +16,7 @@ import {
   capture,
   captureScreen,
   expect,
+  freeSurface,
   jsonRows,
   message,
   openSession,
@@ -41,6 +43,12 @@ const session: Session = { paneId: null, startNote: "not started" };
 
 /** How long a reply on Haiku may take before the case gives up on it. */
 const REPLY_MS = 120_000;
+
+/** The draft case 22 puts in Claude's box: one word of letters, typed through the keys route. */
+const BELT_DRAFT = "beltdraft";
+
+/** Prompts the Load older case seeds: the live page holds the last six, so the seventh is the older page. */
+const HISTORY_PROMPTS = 7;
 
 test.describe("claude", () => {
   // Not serial: a failed scenario must not skip the next one. The session survives a worker restart
@@ -198,33 +206,41 @@ test.describe("claude", () => {
 
   test("5 Load older with an empty phone cache: the pin leaves the row free", async ({ browser, rig }) => {
     await runScenario(H, "load-older", session, async (pane, trail) => {
-      // History deeper than the first page (40 turns): one prompt, 48 Read calls, one entry each.
+      // History deeper than the first page. Since 1.23.0 a page is the last six prompts with all that
+      // follows each (at least 40 rows, at most 400), so the cold page starts at the SECOND of seven
+      // prompts and the first one is the older page. Each prompt reads four tiny files in one message
+      // and replies with a marker: about ten rows a prompt, well over the 40-row floor, one cheap turn.
       const project = harnessDirs(H).project;
-      for (let i = 1; i <= 48; i++) writeFileSync(join(project, `note-${String(i).padStart(2, "0")}.txt`), `note ${String(i)}\n`);
+      for (let i = 1; i <= 4; i++) writeFileSync(join(project, `note-${String(i).padStart(2, "0")}.txt`), `note ${String(i)}\n`);
       const deep = await rig.get(`/api/pane/${encodeURIComponent(pane)}/chat`).catch(() => null);
       if (!coldPageHasOlder(asJsonObject(deep))) {
-        spendTurn(H, "load-older: 48 reads");
         const seed = await phoneOn(browser, rig, pane, PHONE);
         try {
-          const t = await sendFromComposer(seed.page, seed.recorder, "Use the Read tool on each of the 48 files note-01.txt to note-48.txt, one Read call per file, all in a single message. Then reply with only the word DONE.", "send the history prompt");
-          if (!t.worked) throw new Error(`the history prompt was refused: ${tapWords(t)}`);
+          for (let n = 1; n <= HISTORY_PROMPTS; n++) {
+            spendTurn(H, `load-older: history prompt ${String(n)} of ${String(HISTORY_PROMPTS)}`);
+            const t = await sendFromComposer(seed.page, seed.recorder, `Use the Read tool on each of the 4 files note-01.txt to note-04.txt, one Read call per file, all in a single message. Then reply with exactly DONE-${String(n)} and nothing else.`, `send history prompt ${String(n)}`);
+            if (!t.worked) throw new Error(`history prompt ${String(n)} was refused: ${tapWords(t)}`);
+            // Claude's own reply line: the prompt row above it also holds the marker, after "❯ ".
+            await rig.screenUntil(pane, new RegExp(`^\\s*(?:⏺|●)\\s*DONE-${String(n)}\\b`, "m"), 180_000, 200);
+            await waitIdle(rig, pane, REPLY_MS);
+          }
         } finally {
           await seed.context.close();
         }
-        await rig.screenUntil(pane, /^\s*(?:⏺|●)\s*DONE\b/m, 240_000, 200);
-        await waitIdle(rig, pane, REPLY_MS);
       }
       const cold = asJsonObject(await rig.get(`/api/pane/${encodeURIComponent(pane)}/chat`)) ?? {};
       const upserts = jsonRows(cold.upserts);
       if (!coldPageHasOlder(cold)) throw new NotReached(`the session holds no more than one page (${String(upserts.length)} turns)`);
       const lastPrompt = asJsonObject(cold.lastPrompt);
       const reported = lastPrompt !== undefined && !upserts.some((row) => row.uuid === lastPrompt.uuid);
-      // The fix under test (3f522a27) is about the REPORTED pin: the last prompt sits outside the page.
-      if (!reported) throw new NotReached(`the last prompt sits inside the cold page (${String(upserts.length)} turns), so no reported pin`);
+      // Since the six-prompt pages (1.23.0) the last prompt sits on the first page by construction, so
+      // the case checks the Load older row itself: attached, nothing covers its centre, a tap adds older
+      // rows, and the pin leaves the row free before and after. (A reported pin, 3f522a27, now needs one
+      // turn of more than 400 rows.)
       // A FRESH context: the phone holds no history of this session, so its thread is the newest page.
       const context = await phoneContext(browser, rig, PHONE);
       const page = await context.newPage();
-      const notes: string[] = [`cold page: ${String(upserts.length)} turns, last prompt ${reported ? "outside it (reported pin)" : "inside it"}`];
+      const notes: string[] = [`cold page: ${String(upserts.length)} turns, last prompt ${reported ? "outside it (reported pin)" : "on it"}`];
       const log = trail.log;
       try {
         const olderReads: number[] = [];
@@ -264,9 +280,84 @@ test.describe("claude", () => {
           .catch(() => false);
         const after = await page.locator("[data-block]").count();
         notes.push(`older read ${olderReads.length === 0 ? "never sent" : `answered ${olderReads.join(",")}`}; thread blocks ${String(before)} -> ${String(after)}`);
+        // The row stays free afterwards: when more older turns remain the Load older row is still there,
+        // and the pin, shown now that the reader is below the first prompt, must not sit over it.
+        await page.waitForTimeout(500);
+        const rowAgain = (await loadOlder.count()) > 0;
+        if (rowAgain) await loadOlder.scrollIntoViewIfNeeded().catch(() => undefined);
+        const rowBox = rowAgain ? await loadOlder.boundingBox() : null;
+        const pinNow = (await pin.isVisible().catch(() => false)) ? await pin.boundingBox() : null;
+        const coveredAfter = rowBox !== null && pinNow !== null && pinNow.y < rowBox.y + rowBox.height && rowBox.y < pinNow.y + pinNow.height;
+        notes.push(`after the tap: pin ${pinNow === null ? "not shown" : "shown"}, Load older row ${rowAgain ? (coveredAfter ? "covered by the pin" : "clear of the pin") : "gone (no older turns left)"}`);
         const shotAfter = await capture(page, "claude-5-load-older-after");
-        const verdict = pinShown && !covered && hit.includes(message("chat.scrollback.loadOlder")) && olderReads.includes(200) && grew ? "pass" : "fail";
+        const verdict = !covered && !coveredAfter && hit.includes(message("chat.scrollback.loadOlder")) && olderReads.includes(200) && grew ? "pass" : "fail";
         return { verdict, taps: 1, minTaps: 1, note: notes.join("; "), taps_log: log, captures: [shotBefore, shotAfter] };
+      } finally {
+        await context.close();
+      }
+    });
+  });
+
+  test("22 Model from the belt over a draft: Replace empties the box and opens the picker", async ({ browser, rig }) => {
+    await runScenario(H, "belt-model-draft", session, async (pane, trail) => {
+      const { context, page, recorder } = await phoneOn(browser, rig, pane, PHONE);
+      recorder.watchAsks(pane);
+      const log = trail.log;
+      const notes = trail.notes;
+      try {
+        // A draft sits in Claude's box, typed outside the phone (the keys route), as walky case 9 types
+        // one. One word of letters, so it is easy to find on the screen and needs no space key.
+        await rig.keys(pane, [...BELT_DRAFT]);
+        const drafted = await rig.until(() => rig.pane(pane), (p) => p?.surface?.composer === "draft", 8000);
+        if (drafted === null) throw new NotReached("the draft did not show in Claude's box");
+        // The field case: the belt's Model pill onto that draft. The bridge refuses it draft_present
+        // before any key and offers Replace and Cancel, never Add ("draft/model" is no message).
+        const model = await tap(recorder, page.getByRole("group", { name: "Harness shortcuts" }).getByRole("button", { name: "Model", exact: true }), "Model shortcut");
+        log.push(model);
+        const refusal = model.answers.find((answer) => answer.path === "/api/send");
+        const refusedDraft = refusal?.outcome === "refused" && refusal.reason === "draft_present";
+        notes.push(tapWords(model));
+        const strip = page.getByTestId("send-offers");
+        const stripShown = await strip
+          .waitFor({ state: "visible", timeout: 10_000 })
+          .then(() => true)
+          .catch(() => false);
+        const offer = (key: "composer.protocol.append" | "composer.protocol.replace" | "composer.protocol.cancel") => strip.getByRole("button", { name: message(key), exact: true });
+        const hasReplace = stripShown && (await offer("composer.protocol.replace").isVisible().catch(() => false));
+        const hasCancel = stripShown && (await offer("composer.protocol.cancel").isVisible().catch(() => false));
+        const hasAdd = stripShown && (await offer("composer.protocol.append").count()) > 0;
+        const sentence = await page
+          .getByText(message("composer.protocol.draftCommand"), { exact: true })
+          .isVisible()
+          .catch(() => false);
+        notes.push(`offers ${stripShown ? `${hasReplace ? "Replace" : "no Replace"}, ${hasCancel ? "Cancel" : "no Cancel"}, ${hasAdd ? "ADD" : "no Add"}` : "not shown"}; the notice ${sentence ? "names only Replace and Cancel" : "does not say Replace it, or cancel"}`);
+        const shotOffer = await capture(page, "claude-22-belt-model-offer");
+        // No Replace on the strip is the bug itself: the case fails, it is not "not reached".
+        if (!hasReplace) return { verdict: "fail", taps: log.length, minTaps: 2, note: notes.join("; "), taps_log: log, captures: [shotOffer] };
+        // Replace: one tap, a new request. The bridge empties the box with Backspace and sends /model.
+        const replace = await tap(recorder, offer("composer.protocol.replace"), "Replace");
+        log.push(replace);
+        notes.push(tapWords(replace));
+        const card = page.getByRole("group", { name: "Select model" });
+        const cardShown = await card
+          .waitFor({ state: "visible", timeout: 15_000 })
+          .then(() => true)
+          .catch(() => false);
+        const picker = (await rig.until(() => rig.pane(pane), (p) => askOn(p)?.kind === "menu", 10_000)) !== null;
+        const screen = await rig.screen(pane, 80);
+        const draftGone = !screen.includes(BELT_DRAFT);
+        notes.push(`picker ${picker ? "open on the pane" : "NOT open on the pane"}, card ${cardShown ? "on the phone" : "NOT on the phone"}, the draft ${draftGone ? "is gone" : "IS STILL ON THE SCREEN"}`);
+        const shot = await capture(page, "claude-22-belt-model-picker");
+        const shotScreen = await captureScreen(rig, pane, "claude-22-belt-model-picker");
+        // Leave the pane idle for the next case: close the picker outside the phone, as resetBox does.
+        if (picker) {
+          await rig.keys(pane, ["Escape"]);
+          const idle = (await rig.until(() => rig.pane(pane), freeSurface, 8000)) !== null;
+          notes.push(`picker closed outside the phone (Escape), box ${idle ? "free" : "NOT free"}`);
+        }
+        // Two taps and no more: Model (refused draft_present, by design) and Replace, which must work at once.
+        const verdict = refusedDraft && hasReplace && hasCancel && !hasAdd && sentence && replace.worked && cardShown && picker && draftGone && log.length === 2 ? "pass" : "fail";
+        return { verdict, taps: log.length, minTaps: 2, note: notes.join("; "), taps_log: log, captures: [shotOffer, shot, shotScreen] };
       } finally {
         await context.close();
       }

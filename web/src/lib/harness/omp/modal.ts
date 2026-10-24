@@ -63,6 +63,9 @@ const TASK_MODE_SEGMENT = /^[A-Za-z0-9+]+ (?:task|session) model$/;
 /** Ask's trailing hide toggle: text keycaps (18.10) or the Nerd Font Option glyph U+F0635 (18.11.1). */
 export const HIDE_SEGMENTS: ReadonlySet<string> = new Set(["Alt+H hide", "\u{F0635} H hide"]);
 
+/** Ask's trailing expand toggle: `Ctrl+O` as text (18.10) or as the Nerd Font Control glyph U+F0634 (18.12.2). */
+export const EXPAND_SEGMENT = /^(?:Ctrl\+O|\u{F0634} O) (expand|collapse)$/u;
+
 /** Bound hint lists so long transcript lines cannot be read as modal controls. */
 const MAX_FOOTER_CHARS = 160;
 const MAX_SEGMENT_CHARS = 40;
@@ -97,7 +100,7 @@ export function readOmpHintList(text: string): OmpFooter | null {
   if (segments.length < MIN_SEGMENTS || segments.length > MAX_SEGMENTS) return null;
   if (segments.some((s) => s.length === 0 || s.length > MAX_SEGMENT_CHARS)) return null;
   let escapeAt = segments.length - 1;
-  if (/^Ctrl\+O (?:expand|collapse)$/.test(segments[escapeAt]!)) escapeAt--;
+  if (EXPAND_SEGMENT.test(segments[escapeAt]!)) escapeAt--;
   const last = segments[escapeAt]!;
   if (TASK_MODE_SEGMENT.test(last) || HIDE_SEGMENTS.has(last)) escapeAt--;
   // The close/cancel key still needs another hint before it; hide/expand are not escape keys.

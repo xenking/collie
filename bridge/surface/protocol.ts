@@ -263,6 +263,13 @@ export interface SendDeps {
    * never reads free. Absent: a parked pane is a screen like any other.
    */
   readonly waker?: { readonly asleep: (paneId: string) => boolean; readonly wake: (paneId: string) => Promise<PaneWake> };
+  /**
+   * A blind send went out (M61, ADR 0107): on a pane with no profile, the text was typed and Enter
+   * went through the gate, and the receipt says `sent`. Called once, after the receipt is settled and
+   * inside a try, never for a refusal, a replay or a send that did not submit. What the caller keeps
+   * of it is the caller's business: the bridge keeps the line only for a shell pane (bridge/sent.ts).
+   */
+  readonly blindSent?: (sent: { readonly session: string; readonly paneId: string; readonly text: string }) => void;
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
 }
@@ -860,6 +867,14 @@ function commitKeys(state: RunState): readonly string[] {
   return keys.submit;
 }
 
+/** Whether the box answers a question the agent asked: the profile's `idle.answerPrompt` on the frame's prompt row. */
+function answersQuestion(match: ProfileMatch | null, snap: Snap): boolean {
+  const source = match?.profile.idle.answerPrompt;
+  if (source === undefined || snap.frame === null) return false;
+  const row = snap.texts[snap.frame.interior.prompt];
+  return row !== undefined && new RegExp(source, "u").test(row);
+}
+
 /**
  * Whether the receipt's `queued` comes only from a witness: a harness whose Enter does not queue but
  * that takes a message in a turn through its queue key. Its queue key may be its submit key too, so a
@@ -933,14 +948,16 @@ function steeringTurn(state: RunState, snap: Snap): Ended | "queue" | null {
 /** The detail of a send in a turn whose submit key left the text in the box: a dialog may have taken it. */
 const ENTER_MISSED_BOX = "The submit key did not reach the box. A dialog may have taken it. Check the transcript.";
 
+/** The detail of a held send that met a box answering the agent's question: it waits for an ordinary box. */
+const ANSWER_BOX = "The input box answers a question the agent asked. A held message waits for the question to close.";
 /** The detail of a send refused because the turn runs. */
 const TURN_RUNNING = "The agent is working, and this harness does not take a message during a turn.";
-/** The `unconfirmed` detail of a send whose whole text is one of the keys a notice above the box printed. */
-const NOTICE_KEY_DETAIL = "That digit would answer the notice above the box. Check the pane, then tap Type here.";
+/** The `unconfirmed` detail of a send whose whole text, or first line, is one of the keys a notice above the box printed. */
+const NOTICE_KEY_DETAIL = "That message would answer the notice above the box. Check the pane, then tap Type here.";
 /** The detail of a notice digit refused where no commit can go ahead (a running turn, a Replace). */
-const NOTICE_KEY_HELD_DETAIL = "That digit would answer the notice above the box. Answer it on its card, or send the digit once the turn has ended.";
+const NOTICE_KEY_HELD_DETAIL = "That message would answer the notice above the box. Answer it on its card, or send it once the turn has ended.";
 /** The detail of a notice's digit that still stands in the box when the notice wait ends. */
-const NOTICE_DIGIT_LEFT = "The number is still in the box: the notice did not take it. Check the pane.";
+const NOTICE_DIGIT_LEFT = "The key is still in the box: the notice did not take it. Check the pane.";
 /** The detail of a notice's digit gone from the box while the notice still stands. */
 const NOTICE_NOT_TAKEN = "The notice did not take the number. Check the pane.";
 /** The {@link SendAnswer.cause} of every send the notice digit rule decides. */
@@ -1472,6 +1489,8 @@ interface RunState {
   released?: boolean;
   /** The turn gate refused a command the profile never lets wait (`keys.neverHeld`): it is not held either. */
   neverHold?: boolean;
+  /** A release met a box that answers the agent's question (`idle.answerPrompt`): it waits, and the try does not count. */
+  answerWait?: boolean;
 }
 
 /** What the hold queue knows of one pane between polls (M56 spec 15 review). */
@@ -1730,7 +1749,9 @@ export class SendProtocol {
     if (accepted.kind === "replay") {
       const stored = accepted.record.receipt;
       if (stored !== undefined) {
-        const replay: SendAnswer = { receipt: stored, offers: offersFor(stored.outcome, stored.reason, stored.profileId !== null), replayed: true };
+        // A command's draft refusal offers no Add on a replay either: the same rule, read from the same request.
+        const command = stored.reason === "draft_present" && draftCommand(request, await this.deps.profile(target.harness));
+        const replay: SendAnswer = { receipt: stored, offers: offersFor(stored.outcome, stored.reason, stored.profileId !== null, command), replayed: true };
         // A send a crash cut short: read the pane now and report it beside the stored receipt.
         if (stored.outcome !== "unknown" || stored.reason !== "crash") return replay;
         return withLook(replay, await this.lookAfterCrash(request, accepted.record, target));
@@ -1827,8 +1848,10 @@ export class SendProtocol {
   private backToQueue(state: RunState, end: Ended): SendAnswer {
     const holds = this.deps.holds!;
     const entry = holds.get(state.record.id);
-    if (entry === null || entry.tries + 1 >= HOLD_TRIES) return this.settle(state, end);
-    holds.putBack(state.record.id);
+    // An open question is a wait, not a failed try: the request waits for it to close, up to its own expiry.
+    const counted = state.answerWait !== true;
+    if (entry === null || (counted && entry.tries + 1 >= HOLD_TRIES)) return this.settle(state, end);
+    holds.putBack(state.record.id, counted);
     const receipt = this.receiptOf(state, "held", undefined);
     this.deps.store.hold(state.record.id, receipt);
     return answerWith({ receipt, offers: [] }, { ...end.extra, detail: HELD });
@@ -2275,7 +2298,9 @@ export class SendProtocol {
       const note: EndNote = { framed: true };
       if (state.heldOther && record.mode === "submit") note.detail = HELD_OTHER;
       if (state.noticeKey) note.cause = NOTICE_KEY;
-      return this.settle(state, new Ended(record.mode === "discard" ? "discarded" : "sent", undefined, note));
+      const answer = this.settle(state, new Ended(record.mode === "discard" ? "discarded" : "sent", undefined, note));
+      if (state.blind && answer.receipt?.outcome === "sent") this.noteBlindSent(state);
+      return answer;
     } catch (err) {
       if (!(err instanceof Ended)) throw err;
       if (release && err.outcome === "refused" && err.reason !== undefined && ((NOT_YET.has(err.reason) && state.keys.length === 0) || cleanProbe(state, err))) return this.backToQueue(state, err);
@@ -2283,6 +2308,15 @@ export class SendProtocol {
       return this.settle(state, err);
     } finally {
       locks.release(state.lockKey, record.id);
+    }
+  }
+
+  /** Tell {@link SendDeps.blindSent} a blind send went out. Never throws, and never changes the answer. */
+  private noteBlindSent(state: RunState): void {
+    try {
+      this.deps.blindSent?.({ session: state.target.session, paneId: state.target.paneId, text: state.request.text });
+    } catch (err) {
+      console.warn(`[send] the blind-send note failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -2376,7 +2410,8 @@ export class SendProtocol {
       if (refusal !== null) throw refusal;
     }
     // Submit and Discard name the text the box holds: a command's text may stand there with its lead read as a mode marker.
-    if ((request.mode === "submit" || request.mode === "discard") && reservedLead(lines[0] ?? "", leads) !== null) state.command = true;
+    // A Replace whose text starts with a reserved lead empties the box and then sends a command, so it is one from here on.
+    if ((request.mode === "submit" || request.mode === "discard" || request.mode === "replace") && reservedLead(lines[0] ?? "", leads) !== null) state.command = true;
     const holds = (box: string): boolean => (state.command ? commandBoxMatches : boxMatches)(box, "", lines, collapseOf(match));
 
     if (match === null && (request.mode === "send" || request.mode === "command")) {
@@ -2387,6 +2422,12 @@ export class SendProtocol {
     this.begin(state);
     let s0 = await this.stableRead(state, "s0");
     state.marks.s0 = s0;
+    // A held request is a message for the agent, in every mode a release runs (a send, a command, a
+    // Replace): a box that answers the agent's question would take it as the answer. It waits.
+    if (state.released === true && answersQuestion(match, s0)) {
+      state.answerWait = true;
+      throw new Ended("refused", "not_free", { surface: s0.surface, detail: ANSWER_BOX });
+    }
     state.manual = takesManualSend(s0.surface);
     if (state.manual) this.gateSteeringTurn(state, s0);
     this.checkGeneration(state, "refused");
@@ -2415,7 +2456,7 @@ export class SendProtocol {
       }
       case "replace": {
         const frame = this.draftFrame(state, s0);
-        // The box would end up holding one of the notice's digits alone, which answers the notice.
+        // The box would end up holding one of the notice's keys alone, which answers the notice.
         if (this.answersNotice(state, s0)) throw noticeRefusal(s0);
         // S0 ends with its two reads; emptying the box is its own step with its own bound.
         this.lap(state, "s0");
@@ -2428,7 +2469,7 @@ export class SendProtocol {
       }
       case "append": {
         const frame = this.draftFrame(state, s0);
-        // Add to it on a box the person emptied since the phone saw its draft: the digit would stand
+        // Add to it on a box the person emptied since the phone saw its draft: the key would stand
         // alone in the box, and the notice would take it.
         if (boxText(frame).trim().length === 0 && this.answersNotice(state, s0)) throw noticeRefusal(s0);
         break;
@@ -2472,6 +2513,12 @@ export class SendProtocol {
       this.lap(state, "s2");
       return;
     }
+
+    // A harness that swallows a submit key sent too soon after the text names its pause in the
+    // profile (`paste.settleMs`, #507): the blind send's 350 ms is the same pause with no profile
+    // to name it. The pause sits before S1, so the read Enter is minted on is taken after it.
+    const settleMs = state.match?.profile.paste?.settleMs;
+    if (settleMs !== undefined) await this.sleep(settleMs);
 
     const s1 = await this.awaitTyped(state, s0, landing, prefix, lines);
     state.marks.s1 = s1;
@@ -2540,12 +2587,16 @@ export class SendProtocol {
   private gateSend(state: RunState, s0: Snap): void {
     const { surface } = s0;
     if (isFree(surface)) {
-      // On an empty box a digit the notice above it printed answers the notice: the manual Send.
-      if (this.answersNotice(state, s0)) {
+      // On an empty box a key the notice above it printed answers the notice: the manual Send. Only a
+      // whole-text key is typed as the answer, with no Enter. A longer send whose first line is a key
+      // takes the ordinary typed path once confirmed: if the notice took that line, S1 does not find
+      // the whole text in the box, and no Enter follows.
+      const answer = this.noticeAnswer(state, s0);
+      if (answer !== null) {
         state.manual = true;
         this.gateSteeringTurn(state, s0);
         this.gateManual(state, s0, NOTICE_KEY_DETAIL, NOTICE_KEY);
-        state.noticeKey = true;
+        state.noticeKey = answer === "whole";
       }
       return;
     }
@@ -2553,9 +2604,9 @@ export class SendProtocol {
       this.gateTurn(state, s0, s0.frame);
       if (surface.composer === "draft") {
         state.queued = false;
-        throw new Ended("refused", "draft_present", { surface, framed: true, detail: "The box already holds a draft." });
+        throw draftRefusal(state, s0);
       }
-      // In a turn the digit would answer the notice before the harness queues it, so no commit is offered.
+      // In a turn the key would answer the notice before the harness queues it, so no commit is offered.
       if (this.answersNotice(state, s0)) {
         state.queued = false;
         throw noticeRefusal(s0);
@@ -2563,7 +2614,7 @@ export class SendProtocol {
       return;
     }
     if (surface.turn === "idle" && surface.modal === "none" && surface.composer === "draft") {
-      throw new Ended("refused", "draft_present", { surface, framed: s0.frame !== null, detail: "The box already holds a draft." });
+      throw draftRefusal(state, s0);
     }
     if (takesManualSend(surface)) {
       this.gateManual(state, s0, "Collie cannot read this screen. Check the pane, then tap Type here.");
@@ -2589,13 +2640,24 @@ export class SendProtocol {
   }
 
   /**
-   * Whether S0 shows a notice the profile names over the found box (`idle.notices`) and the send's
-   * whole text, trimmed, is one of the keys it printed. The harness reads such a box as the answer to
-   * the notice, so the send takes the manual Send even on a free screen.
+   * Whether S0 shows a notice the profile names over the found box (`idle.notices`) and the send would
+   * leave one of the keys it printed alone in the box: its whole text, trimmed, is that key, or its
+   * first line is. The lines are written one at a time, so the first line stands alone in the box until
+   * the newline key follows it, long enough for the notice to take it. A letter matches in either case
+   * (Claude Code lowercases the box before it matches a lettered key). The harness reads such a box as
+   * the answer to the notice, so the send takes the manual Send even on a free screen.
    */
   private answersNotice(state: RunState, s0: Snap): boolean {
-    const text = state.request.text.trim();
-    return s0.notice !== null && s0.notice.keys.some((key) => key.key === text);
+    return this.noticeAnswer(state, s0) !== null;
+  }
+
+  /** How a send answers the notice S0 shows: `whole` text, `first` line only, or null for neither. */
+  private noticeAnswer(state: RunState, s0: Snap): "whole" | "first" | null {
+    if (s0.notice === null) return null;
+    const keys = new Set(s0.notice.keys.map((key) => key.key.toLowerCase()));
+    if (keys.has(state.request.text.trim().toLowerCase())) return "whole";
+    const first = sendLines(state.request.text)[0] ?? "";
+    return keys.has(first.trim().toLowerCase()) ? "first" : null;
   }
 
   /**
@@ -2820,7 +2882,7 @@ export class SendProtocol {
     const framed = readCuesFor(rows, frame, idle);
     // The frameless reads never see a row the profile names as a footer row (the frame found it), nor
     // the typed command's own list over or under the box (ownCommandList): Enter there picks that command.
-    const ownList = ownCommandList(texts, frame, idle);
+    const ownList = ownCommandList(texts, frame, idle, rows);
     const bare = withoutNamedRows(withoutCommandList(rows, ownList), frame);
     // A notice over the box (`idle.notices`) is left out of every read as well: its keys act only on a
     // box holding one of its digits, so its key row is no prompt that holds the keys.
@@ -2853,7 +2915,7 @@ export class SendProtocol {
       notice,
       below: countBelow(texts, frame, (idle?.volatile.below.hints ?? []).map((source) => new RegExp(source, "u"))),
       otherScreen: otherScreenOf(texts, frame, idle?.volatile.below.otherScreens ?? []),
-      commandList: frame === null ? null : commandListAt(texts, frame, idle?.volatile.below.commandList),
+      commandList: frame === null ? null : commandListAt(texts, frame, idle?.volatile.below.commandList, rows),
       ownList,
       hash: shortHash(texts.join("\n")),
       // A running row's timer is masked (steadyRow): a ticking timer is not a screen the person did not see.
@@ -2889,11 +2951,13 @@ export class SendProtocol {
     if (first === null || second === null) throw new Ended("refused", "pane_gone", { detail: "The pane could not be read." });
     if (belowMovedAlone(first, second)) state.belowMoved = true;
     // With a frame only the box is compared: the volatile rows around it (a spinner, a timer, a token
-    // count, a statusline) move on their own while a turn runs. The box is compared with its faint
-    // runs dropped: a placeholder that changes on an empty box (Claude Code's "Press up to edit
-    // queued messages" going as the queue is taken) is not a moved box. With no frame the bottom
-    // window is compared with its running rows masked, for the same reason.
+    // count, a statusline) move on their own while a turn runs. A box that holds no draft compares
+    // by its two edges alone: its placeholder may appear, go or change between the reads (Claude
+    // Code's "Press up to edit queued messages" going as the queue is taken, a prompt suggestion
+    // painted in the placeholder's own colour) without the box having moved. With no frame the
+    // bottom window is compared with its running rows masked, for the same reason.
     const key = (snap: Snap): string => {
+      if (snap.frame !== null && boxText(snap.frame) === "") return `${snap.plain[snap.frame.top] ?? ""}\n${snap.plain[snap.frame.bottom] ?? ""}`;
       if (snap.frame !== null) return snap.plain.slice(snap.frame.top, snap.frame.bottom + 1).join("\n");
       const win = bottomWindow(snap.plain);
       return snap.plain.slice(win.first, win.end).join("\n");
@@ -3393,13 +3457,35 @@ export class SendProtocol {
 }
 
 /**
+ * Whether a request is a command for the draft offers: mode `command`, or a submit whose first line
+ * carries a reserved lead. One rule for a fresh refusal ({@link draftRefusal}) and a replayed one.
+ */
+function draftCommand(request: SendRequest, match: ProfileMatch | null): boolean {
+  const leads = match?.profile.reservedLeads ?? GENERIC_LEADS;
+  return request.mode === "command" || (request.mode === "submit" && reservedLead(sendLines(request.text)[0] ?? "", leads) !== null);
+}
+
+/**
+ * The `draft_present` refusal of a send or a command at a box that holds a draft. A framed draft is
+ * offered Add, Replace and Cancel, but a command only Replace and Cancel: Add would put the command
+ * after the draft's words, and "old draft /model" is a message nobody means.
+ */
+function draftRefusal(state: RunState, s0: Snap): Ended {
+  const framed = s0.frame !== null;
+  const offers = offersFor("refused", "draft_present", framed, draftCommand(state.request, state.match));
+  return new Ended("refused", "draft_present", { surface: s0.surface, framed, offers, detail: "The box already holds a draft." });
+}
+
+/**
  * The rules a text meets before any read: a plain send may not start with a reserved lead (it has the
  * command route), and a text of more than one line needs a profile's newline key. Null when it passes.
+ * A Replace may start with one: it is the draft offer's answer to a command refused `draft_present`
+ * (a typed `/model`, the belt's Model), the box is emptied first, and the text goes out as a command.
  */
 function textRefusal(request: SendRequest, match: ProfileMatch | null): Ended | null {
   const lines = sendLines(request.text);
   const leads = match?.profile.reservedLeads ?? GENERIC_LEADS;
-  const lead = request.mode === "command" ? null : reservedLead(lines[0] ?? "", leads);
+  const lead = request.mode === "command" || request.mode === "replace" ? null : reservedLead(lines[0] ?? "", leads);
   if (lead !== null) return new Ended("refused", "reserved_lead", { detail: LEAD_ROUTES.get(lead) ?? `A text that starts with ${lead} has its own route.` });
   if (lines.length > 1 && match === null) return new Ended("refused", "multiline", { detail: "This harness has no profile, so its newline key is unknown; send one line at a time." });
   return null;

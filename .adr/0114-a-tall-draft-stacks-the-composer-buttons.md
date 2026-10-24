@@ -1,4 +1,4 @@
-# 0111: a tall draft stacks the composer buttons
+# 0114: a tall draft stacks the composer buttons
 
 - **Status:** Accepted
 - **Date:** 2026-10-19

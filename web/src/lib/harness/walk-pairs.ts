@@ -55,6 +55,8 @@ export const WALK_PAIRS: readonly WalkPair[] = [
   // omp 18.11.3 under pi-o-my's runtime: three decision rows, Approve, Approve for the session, Deny.
   ["omp", "omp--v18-11-3-approval-bash.txt", "omp--v18-11-3-approval-bash-moved.txt"],
   ["omp", "omp--v18-11-3-ask-single.txt", "omp--v18-11-3-ask-single-moved.txt"],
+  // omp 18.12.2, Nerd Font preset: an Ask whose descriptions run past two rows, expanded with Ctrl+O.
+  ["omp", "omp--v18-12-2-ask-described-expanded--w120.txt", "omp--v18-12-2-ask-described-expanded-moved--w120.txt"],
   ["omp", "omp--v18-4-approval-write.txt", "omp--v18-4-approval-write-moved.txt"],
   ["omp", "omp--approval-write.txt", "omp--approval-write--deny.txt"],
   // omp Ask single-select, both keycap dialects, and the 18.8 dialog with option descriptions (#372).
@@ -73,6 +75,10 @@ export const WALK_PAIRS: readonly WalkPair[] = [
     "claude--menu-resume-picker--w120-first.txt",
     "claude--menu-resume-picker--w120-third.txt",
   ],
+  // Claude Code 2.1.303 on a long list: the title counts the pointer, `(1 of 50)` against `(2 of 50)`,
+  // which `coreSignature` blanks and the card's title drops (2026-10-19). Two widths.
+  ["claude", "claude--v2303-menu-resume-picker--w119-first.txt", "claude--v2303-menu-resume-picker--w119-second.txt"],
+  ["claude", "claude--v2303-menu-resume-picker--w160-first.txt", "claude--v2303-menu-resume-picker--w160-second.txt"],
   // Claude "Switch model?" confirmation (2.1.289), two widths: the pointer on `Yes` against on `No`.
   // The 50-column pair also prints the edge row both ways (labelled, then bare), which
   // `coreSignature` leaves out of the identity.
