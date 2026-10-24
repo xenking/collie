@@ -666,6 +666,10 @@ describe("the grammar claims nothing else in the corpus", () => {
     "omp--v18-11-ask-nerd-batch-second.txt",
     "omp--v18-11-ask-nerd-batch-revisited.txt",
     "omp--v18-11-ask-nerd-batch-review.txt",
+    // omp 18.12.2 under the patched runtime: an Ask with long descriptions, `O expand` / `O collapse` in the Nerd Font Control glyph.
+    "omp--v18-12-2-ask-described-cut--w120.txt",
+    "omp--v18-12-2-ask-described-expanded--w120.txt",
+    "omp--v18-12-2-ask-described-expanded-moved--w120.txt",
   ]);
 
   it("lifts only the supported Ask states in the complete corpus", () => {

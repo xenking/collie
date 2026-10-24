@@ -2704,6 +2704,23 @@ Nerd Font glyph, so the box's top edge (`╭── ⠋ 13s …`, `1m` past a min
 | `omp--v18-11-nerd-ghost-word--w130.txt`, `--w80.txt` | The box holds `please push` with the ghost `ed` after it. Labelled `draft` |
 | `omp--v18-11-ghost-word--w130.txt` | The same with the `unicode` preset. Labelled `draft` |
 
+## omp 18.12.2 under pi-o-my's patched runtime, Nerd Font preset, `monokai-pro-ristretto` theme (captured 2026-10-25, herdr 0.9.3, isolated headless Herdr)
+
+Read with `herdr pane read --source recent --format ansi` from an isolated headless Herdr, 120 columns, the
+last rows kept. The omp is the owner's patched 18.12.2 runtime (rail gutter, `›` prompt, status row under the
+box) under the owner's `config.yml` (`symbolPreset: nerd`, `composer.shape: borderless`), on a scratch
+`PI_CODING_AGENT_DIR` and a scratch project, with `anthropic/claude-haiku-5-5`. The scratch project path in the
+status row is replaced by `tmp/omp-lab/project`, keeping the row's width. These are the screens the live
+bridge read as `no-match` or an unreadable modal on 2026-10-24.
+
+| Fixture | State / what's in it |
+|---|---|
+| `omp--v18-12-2-below-status-draft-ghost--w120.txt` | `Reply with exactly: STILL-OK` typed, and omp's word completion `LAHOMA` drawn after it in the theme's dim colour `rgb(95,102,115)`. The box reads `STILL-OK`: the ghost is not draft text. Labelled `draft` |
+| `omp--v18-12-2-ask-described-cut--w120.txt` | An Ask with three options that carry long descriptions: omp shows two description rows each and the footer ends `H hide · O expand` (U+F0635 and U+F0634 keycaps). The card offers Expand and Cancel. Labelled `dialog` |
+| `omp--v18-12-2-ask-described-expanded--w120.txt` | The same after Ctrl+O: every description row, and the footer ends `O collapse`. The card offers the three options, Other and Cancel. Labelled `dialog` |
+| `omp--v18-12-2-ask-described-expanded-moved--w120.txt` | The expanded Ask after one Down: the pointer on Canary. The second capture of the walk pair. Labelled `dialog` |
+| `omp--v18-12-2-approval-hud--w120.txt` | `Allow tool: bash` with Approve, Approve bash for this session and Deny, under a `TODO` widget block and above the `›` row and the status row. Labelled `dialog` |
+
 ## omp 18.12 Ask `Other (type your own)` and its answer editor (captured 2026-10-23, oh-my-pi `omp` v18.12.2, scratch tmux)
 
 Four captures of one Ask call at 120 columns, from a scratch tmux session with a local fake model

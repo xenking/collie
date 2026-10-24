@@ -4760,6 +4760,31 @@
    "harness": "omp",
    "version": "18.12.2",
    "state": "running"
+  },
+  "omp--v18-12-2-below-status-draft-ghost--w120.txt": {
+   "harness": "omp",
+   "version": "18.12.2",
+   "state": "draft"
+  },
+  "omp--v18-12-2-ask-described-cut--w120.txt": {
+   "harness": "omp",
+   "version": "18.12.2",
+   "state": "dialog"
+  },
+  "omp--v18-12-2-ask-described-expanded--w120.txt": {
+   "harness": "omp",
+   "version": "18.12.2",
+   "state": "dialog"
+  },
+  "omp--v18-12-2-approval-hud--w120.txt": {
+   "harness": "omp",
+   "version": "18.12.2",
+   "state": "dialog"
+  },
+  "omp--v18-12-2-ask-described-expanded-moved--w120.txt": {
+   "harness": "omp",
+   "version": "18.12.2",
+   "state": "dialog"
   }
  },
  "knownMismatches": {

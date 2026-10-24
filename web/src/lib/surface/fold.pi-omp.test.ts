@@ -101,6 +101,34 @@ describe("the typed command's own list under pi's and omp's box (field case 2026
   });
 });
 
+// 2026-10-24, the owner's live bridge on omp 18.12.2 (Nerd Font preset, `monokai-pro-ristretto`): the poll read
+// 31 of 35 screens as no-match or an unreadable modal. Two causes reproduced on an isolated rig: an Ask whose
+// descriptions run past two rows ends its footer `O expand` / `O collapse` with the Control glyph U+F0634, and
+// the theme draws omp's word completion in a colour the profile did not list, so the ghost read as typed text
+// (a send ended `typed_not_submitted`).
+describe("omp 18.12.2 under the patched runtime and the owner's theme", () => {
+  it("a typed word's ghost completion is no draft text", () => {
+    const read = own("omp--v18-12-2-below-status-draft-ghost--w120.txt");
+    expect(read.surface).toMatchObject({ turn: "idle", modal: "none", composer: "draft" });
+    expect(read.frame?.interior.text).toBe("Reply with exactly: STILL-OK");
+  });
+
+  it("an Ask with long descriptions, cut, is the ask that offers Expand and Cancel", () => {
+    const read = own("omp--v18-12-2-ask-described-cut--w120.txt");
+    expect(read.surface.modal).toMatchObject({ ask: { options: [expect.objectContaining({ label: "Expand" }), expect.objectContaining({ label: "Cancel" })] } });
+  });
+
+  it("the same Ask expanded lists its three options, Other and Cancel", () => {
+    const read = own("omp--v18-12-2-ask-described-expanded--w120.txt");
+    expect(read.surface.modal).toMatchObject({ ask: { options: ["Blue-green", "Canary", "Rolling", "Other (type your own)", "Cancel"].map((label) => expect.objectContaining({ label })) } });
+  });
+
+  it("the approval dialog under a TODO widget block is a permission ask", () => {
+    const read = own("omp--v18-12-2-approval-hud--w120.txt");
+    expect(read.surface.modal).toMatchObject({ ask: { kind: "permission", options: ["Approve", "Approve bash for this session", "Deny"].map((label) => expect.objectContaining({ label })) } });
+  });
+});
+
 // The field case of 2026-10-23: `Other (type your own)` opens omp's answer editor, and the phone's Send
 // met "Collie cannot read this screen" there, because its hint row names two keys. The editor is a
 // box now (`submitCloses`), in the running turn of the Ask call, so Send types into it.

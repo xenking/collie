@@ -56,7 +56,7 @@ const GLYPH_COMPOSER_FIXTURES = allOmpFixtures.filter((name) =>
 );
 // omp 18.10.0 borderless captures with this install's `›` gutter (glyph-gutter.test.ts reads them in detail).
 // Composers, so the modal cohort never names them, and their own locator arm is not the 18.4 one.
-const GLYPH_GUTTER_FIXTURES = new Set(allOmpFixtures.filter((name) => name.startsWith("omp--v18-10-borderless-glyph-") || name.startsWith("omp--v18-11-3-below-status-")));
+const GLYPH_GUTTER_FIXTURES = new Set(allOmpFixtures.filter((name) => name.startsWith("omp--v18-10-borderless-glyph-") || name.startsWith("omp--v18-11-3-below-status-") || name.startsWith("omp--v18-12-2-below-status-")));
 const CLAUDE_COMPOSER_FIXTURES = GLYPH_COMPOSER_FIXTURES.filter((name) => name.includes("-claude-"));
 const BORDERLESS_COMPOSER_FIXTURES = GLYPH_COMPOSER_FIXTURES.filter((name) => name.includes("-borderless-"));
 // `omp--menu-dismissed.txt` matches this prefix and is a COMPOSER capture, not a modal, and so is
@@ -103,6 +103,11 @@ const LIFTED = new Set([
   "omp--v18-11-3-approval-bash-deny.txt",
   "omp--v18-11-3-ask-single.txt",
   "omp--v18-11-3-ask-single-moved.txt",
+  // omp 18.12.2 under the patched runtime: an Ask with long descriptions (cut, expanded, pointer moved) and the approval dialog under a TODO widget block.
+  "omp--v18-12-2-approval-hud--w120.txt",
+  "omp--v18-12-2-ask-described-cut--w120.txt",
+  "omp--v18-12-2-ask-described-expanded--w120.txt",
+  "omp--v18-12-2-ask-described-expanded-moved--w120.txt",
   "omp--menu-resume-moved.txt",
   "omp--menu-resume.txt",
   "omp--v18-4-resume-all-projects.txt",
@@ -183,6 +188,7 @@ const DECLINED = new Set([
   "omp--v18-11-3-below-status-idle-recap.txt",
   "omp--v18-11-3-below-status-running-todo.txt",
   "omp--v18-11-3-below-status-slash-model.txt",
+  "omp--v18-12-2-below-status-draft-ghost--w120.txt",
   // — Composer states. An input box is chrome, never a dialog; stripChrome peels it, the statusline
   //   and stranded-draft probes re-surface what it carried.
   "omp--done--tool-result.txt",
@@ -460,6 +466,11 @@ describe("the omp corpus", () => {
     "omp--v18-11-nerd-slash-model--w130.txt",
     "omp--v18-11-nerd-slash-model--w80.txt",
     "omp--v18-11-skill-pointed--w130.txt",
+    "omp--v18-12-2-approval-hud--w120.txt",
+    "omp--v18-12-2-ask-described-cut--w120.txt",
+    "omp--v18-12-2-ask-described-expanded--w120.txt",
+    "omp--v18-12-2-ask-described-expanded-moved--w120.txt",
+    "omp--v18-12-2-below-status-draft-ghost--w120.txt",
     "omp--v18-12-band-idle--w130.txt",
     "omp--v18-12-nerd-band-done--w130.txt",
     "omp--v18-12-nerd-band-done--w80.txt",
@@ -706,6 +717,7 @@ const COMPOSER_FIXTURES = [
   "omp--v18-11-3-below-status-idle-recap.txt",
   "omp--v18-11-3-below-status-running-todo.txt",
   "omp--v18-11-3-below-status-slash-model.txt",
+  "omp--v18-12-2-below-status-draft-ghost--w120.txt",
   "omp--v18-11-3-below-status-decision-row.txt",
   // omp 18.12.1's default `band` composer under the nerd preset, and one unicode control (issue 505).
   "omp--v18-12-band-idle--w130.txt",
