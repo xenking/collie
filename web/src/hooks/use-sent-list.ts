@@ -59,6 +59,8 @@ export function useSentList({ choice, cwd, query, scope, lead }: UseSentListArgs
   const placeRef = useRef("");
   const viewRef = useRef(view);
   viewRef.current = view;
+  // The query the shown first page answers; a page asked for another one is stale when it lands.
+  const queryKeyRef = useRef("");
 
   // The search goes out once the person stops typing. An empty field settles at once, so clearing it
   // is not a wait.
@@ -80,6 +82,7 @@ export function useSentList({ choice, cwd, query, scope, lead }: UseSentListArgs
     const place = `${choice}\u0000${cwd ?? ""}\u0000${host ?? ""}`;
     const moved = place !== placeRef.current;
     placeRef.current = place;
+    queryKeyRef.current = `${place}\u0000${settled}\u0000${nonce}`;
     setView((now) => (moved || now.phase !== "ready" ? LOADING : now));
     setLoadingMore(false);
     async function read() {
@@ -105,6 +108,7 @@ export function useSentList({ choice, cwd, query, scope, lead }: UseSentListArgs
     if (current.phase !== "ready" || !current.more) return;
     const oldest = current.entries.at(-1);
     if (oldest === undefined) return;
+    const asked = queryKeyRef.current;
     async function read(before: number) {
       setLoadingMore(true);
       try {
@@ -112,6 +116,8 @@ export function useSentList({ choice, cwd, query, scope, lead }: UseSentListArgs
           { scope: choice === "all" ? "all" : "here", cwd: choice === "folder" ? cwd : undefined, q: settled, limit: SENT_PAGE, before },
           host === undefined ? undefined : { host },
         );
+        // The search or the place changed while this page was on its way: it belongs to the old view.
+        if (queryKeyRef.current !== asked) return;
         setView((now) =>
           now.phase === "ready"
             ? { ...now, entries: appendPage(now.entries, answer.entries), more: answer.more, machines: answer.machines }
@@ -120,7 +126,7 @@ export function useSentList({ choice, cwd, query, scope, lead }: UseSentListArgs
       } catch {
         // The page stays as it was; "Load more" is still there to try again.
       } finally {
-        setLoadingMore(false);
+        if (queryKeyRef.current === asked) setLoadingMore(false);
       }
     }
     void read(oldest.at);

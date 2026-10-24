@@ -75,6 +75,21 @@ describe("Send as message (the Send button's long-press menu)", () => {
     expect(plain).toEqual([]);
   });
 
+  it("keeps the ordinary Send off while the message request is pending (no second send of the same draft)", async () => {
+    const user = userEvent.setup();
+    const plain = watchPlainSends();
+    let finish: () => void = () => {};
+    server.use(http.post(/\/api\/walky$/, async () => (await new Promise<void>((resolve) => (finish = resolve)), HttpResponse.json({ receipt: { id: "wt_a1b2c3d4e5f6", outcome: "accepted" } }))));
+    renderComposer();
+    await user.type(screen.getByPlaceholderText(/type a reply/i), "Stop and report");
+    fireEvent.contextMenu(screen.getByRole("button", { name: "Send" }));
+    await user.click(await screen.findByRole("button", { name: "Send as message" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeDisabled());
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(plain).toEqual([]);
+    finish();
+  });
+
   it("addresses the pane's current session instance when the pane carries one", async () => {
     const user = userEvent.setup();
     renderComposer(createRef<ComposerHandle>(), { instance: "k3f9" });

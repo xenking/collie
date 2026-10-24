@@ -307,7 +307,7 @@ describe("pi 1.2.0 composer with editorPaddingX (issue 442)", () => {
 
   it("adds no composer to the pi corpus: the padded path changes none of the captures' answers", () => {
     const PANES = new URL("../../../fixtures/panes/", import.meta.url);
-    const dialogs = readdirSync(PANES).filter((n) => /^pi--(v0871|v110|omo-v5130)-.*(question|single|multi|tabs|review|submit|picker|selector|editor)/.test(n) && !/draft|idle/.test(n));
+    const dialogs = readdirSync(PANES).toSorted().filter((n) => /^pi--(v0871|v110|omo-v5130)-.*(question|single|multi|tabs|review|submit|picker|selector|editor)/.test(n) && !/draft|idle/.test(n));
     expect(dialogs.length).toBeGreaterThan(30);
     const found = dialogs.filter((name) => locateComposer(fixture(name.slice(0, -4))) !== null);
     // Pickers and answered rows whose rows start at column zero were already read as a frame before

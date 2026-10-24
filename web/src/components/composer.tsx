@@ -2715,7 +2715,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 {...sendHold}
                 className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 select-none rounded-full [-webkit-touch-callout:none]")}
                 onClick={direct.active ? () => direct.deactivate() : onSendClick}
-                disabled={locked || sending || (offline && !direct.active)}
+                disabled={locked || sending || walky.sending || (offline && !direct.active)}
                 title={offline && !direct.active ? translate("composer.send.reconnect") : undefined}
                 aria-label={
                   direct.active
