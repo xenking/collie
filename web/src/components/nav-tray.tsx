@@ -353,7 +353,7 @@ export function NavTray({
   // row win a tap under Esc, and send the Enter below it). Sideways that is a 7-column key 40.5px
   // drawn at 390px with the commit column (the narrowest case) + 2 + 2 = 44.5px wide. Vertically,
   // 36px (`h-9`) + 2 + 2 = 40px: rows 40px apart cannot reach 44 without overlapping, so 40px is the
-  // accepted exception (ADR 0110). The commit Enter's own two-row span clears the floor in both axes,
+  // accepted exception (ADR 0113). The commit Enter's own two-row span clears the floor in both axes,
   // so it wears none of this, except on a one-row board, where it is as short as a key.
   // The key must not clip (`overflow-hidden`), or the reach is cut off at the border.
   const KEY_TAP_TARGET =

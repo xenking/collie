@@ -1,15 +1,16 @@
 import { useEffect, useState } from "react";
-import { CornerDownLeft, Pencil, Search } from "lucide-react";
+import { CornerDownLeft, Pencil } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { SearchField } from "@/components/ui/search-field";
 import { BottomSheet } from "@/components/ui/sheet";
 import { AgentIcon } from "@/components/agent-icon";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
 import { commandsFor, type AgentCommand } from "@/lib/agent-commands";
-import { canonicalAgent } from "@/lib/operator-scope";
-import * as api from "@/lib/api";
-import type { OperatorCommand } from "@/lib/types";
+import { fetchClaudeCommands, fetchPaneCommands, type ClaudeCommand } from "@/lib/api";
+import { canonicalAgent, rowsFor } from "@/lib/operator-scope";
 import type { Scope } from "@/lib/scope";
+import type { OperatorCommand } from "@/lib/types";
 import { t } from "@/lib/i18n";
 import { useLocale } from "@/hooks/use-locale";
 
@@ -17,20 +18,70 @@ interface CommandPaletteProps {
   open: boolean;
   onClose: () => void;
   agent: string | undefined | null;
-  mine?: readonly OperatorCommand[];
+  /** The pane the palette types into; its machine is asked which skills Claude Code would load there. */
   paneId?: string;
   scope?: Scope;
+  /** The operator's own rows (`commands.toml`); they replace the catalog on panes they address. */
+  mine?: readonly OperatorCommand[];
+  /** On-disk skills already read for this pane by the composer. */
+  found?: readonly ClaudeCommand[];
+  /** Insert "/cmd " into the composer for the user to complete (arg-taking commands). */
   onInsert: (text: string) => void;
   onSubmit: (text: string) => void;
+}
+
+/**
+ * Reads the skills and commands a Claude Code pane would load off disk whenever `active` turns on
+ * and no operator `commands.toml` rows replace the palette for this pane (ADR 0018).
+ */
+export function useClaudeCommands(
+  active: boolean,
+  agent: string | undefined | null,
+  paneId: string | undefined,
+  scope?: Scope,
+  mine: readonly OperatorCommand[] = [],
+): readonly ClaudeCommand[] {
+  const [state, setState] = useState<{ key: string; rows: readonly ClaudeCommand[] }>({
+    key: "",
+    rows: [],
+  });
+  const isClaude = canonicalAgent(agent?.toLowerCase().trim() ?? "") === "claude";
+  const hasOperatorRows = rowsFor(mine, agent, (row) => row.command).length > 0;
+  const host = scope?.host ?? "";
+  const session = scope?.session ?? "";
+  const targetKey = `${host}\0${session}\0${paneId ?? ""}`;
+
+  // Asked on every open, because a skill installed a minute ago should be there; a failed read
+  // (an older bridge, a crew member) clears any stale rows from an earlier open and keeps the catalog.
+  useEffect(() => {
+    if (!active || !isClaude || hasOperatorRows || paneId === undefined) return;
+    const ac = new AbortController();
+    const requestScope: Scope = {};
+    if (host !== "") requestScope.host = host;
+    if (session !== "") requestScope.session = session;
+    const run = async () => {
+      try {
+        const rows = await fetchClaudeCommands(paneId, requestScope, ac.signal);
+        if (!ac.signal.aborted) setState({ key: targetKey, rows });
+      } catch {
+        if (!ac.signal.aborted) setState({ key: targetKey, rows: [] });
+      }
+    };
+    void run();
+    return () => ac.abort();
+  }, [active, isClaude, hasOperatorRows, paneId, host, session, targetKey]);
+
+  return !hasOperatorRows && state.key === targetKey ? state.rows : [];
 }
 
 export function CommandPalette({
   open,
   onClose,
   agent,
-  mine,
   paneId,
   scope,
+  mine,
+  found: foundProp,
   onInsert,
   onSubmit,
 }: CommandPaletteProps) {
@@ -40,7 +91,8 @@ export function CommandPalette({
   const [liveError, setLiveError] = useState(false);
   const [loadingLive, setLoadingLive] = useState(false);
   const isOmp = agent ? canonicalAgent(agent.toLowerCase().trim()) === "omp" : false;
-  const all = commandsFor(agent, mine, liveOmp);
+  const fetched = useClaudeCommands(open && foundProp === undefined, agent, paneId, scope, mine);
+  const all = commandsFor(agent, mine, foundProp ?? fetched, liveOmp);
   const [query, setQuery] = useState("");
   const { pending, confirm, reset } = usePendingConfirm();
 
@@ -59,7 +111,7 @@ export function CommandPalette({
     setLoadingLive(true);
     void (async () => {
       try {
-        const { commands, version } = await api.fetchPaneCommands(paneId, scope);
+        const { commands, version } = await fetchPaneCommands(paneId, scope);
         if (!active) return;
         setLiveOmp(commands);
         setLiveVersion(version);
@@ -74,13 +126,13 @@ export function CommandPalette({
     };
   }, [isOmp, open, paneId, scope]);
 
-  // Reset transient state whenever the sheet (re)opens.
+  // Reset transient state whenever the sheet (re)opens or switches pane.
   useEffect(() => {
     if (open) {
       setQuery("");
       reset();
     }
-  }, [open, reset]);
+  }, [open, paneId, reset]);
 
   const q = query.trim().toLowerCase();
   const list = q
@@ -119,21 +171,12 @@ export function CommandPalette({
               : "Live OMP lookup unavailable; showing the offline fallback."}
         </p>
       )}
-      <div className="relative mb-3">
-        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-        <input
-          type="text"
-          inputMode="search"
-          autoComplete="off"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={t("commands.search.placeholder", { count: all.length })}
-          className="h-11 w-full rounded-md border border-input bg-transparent pl-9 pr-3 text-base placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-        />
-      </div>
+      <SearchField
+        className="mb-3"
+        value={query}
+        onChange={setQuery}
+        placeholder={t("commands.search.placeholder", { count: all.length })}
+      />
 
       {!q && !isOmp && (
         <p className="mb-2 text-[11px] label-caps text-muted-foreground">
