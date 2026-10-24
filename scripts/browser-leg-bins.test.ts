@@ -1,7 +1,7 @@
 // Tests of web/e2e/rig/bins.ts: where the leg finds pi, and where pi's example extensions are. No rig,
 // no browser. The files are made in a temp dir. It sits in scripts/ for the reason browser-leg-nightly.test.ts gives.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -10,7 +10,8 @@ import { onPath, piExamplesDir, piExtensions } from "../web/e2e/rig/bins";
 let root = "";
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "bins-test-"));
+  // Real path: the code under test resolves links, and macOS's tmpdir is under the `/var` link.
+  root = realpathSync(mkdtempSync(join(tmpdir(), "bins-test-")));
 });
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
