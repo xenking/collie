@@ -11,7 +11,7 @@ import { useSentList, type SentChoice } from "./use-sent-list";
 const entry = (id: string, at: number): SentEntry => ({ id, line: id, cwd: "/p", at, kind: "shell", count: 1, host: "m" });
 const page = (entries: SentEntry[], more: boolean) => ({ entries, more, off: false, machines: [] });
 
-const INITIAL: { choice: SentChoice } = { choice: "folder" };
+const INITIAL = { choice: "folder" as const };
 
 describe("useSentList", () => {
   beforeEach(() => getSent.mockReset());
@@ -19,7 +19,7 @@ describe("useSentList", () => {
   it("drops a Load more page that lands after the place changed", async () => {
     let late: (value: ReturnType<typeof page>) => void = () => {};
     getSent.mockResolvedValueOnce(page([entry("a", 9)], true));
-    const { result, rerender } = renderHook((p: { choice: SentChoice }) => useSentList({ choice: p.choice, cwd: "/p", query: "", scope: undefined, lead: undefined }), { initialProps: INITIAL });
+    const { result, rerender } = renderHook<ReturnType<typeof useSentList>, { choice: SentChoice }>((p) => useSentList({ choice: p.choice, cwd: "/p", query: "", scope: undefined, lead: undefined }), { initialProps: INITIAL });
     await waitFor(() => expect(result.current.view.phase).toBe("ready"));
     getSent.mockImplementationOnce(() => new Promise((resolve) => (late = resolve)));
     act(() => result.current.loadMore());
