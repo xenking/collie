@@ -23,21 +23,21 @@ describe("KeepChatControl", () => {
   });
 
   it("deletes what is kept when turned off", async () => {
-    await saveChatTail(undefined, "w1:p1", [
+    await saveChatTail(undefined, "w1:p1", undefined, [
       { uuid: "a", seq: 1, ts: "", role: "assistant", parts: [{ kind: "text", text: "kept" }] },
     ], "1d");
-    expect(await loadChatTail(undefined, "w1:p1")).not.toBeNull();
+    expect(await loadChatTail(undefined, "w1:p1", undefined)).not.toBeNull();
     render(<KeepChatControl />);
     await userEvent.click(screen.getByRole("radio", { name: "Off" }));
     expect(stored().keepChat).toBe("off");
-    await waitFor(async () => expect(await loadChatTail(undefined, "w1:p1")).toBeNull());
+    await waitFor(async () => expect(await loadChatTail(undefined, "w1:p1", undefined)).toBeNull());
   });
 });
 
 describe("Clear saved copies now", () => {
   it("deletes every saved record, keeps the pairing and the setting, and says so", async () => {
     setDeviceToken("tok-placeholder");
-    await saveChatTail(undefined, "w1:p1", [
+    await saveChatTail(undefined, "w1:p1", undefined, [
       { uuid: "a", seq: 1, ts: "", role: "assistant", parts: [{ kind: "text", text: "kept" }] },
     ], "7d");
     await saveLastPaneText(undefined, "w1:p1", "pane text");
@@ -49,7 +49,7 @@ describe("Clear saved copies now", () => {
     await userEvent.click(screen.getByRole("button", { name: "Clear saved copies now" }));
 
     expect(await screen.findByText("Saved copies cleared. Live panes are saved again as you read them.")).toBeInTheDocument();
-    expect(await loadChatTail(undefined, "w1:p1")).toBeNull();
+    expect(await loadChatTail(undefined, "w1:p1", undefined)).toBeNull();
     expect(await loadLastPaneText(undefined, "w1:p1")).toBeNull();
     expect(await loadLastSnapshot(undefined)).toBeNull();
     expect(getDeviceToken()).toBe("tok-placeholder");

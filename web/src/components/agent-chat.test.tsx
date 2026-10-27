@@ -47,7 +47,7 @@ import type { AgentStatus, AgentView, ChatWindowBody, ServerSummary, TabView } f
 import { withHeaderHost } from "@/test/header-host";
 import { COLLAPSE_MS } from "./ui/collapse";
 import { AgentChat } from "./agent-chat";
-import { saveChatTail } from "@/lib/chat-tail";
+import { loadChatTail, saveChatTail } from "@/lib/chat-tail";
 import { __resetMaskedHint, maskedHintRetired } from "@/lib/masked-hint";
 
 // M46 spec 11 turns every send off for a pane the bridge has not answered lately (lib/liveness.ts).
@@ -3686,7 +3686,7 @@ describe("AgentChat — the chat body", () => {
     chooseChat("chat");
     // Within the 1-day lifetime: an older record would read as a miss.
     const at = Date.now() - 60_000;
-    await saveChatTail(undefined, fixtureAgents[0]!.paneId, [
+    await saveChatTail(undefined, fixtureAgents[0]!.paneId, undefined, [
       { uuid: "s1", seq: 7, ts: "", role: "assistant", parts: [{ kind: "text", text: "the saved reply" }] },
     ], "1d", at);
     server.use(http.get(/\/api\/pane\/[^/]+\/chat/, () => HttpResponse.error()));
@@ -3703,13 +3703,59 @@ describe("AgentChat — the chat body", () => {
   it("stale render: draws the saved Chat tail at once while the chat read hangs", async () => {
     chooseChat("chat");
     const at = Date.now() - 60_000;
-    await saveChatTail(undefined, fixtureAgents[0]!.paneId, [
+    await saveChatTail(undefined, fixtureAgents[0]!.paneId, undefined, [
       { uuid: "s1", seq: 7, ts: "", role: "assistant", parts: [{ kind: "text", text: "the saved reply" }] },
     ], "1d", at);
     server.use(http.get(/\/api\/pane\/[^/]+\/chat/, () => new Promise<Response>(() => {})));
     renderChat({ agent: journalAgent(), stale: true, lastSeenAt: at, error: true });
     expect(await screen.findByText("the saved reply")).toBeInTheDocument();
     expect(screen.getByText(/^Saved copy from .+\. Older text is on the bridge\.$/)).toBeInTheDocument();
+  });
+
+  // PANE ID REUSE. A multiplexer hands a closed pane's id to the next pane (bridge/walky/instances.ts), and
+  // the pane's `instance` token is how the wire says "another session took this id". The saved Chat tail is
+  // the one cache a phone draws BEFORE the bridge answers, so it is the one place a stranger's conversation
+  // can be read as this pane's. Both cases go through the real write-through: no tail is planted by hand.
+  describe("a saved Chat tail belongs to the session instance that wrote it", () => {
+    /** Chat as the first session saw it live, then the phone left: the tail is on the device. */
+    async function firstSessionWritesItsTail(instance: string) {
+      chooseChat("chat");
+      renderChat({ agent: { ...journalAgent(), instance } });
+      expect(await screen.findByText("what changed today?")).toBeInTheDocument();
+      await waitFor(async () => expect(await loadChatTail(undefined, fixtureAgents[0]!.paneId, instance)).not.toBeNull());
+      cleanup();
+    }
+    /** The bridge cannot be reached on the next open, so only the saved copy is left to draw. */
+    function nextOpenIsOffline() {
+      const asked: string[] = [];
+      server.use(
+        http.get(/\/api\/pane\/[^/]+\/chat/, ({ request }) => {
+          asked.push(request.url);
+          return HttpResponse.error();
+        }),
+      );
+      return asked;
+    }
+
+    it("draws the saved tail for the same instance", async () => {
+      await firstSessionWritesItsTail("aaaa");
+      const asked = nextOpenIsOffline();
+      renderChat({ agent: { ...journalAgent(), instance: "aaaa" }, stale: true, lastSeenAt: Date.now(), error: true });
+      expect(await screen.findByText("what changed today?")).toBeInTheDocument();
+      await waitFor(() => expect(asked.length).toBeGreaterThan(0));
+    });
+
+    it("never draws it for another instance that took the same pane id", async () => {
+      await firstSessionWritesItsTail("aaaa");
+      const asked = nextOpenIsOffline();
+      renderChat({ agent: { ...journalAgent(), instance: "bbbb" }, stale: true, lastSeenAt: Date.now(), error: true });
+      // The read that fails is the point at which the saved copy would be (and today is) drawn.
+      await waitFor(() => expect(asked.length).toBeGreaterThan(0));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+      expect(screen.queryByText("what changed today?")).toBeNull();
+    });
   });
 
   it("keeps the composer, the belt and the header in the chat body", async () => {
