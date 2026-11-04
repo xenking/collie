@@ -23,8 +23,8 @@ const textsOf = (name: string): string[] => load(name).map(lineText);
 const fromTexts = (texts: string[]): StyledLine[] => splitLines(parseAnsi(texts.join("\n")));
 
 const OTHER = "Other (type your own)";
-it("a current OMP Ask offers selectable answers even with its hide hint", () => {
-  const lines = load("omp--v18-10-ask-single.txt");
+it.each(["Alt+H hide", "⌥H hide"])("an OMP Ask offers selectable answers with its %s hint", (hint) => {
+  const lines = fromTexts(textsOf("omp--v18-10-ask-single.txt").map((line) => line.replace("Alt+H hide", hint)));
   const model = detectAskSelect(lines);
   expect(model?.question).toBe("Pick a colour");
   expect(model?.options.map((option) => [option.label, option.keys])).toEqual([

@@ -60,8 +60,8 @@ const ESCAPE_SEGMENT = /^(?:⎋|esc|\u{F12B7})(?: (cancel|close)| to (close))$/i
 /** The model picker's trailing task-mode toggle. Case-sensitive: OMP prints it one way. */
 const TASK_MODE_SEGMENT = /^[A-Za-z0-9+]+ (?:task|session) model$/;
 
-/** Ask's trailing hide toggle: text keycaps (18.10) or the Nerd Font Option glyph U+F0635 (18.11.1). */
-export const HIDE_SEGMENTS: ReadonlySet<string> = new Set(["Alt+H hide", "\u{F0635} H hide"]);
+/** Ask's hide toggle: text keycaps, macOS's Option glyph, or the Nerd Font Option glyph U+F0635. */
+export const HIDE_SEGMENTS: ReadonlySet<string> = new Set(["Alt+H hide", "⌥H hide", "\u{F0635} H hide"]);
 
 /** Ask's trailing expand toggle: `Ctrl+O` as text (18.10) or as the Nerd Font Control glyph U+F0634 (18.12.2). */
 export const EXPAND_SEGMENT = /^(?:Ctrl\+O|\u{F0634} O) (expand|collapse)$/u;

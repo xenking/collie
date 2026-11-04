@@ -29,6 +29,7 @@ Running a crew? Update the lead first; members follow on their own. Details:
 
 ### Fixed
 
+- **OMP's macOS Ask hide hint no longer hides its answer card.** OMP 18.16.0 prints `⌥H hide` in the Unicode preset; the shared footer reader now accepts that exact spelling, retaining the dialog's normal pointer walk and all existing binding checks.
 - **OMP sends respect its steering behavior instead of waiting for yield.** A normal Send uses Enter, not Ctrl+Q, so a running OMP receives the message through its configured steering path.
 - **An OMP started from New keeps the selected folder, including home.** The launch passes `--cwd=.` explicitly, preventing OMP's automatic switch from the home directory to `/tmp`.
 - **Concurrent voice connections keep the later connected phone in control.** Relay opens for one session are serialized, so an earlier token read or daemon reply finishing late cannot displace the newer browser. A phone that disconnects while queued leaves the active owner and its lease untouched.
