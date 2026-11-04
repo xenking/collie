@@ -42,6 +42,17 @@ export function renderInputs(
   return { isTTY, ci: ci !== "" && ci !== "false" && ci !== "0", plain };
 }
 
+/** The width of a pipe, a file and a log: the classic terminal. */
+export const DEFAULT_COLUMNS = 80;
+
+/**
+ * The width plain lines wrap at: the terminal's own when stdout is one, else 80. A pure function of
+ * what the edge read, so a verb takes a number and reads no `process`.
+ */
+export function terminalColumns(isTTY: boolean, columns: number | undefined): number {
+  return isTTY && columns !== undefined && Number.isInteger(columns) && columns > 0 ? columns : DEFAULT_COLUMNS;
+}
+
 /** An argv with `--plain` taken out of it, and whether it had been there. */
 export interface PlainFlag {
   plain: boolean;
@@ -89,6 +100,8 @@ export interface UiFinding {
 
 /** `collie doctor`, as a table. `crew` empty means `crewNote` is the whole crew section. */
 export interface DoctorView {
+  /** The instance and the state directory this run read: the first line. Optional so a caller that predates it still compiles. */
+  readonly instance?: string;
   readonly heading: string;
   readonly local: readonly UiFinding[];
   readonly crewTitle: string;

@@ -68,6 +68,7 @@ import {
   type CreatedShell,
   type HerdrRpc,
   type HerdrWorktreeCreate,
+  type PaneRead,
   type WirePane,
   type WireTab,
   type WireWorkspace,
@@ -89,6 +90,26 @@ export const HERDR_MUX = "herdr";
  * one `events.subscribe` stream. `unsupportedKeys` is where Herdr's actual hole is: six named keys
  * the server refuses (keys.ts).
  */
+/** The bracketed-paste markers {@link HerdrMux.pasteBlock} frames a paste in. */
+const PASTE_START = "\u001b[200~";
+const PASTE_END = "\u001b[201~";
+/** Every CSI sequence: an `ansi` read carries SGR only (no cursor moves), and a `text` read none. */
+// eslint-disable-next-line no-control-regex
+const CSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+/**
+ * How long one `pane.get` answer about a pane's scroll stands, in ms. A send reads the viewport several
+ * times inside its S0 gap (about a second, see `BOUNDS.s0` in `bridge/surface/protocol.ts`), and the
+ * whole send has 7,600 ms (`LOCK_BOUND_MS`), so the reads of one request share one answer instead of
+ * paying a socket round trip each. The cost of a stale answer is small: an operator who scrolls inside
+ * the window gets one old read, and the next request asks again.
+ */
+export const SCROLL_STATE_MEMO_MS = 1_000;
+/** Whether {@link HerdrMux.pasteBlock} keeps a character: the line break, or not a control byte (C0, DEL, C1). */
+function pasteKeeps(ch: string): boolean {
+  const code = ch.codePointAt(0) ?? 0;
+  return ch === "\n" || (code >= 0x20 && (code < 0x7f || code > 0x9f));
+}
+
 const HERDR_CAPABILITIES = declareCapabilities({
   supports: [
     "paneGrid",
@@ -298,6 +319,8 @@ export class HerdrMux implements MuxAdapter {
   private readonly repoByWorkspace = new Map<string, RepoEntry>();
   /** Lookups in flight, so two overlapping snapshots ask Herdr once. */
   private readonly repoLookups = new Map<string, Promise<void>>();
+  /** Per pane, the last `pane.get` scroll answer (in flight or settled) and when it stops standing. */
+  private readonly scrollByPane = new Map<string, { until: number; scroll: Promise<NonNullable<WirePane["scroll"]> | null> }>();
 
   /**
    * The client is the socket; `sessions` is where the OTHER sessions of this Herdr install are.
@@ -309,6 +332,7 @@ export class HerdrMux implements MuxAdapter {
   constructor(
     private readonly client: HerdrRpc,
     private readonly sessions: () => readonly MuxSession[],
+    private readonly now: () => number = Date.now,
   ) {}
 
   /** Reachability for the connected/disconnected banner — one cheap list call. */
@@ -429,12 +453,11 @@ export class HerdrMux implements MuxAdapter {
    */
   async readGrid(paneId: string, request: MuxGridRequest): Promise<MuxOutcome<MuxGrid>> {
     try {
-      const read = await this.client.readPane(
-        paneId,
-        request.scope === "viewport" ? "visible" : "recent",
-        request.lines,
-        request.styling === "strip" ? "text" : "ansi",
-      );
+      const format = request.styling === "strip" ? "text" : "ansi";
+      const read =
+        request.scope === "viewport"
+          ? await this.readLiveScreen(paneId, request.lines, format)
+          : await this.client.readPane(paneId, "recent", request.lines, format);
       return muxOk({
         paneId: read.pane_id,
         text: read.text,
@@ -444,6 +467,48 @@ export class HerdrMux implements MuxAdapter {
     } catch (err) {
       return transportRefusal(err);
     }
+  }
+
+  /**
+   * The screen the program draws now, whatever the operator's scroll.
+   *
+   * `visible` is the pane's viewport as Herdr shows it, and Herdr keeps a scrolled-up viewport where
+   * the operator left it while output grows below. A pane scrolled up on the desktop therefore read as
+   * old output with no input box: every send failed "could not find the input box" and left its probe
+   * character typed. A scrolled pane reads the bottom `viewport_rows` of `recent` instead, which ends
+   * at the live screen's last row (live-probed on herdr 0.9.3: a Claude pane scrolled 405 rows up read
+   * its input box this way, `visible` read old output). Herdr trims a screen's trailing blank rows, so
+   * on a screen the program has not filled the read also carries scrollback rows above the live ones,
+   * never more rows than the viewport holds. That read is in `ansi`, the format that never harvests an
+   * alt-screen pane (see {@link readGrid}), with the escapes cut for a `text` read. A pane record that
+   * cannot be read, or carries no scroll, leaves the old `visible` read.
+   */
+  private async readLiveScreen(paneId: string, lines: number, format: "text" | "ansi"): Promise<PaneRead> {
+    const scroll = await this.scrollState(paneId);
+    if (scroll === null || scroll.offset_from_bottom <= 0) {
+      return this.client.readPane(paneId, "visible", lines, format);
+    }
+    const read = await this.client.readPane(paneId, "recent", Math.min(lines, scroll.viewport_rows), "ansi");
+    return format === "ansi" ? read : { ...read, text: read.text.replace(CSI_PATTERN, "") };
+  }
+
+  /**
+   * A pane's scroll geometry, asked at most once per {@link SCROLL_STATE_MEMO_MS}.
+   *
+   * The answer (a pane that cannot be read counts as `null`, no scroll) is kept per pane, in flight
+   * included, so the reads one send, ask, stop or clear makes, and any that overlap, make one `pane.get`.
+   */
+  private scrollState(paneId: string): Promise<NonNullable<WirePane["scroll"]> | null> {
+    const at = this.now();
+    const held = this.scrollByPane.get(paneId);
+    if (held !== undefined && at < held.until) return held.scroll;
+    for (const [id, entry] of this.scrollByPane) if (at >= entry.until) this.scrollByPane.delete(id);
+    const scroll = Promise.resolve()
+      .then(() => this.client.getPane(paneId))
+      .then((pane) => pane?.scroll ?? null)
+      .catch(() => null);
+    this.scrollByPane.set(paneId, { until: at + SCROLL_STATE_MEMO_MS, scroll });
+    return scroll;
   }
 
   /**
@@ -475,6 +540,19 @@ export class HerdrMux implements MuxAdapter {
 
   async typeText(paneId: string, text: string): Promise<MuxAck> {
     return this.attempt(() => this.client.sendPaneText(paneId, text));
+  }
+
+  /**
+   * One bracketed paste of the whole text (MuxAdapter.pasteBlock). `pane.send_text` writes raw bytes
+   * and carries no paste framing (HERDR_API.md), so the markers are written here, in the same call as
+   * the text: a PTY is an ordered stream, and one write cannot be split by another caller's keys. Every
+   * control byte but the line break (C0, DEL, C1: ESC and the 8-bit CSI among them) is cut from the text
+   * first, so nothing inside can end the paste early and type the rest as keys.
+   */
+  async pasteBlock(paneId: string, text: string): Promise<MuxAck> {
+    const body = [...text].filter(pasteKeeps).join("");
+    if (body.length === 0) return muxAck();
+    return this.attempt(() => this.client.sendPaneText(paneId, `${PASTE_START}${body}${PASTE_END}`));
   }
 
   /**

@@ -35,6 +35,7 @@ import {
   discoverProcesses,
   discoveryHints,
   journalRefOf,
+  noSessionDetail,
   paneScreen,
   isHostAllowed,
   isLoopbackPeer,
@@ -53,6 +54,7 @@ import {
   paneChat,
   paneHistory,
   readPane,
+  paneReadHint,
   parsePairRequest,
   parseSnoozeRequest,
   parseNotifyPrefsPatch,
@@ -116,6 +118,7 @@ import {
   muxGone,
   muxOk,
   muxRefused,
+  muxUnconfirmed,
   muxUnreachable,
   type MuxConversationItems,
   type MuxConversationPage,
@@ -190,6 +193,8 @@ function cfg(overrides: Partial<Config> = {}): Config {
   return {
     mux: "herdr",
     muxEndpoint: "/tmp/herdr.sock",
+    muxPickedBecause: "",
+    muxNotPickedBecause: "",
     tmuxBin: "",
     zellijBin: "",
     ternBin: "",
@@ -202,7 +207,9 @@ function cfg(overrides: Partial<Config> = {}): Config {
     cacheWarnSeconds: 300,
     readLines: 200,
     transcript: true,
+    accountWindows: [],
     journalRoots: {
+      agy: ["/nope/agy"],
       claude: ["/tmp/claude-projects"],
       codex: ["/nope/codex"],
       pi: ["/nope/pi"],
@@ -211,6 +218,8 @@ function cfg(overrides: Partial<Config> = {}): Config {
       hermes: ["/nope/hermes"],
       muse: ["/nope/muse"],
       openclaw: ["/nope/openclaw"],
+      kiro: ["/nope/kiro"],
+      "dsh-tui": ["/nope/dsh"],
     },
     submitKeys: ["Enter"],
     commandsFile: "/nope/commands.toml",
@@ -964,6 +973,29 @@ describe("pane write prompt binding", () => {
       code: "keys.send_failed",
       detail: { reason: "no such pane" },
     });
+  });
+
+  test("a key batch the multiplexer did not confirm in time answers keys.unconfirmed, never send_failed, and is audited as sent", async () => {
+    // herdr-core held a terminal's keys behind its slow history reads and delivered them after the
+    // client gave up (M78 report 10, case 2). "Couldn't be sent" was wrong and invited a second send.
+    const mux = asMux(new FakePaneClient());
+    let calls = 0;
+    mux.writeKeys = () => {
+      calls++;
+      return Promise.resolve(muxUnconfirmed("herdr-core did not confirm the keys in time"));
+    };
+    const { audit, entries } = auditEntries();
+    const res = await keysPane(mux, cfg(), "w1:p1", request({ keys: ["Down"] }), audit, null, "default");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: false,
+      error: "the keys were not confirmed in time and may still arrive: check the pane before you send them again",
+      code: "keys.unconfirmed",
+      detail: { reason: "herdr-core did not confirm the keys in time" },
+    });
+    expect(calls).toBe(1);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ action: "keys", paneId: "w1:p1", detail: { keys: ["Down"], sent: "unconfirmed" } });
   });
 
   test("rejects oversized and non-string expected_prompt before a keys write", async () => {
@@ -4307,6 +4339,23 @@ describe("POST /api/workspace — a create that worked records the folder the mu
     }
   });
 
+  test("an empty folder opens in the session's own folder when the operator named one", async () => {
+    const mux = new FakeSpaceMux("/srv/yt");
+    await createWorkspace(asSpaceMux(mux), engine, body(JSON.stringify({ cwd: "" })), new AuditLog(() => {}), null, "project-yt", undefined, "/srv/yt");
+    expect(mux.created?.cwd).toBe("/srv/yt");
+    await createWorkspace(asSpaceMux(mux), engine, body(JSON.stringify({ cwd: "/srv/typed" })), new AuditLog(() => {}), null, "project-yt", undefined, "/srv/yt");
+    expect(mux.created?.cwd).toBe("/srv/typed");
+  });
+
+  test("a session folder is the operator's default, not the person's ask: it never joins Recent", async () => {
+    const recorded: string[] = [];
+    const store = { recordRecent: (f: string) => Promise.resolve(void recorded.push(f)) };
+    const mux = new FakeSpaceMux("/srv/yt");
+    await createWorkspace(asSpaceMux(mux), engine, body(JSON.stringify({ cwd: "" })), new AuditLog(() => {}), null, "project-yt", store, "/srv/yt");
+    expect(mux.created?.cwd).toBe("/srv/yt");
+    expect(recorded).toEqual([]);
+  });
+
   test("with no store (a bridge built by hand), the create is exactly today's", async () => {
     const mux = new FakeSpaceMux("/home/op/proj");
     const res = await createWorkspace(asSpaceMux(mux), engine, body(JSON.stringify({ cwd: "~/proj" })), new AuditLog(() => {}), null, "default");
@@ -4536,7 +4585,9 @@ describe("the folder routes — GET /api/folders and POST /api/folders/star", ()
     // Wired once, inside serveSessionRoute, so a crew peer's dispatch reaches it too (§5).
     expect([...src.matchAll(/await serveFolderRoute\(req, pathname, caller, folders, folderBrowse\)/g)]).toHaveLength(1);
     // And the create is handed the same store, so a peer records into its OWN list.
-    expect(src).toContain("return createWorkspace(rt.herdr, rt.engine, req, caller.audit, caller.device(), rt.name, folders);");
+    expect(src).toContain("return createWorkspace(rt.herdr, rt.engine, req, caller.audit, caller.device(), rt.name, folders, await sessionFolderOf(rt.name));");
+    // A launch reads the same session folder, so both creates from the dashboard open in one place.
+    expect(src).toContain("sessionFolder: await sessionFolderOf(rt.name),");
   });
 });
 
@@ -4947,6 +4998,70 @@ describe("readPane — the logical read is asked for only when it can repair som
   });
 });
 
+describe("the state engine's blocked hint reaches the pane's recent reads (herdr-core history reads hold keys)", () => {
+  test("a pane the engine reads as blocked passes hint.blocked to the mirror read and the binding read; a working pane passes none", async () => {
+    // The engine lifts pi to `blocked` from the screen's ask while herdr-core reports `working`.
+    const engine = { current: () => ({ agents: [{ paneId: "w1:p1", status: "blocked" as const }, { paneId: "w1:p2", status: "working" as const }] }) };
+    const requests: Array<[string, MuxGridRequest]> = [];
+    const stub: Partial<MuxAdapter> = {
+      mux: "herdr-core",
+      readGrid: (paneId: string, request: MuxGridRequest) => {
+        requests.push([paneId, request]);
+        return Promise.resolve(muxOk({ paneId, text: "Allow edit to src/x.ts?\n1. Yes\n2. No", truncated: true, revision: 3 }));
+      },
+      writeKeys: () => Promise.resolve(muxAck()),
+    };
+    // SAFETY: readPane and keysPane reach `mux`, `readGrid` and the key write, all present above.
+    const adapter = stub as MuxAdapter;
+    expect(paneReadHint(engine, "w1:p1")).toEqual({ blocked: true });
+    expect(paneReadHint(engine, "w1:p2")).toBeUndefined();
+    expect(paneReadHint(engine, "w9:p9")).toBeUndefined();
+    const get = (paneId: string) => readPane(adapter, cfg(), paneId, new URL(`http://x/api/pane/${paneId}`), new Request(`http://x/api/pane/${paneId}`), paneReadHint(engine, paneId));
+    expect((await get("w1:p1")).status).toBe(200);
+    expect((await get("w1:p2")).status).toBe(200);
+    const keys = new Request("http://x/api/pane/w1:p1/keys", { method: "POST", body: JSON.stringify({ keys: ["1"], expected_prompt: "Allow edit to src/x.ts?" }) });
+    await keysPane(adapter, cfg(), "w1:p1", keys, new AuditLog(() => undefined), "phone", "default", paneReadHint(engine, "w1:p1"));
+    expect(requests.map(([paneId, request]) => [paneId, request.scope, request.hint])).toEqual([
+      ["w1:p1", "recent", { blocked: true }],
+      ["w1:p2", "recent", undefined],
+      ["w1:p1", "recent", { blocked: true }],
+    ]);
+    expect("hint" in (requests[1]?.[1] ?? {})).toBe(false);
+  });
+});
+
+describe("the read's purpose: the mirror's poll, or Load older (M79 spec 01)", () => {
+  test("`?purpose=older` reaches the adapter as purpose older with its note on the body; any other read carries no purpose and no note", async () => {
+    const requests: MuxGridRequest[] = [];
+    const stub: Partial<MuxAdapter> = {
+      mux: "herdr-core",
+      readGrid: (paneId: string, request: MuxGridRequest) => {
+        requests.push(request);
+        const grid = { paneId, text: "$ ls", truncated: true, revision: 3 };
+        return Promise.resolve(muxOk(request.purpose === "older" ? { ...grid, olderNote: "wait" } : grid));
+      },
+      writeKeys: () => Promise.resolve(muxAck()),
+    };
+    // SAFETY: readPane and keysPane reach `mux`, `readGrid` and the key write, all present above.
+    const adapter = stub as MuxAdapter;
+    const read = async (query: string) => {
+      const res = await readPane(adapter, cfg(), "w1:p1", new URL(`http://x/api/pane/w1:p1${query}`), new Request(`http://x/api/pane/w1:p1${query}`));
+      // SAFETY: the bridge's own JSON, served by the call above.
+      return (await res.json()) as PaneReadResponse;
+    };
+    const older = await read("?lines=1000&purpose=older");
+    const poll = await read("?lines=1000");
+    const other = await read("?lines=1000&purpose=history");
+    const keys = new Request("http://x/api/pane/w1:p1/keys", { method: "POST", body: JSON.stringify({ keys: ["1"], expected_prompt: "$ ls" }) });
+    await keysPane(adapter, cfg(), "w1:p1", keys, new AuditLog(() => undefined), "phone", "default");
+    expect(requests.map((request) => request.purpose)).toEqual(["older", undefined, undefined, undefined]);
+    expect(requests.slice(1).every((request) => !("purpose" in request))).toBe(true);
+    expect(older.olderNote).toBe("wait");
+    expect("olderNote" in poll).toBe(false);
+    expect("olderNote" in other).toBe(false);
+  });
+});
+
 // ── The hot intent after an input (state-engine.ts § noteInput) ─────────────────────────────────
 //
 // Herdr announces nothing when an agent reports its session, so a bridge relaxed to its 12 s idle
@@ -5204,6 +5319,28 @@ describe("journalRefOf — which session the history and chat routes read", () =
     expect(seen).toEqual([undefined]);
   });
 
+  test("two omp panes in one folder share it under pi's adapter, so the folder walk answers no session (#508)", async () => {
+    // omp is pi's alias: the adapter is named `pi`, the panes `omp`. A walk would hand both one log.
+    const seen: unknown[] = [];
+    const a = adapter({
+      agent: "pi",
+      sharedFolderBlind: true,
+      discover: async (_cwd, hint) => {
+        seen.push(hint);
+        return hint?.shared === true ? null : resumed;
+      },
+    });
+    const mine = pane({ agent: "omp" });
+    const other = pane({ paneId: "w1:p2", agent: "omp" });
+    expect(await journalRefOf(a, mine, [mine, other])).toBeNull();
+    expect(seen).toEqual([{ shared: true }]);
+    expect(noSessionDetail(a, mine, [mine, other])).toBe("shared-folder");
+    // A pi pane beside an omp pane is the same: either one's log could be the newest.
+    expect(await journalRefOf(a, pane({ agent: "pi" }), [pane({ agent: "pi" }), other])).toBeNull();
+    // Alone in the folder, the walk answers.
+    expect(await journalRefOf(a, mine, [mine, pane({ paneId: "w1:p3", agent: "omp", cwd: "/elsewhere" })])).toEqual(resumed);
+  });
+
   describe("another pane in the folder", () => {
     const calls: string[] = [];
     const a = adapter({
@@ -5410,8 +5547,8 @@ describe("the send and abort routes", () => {
     // The refusal sits in front of both raw routes, so neither handler is reached for such a pane.
     const refusal = src.indexOf("const refusal = rawInputRefusal(herdr);");
     expect(refusal).toBeGreaterThan(0);
-    expect(refusal).toBeLessThan(src.indexOf("await replyPane(herdr, cfg, paneId, req, audit_, device, session, replySendOf(rt))"));
-    expect(refusal).toBeLessThan(src.indexOf("await keysPane(herdr, cfg, paneId, req, audit_, device, session)"));
+    expect(refusal).toBeLessThan(src.indexOf("await replyPane(herdr, cfg, paneId, req, audit_, device, session, { ...replySendOf(rt)"));
+    expect(refusal).toBeLessThan(src.indexOf("await keysPane(herdr, cfg, paneId, req, audit_, device, session, paneReadHint(rt.engine, paneId))"));
   });
 
   test("turnId: no existing pane gains one; the durable adapter names none before the program was read", () => {
@@ -5688,6 +5825,49 @@ describe("paneHistory — two muse tabs in one workspace read their own transcri
       // A neighbour in ANOTHER folder is no reason either: no log there means the plain no-session.
       agents = [{ ...view("w1:p1"), cwd: "/empty" }, view("w1:p2")];
       expect(await read()).toEqual({ paneId: "w1:p1", available: false, reason: "no-session" });
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  // ADR 0122: the route hands the window the pane's open queued sends, and masks their texts with the rest.
+  test("the chat route carries the pane's queued sends from the receipts, masked; a harness that records its queue keeps only returned rows", async () => {
+    const base = await realpath(await mkdtemp(join(tmpdir(), "collie-muse-route-")));
+    try {
+      await sessionLog(base, UUID_A, [metadata("/same"), accepted("alpha from session A")]);
+      const journals = { muse: museJournal([base]) };
+      const live = new LiveWindows(new TranscriptStore());
+      const stub: Partial<StateEngine> = {
+        current: () => ({ agents: [view("w1:p1")], shellPanes: [], workspaces: [], tabs: [], bridge: "connected" }),
+      };
+      // SAFETY: paneChat reaches only `current()` (for the pane lookup) on the paths read here.
+      const engine = stub as StateEngine;
+      const mux = {
+        capabilities: declareCapabilities({ supports: ["paneGrid"], topologyLatency: { kind: "push" } }),
+        readGrid: async () => muxGone("no screen"),
+        foregroundProcesses: async () => muxOk([{ argv: ["muse"] }]),
+      };
+      const key = `sk-or-v1-your-key-here-${"0".repeat(40)}`;
+      const asked: string[] = [];
+      const queuedOf = (paneId: string) => {
+        asked.push(paneId);
+        return [
+          { requestId: "req-queued-0001", text: "still waiting", at: Date.now(), state: "queued" as const },
+          { requestId: "req-back-00001", text: `deploy with ${key}`, at: Date.now(), state: "returned" as const },
+        ];
+      };
+      const url = new URL("http://x/api/pane/w1:p1/chat");
+      const res = await paneChat(cfg(), journals, live, engine, mux, "w1:p1", url, new Request(url), queuedOf);
+      const text = await res.text();
+      expect(text).not.toContain(key);
+      // SAFETY: the bridge's own JSON, served by the call above.
+      const body = JSON.parse(text) as { queued: string[]; queuedSends?: { requestId: string; state: string; text: string }[] };
+      expect(asked).toEqual(["w1:p1"]);
+      // Muse records its queue in its log: the journal stays the source, the returned row rides along.
+      expect(body.queued).toEqual([]);
+      expect(body.queuedSends).toHaveLength(1);
+      expect(body.queuedSends![0]).toMatchObject({ requestId: "req-back-00001", state: "returned" });
+      expect(body.queuedSends![0]!.text.startsWith("deploy with sk-o")).toBe(true);
     } finally {
       await rm(base, { recursive: true, force: true });
     }

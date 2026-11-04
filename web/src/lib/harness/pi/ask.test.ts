@@ -11,6 +11,8 @@ import { buildBlocks } from "../index";
 import { piAdapter } from "./index";
 import { piView } from "./panel";
 import { idleFor, readScreen } from "../../../test/surface-corpus";
+import { liftDialog } from "../../surface/lift";
+import { stripSgr } from "../../surface/plain";
 import { askOf, modalWord } from "../../surface/surface";
 
 const PANES = join(import.meta.dirname, "../../../fixtures/panes");
@@ -90,6 +92,13 @@ const LIFTS_397 = new Map<string, Expect>([
   ["pi--v0871-permission-gate-moved.txt", "walk"],
   ["pi--v0871-permission-gate-narrow.txt", "walk"],
   ["pi--v0871-permission-gate-narrow-moved.txt", "walk"],
+  // The Gentle AI review-consent screen (gentle-pi 4.2.0, pi 1.3.0): no rule frame, the footer is the
+  // screen's last row (L12 of odd/tasks/gentle-pi-chat-cards.md).
+  ["pi--v130-gentle-review-consent.txt", "walk"],
+  ["pi--v130-gentle-review-consent-moved.txt", "walk"],
+  // pi 1.3.0's stock question through a herdr-core bridge: a read with no styling at all (M78 spec 07).
+  ["pi--v130-core-question--w120.txt", "walk"],
+  ["pi--v130-core-question-moved--w120.txt", "walk"],
 ]);
 /** Screens with a pi modal up that stay raw: the Escape card's evidence. */
 const RAW_MODALS = new Set([
@@ -413,6 +422,126 @@ describe("pi's permission gate: a selector whose title quotes the command", () =
     const wrapped = replaceLast(onBlue, pointed("Blue"), ` continued\n${pointed("Blue")}`);
     expect(prompt(linesOf(onBlue)).options.map((o) => o.label)).toEqual(["Red", "Green", "Blue", "Cancel"]);
     expect(detectPiQuestion(linesOf(wrapped))).toBeNull();
+  });
+});
+
+describe("a frameless dialog read by its footer, the last row of the screen", () => {
+  const NAME = "pi--v130-gentle-review-consent.txt";
+  const consent = raw(NAME);
+  const FOOTER = "↑↓ choose · Enter confirm · Esc cancel · D details";
+  /** The pointer moved to option 2: the pointed row is painted, the others are plain. */
+  const onSecond = replaceLast(
+    replaceLast(consent, "\x1b[0m\x1b[38;2;157;157;157m→ 1. Review this change\x1b[0m", "  1. Review this change"),
+    "  2. Skip this time",
+    "\x1b[0m\x1b[38;2;157;157;157m→ 2. Skip this time\x1b[0m",
+  );
+
+  it("lifts the three options with the pointer, the walk's keys and the Escape row", () => {
+    const lines = load(NAME);
+    expect(lineText(lines.at(-1)!).trimEnd()).toBe(FOOTER);
+    const model = prompt(lines);
+    expect(model.family).toBe("select");
+    expect(model.question).toBe(
+      "Review consent Gentle AI can review this change before you call it done. Review can help detect regressions in these changes.",
+    );
+    expect(model.options).toEqual([
+      { label: "Review this change", keys: ["Enter"], keyLabel: "→" },
+      { label: "Skip this time", keys: ["Down", "Enter"], keyLabel: "" },
+      { label: "Review and allow this session", keys: ["Down", "Down", "Enter"], keyLabel: "" },
+      { label: "Cancel", keys: ["Escape"], keyLabel: "Esc" },
+    ]);
+    expect(piModalOnScreen(lines)).toBe(true);
+    expect(piAdapter.composerReady?.(lines)).toBe(false);
+  });
+
+  it("is a prompt-select card whose region starts at the title, the transcript kept above", () => {
+    const blocks = piAdapter.buildBlocks(load(NAME));
+    expect(blocks.map((b) => b.kind)).toEqual(["raw", "prompt-select"]);
+    const card = blocks[1]!;
+    if (card.kind !== "prompt-select") throw new Error("not a prompt-select");
+    expect(lineText(card.lines[0]!).trimEnd()).toBe("Review consent");
+    expect(lineText(card.lines.at(-1)!).trimEnd()).toBe(FOOTER);
+  });
+
+  it("points at option 2 when the pointer is there, and walks from it", () => {
+    const model = prompt(linesOf(onSecond));
+    expect(model.options.map((o) => [o.label, o.keys, o.keyLabel])).toEqual([
+      ["Review this change", ["Up", "Enter"], ""],
+      ["Skip this time", ["Enter"], "→"],
+      ["Review and allow this session", ["Down", "Enter"], ""],
+      ["Cancel", ["Escape"], "Esc"],
+    ]);
+  });
+
+  it("reads the real capture with the pointer on option 2 as option 2, plans [Up, Enter] [Enter] [Down, Enter]", () => {
+    const model = prompt(load("pi--v130-gentle-review-consent-moved.txt"));
+    expect(model.options.map((o) => [o.label, o.keys, o.keyLabel])).toEqual([
+      ["Review this change", ["Up", "Enter"], ""],
+      ["Skip this time", ["Enter"], "→"],
+      ["Review and allow this session", ["Down", "Enter"], ""],
+      ["Cancel", ["Escape"], "Esc"],
+    ]);
+  });
+
+  it("changes the core signature only by the pointer", () => {
+    const a = prompt(load(NAME));
+    const b = prompt(linesOf(onSecond));
+    expect(a.signature).not.toBe(b.signature);
+    expect(a.coreSignature).toBe(b.coreSignature);
+  });
+
+  it("names nothing by title or label: the same shape with other words lifts alike", () => {
+    const reworded = replaceLast(
+      replaceLast(replaceLast(consent, "Review consent", "Deploy gate"), "Skip this time", "Not now"),
+      "Gentle AI can review", "Some tool can review",
+    );
+    expect(prompt(linesOf(reworded)).options.map((o) => o.label)).toEqual([
+      "Review this change", "Not now", "Review and allow this session", "Cancel",
+    ]);
+  });
+
+  it("lifts without the effect paragraph too", () => {
+    const rows = consent.split("\r\n");
+    const effect = rows.findIndex((r) => r.includes("Effect:"));
+    const bare = [...rows.slice(0, effect - 1), ...rows.slice(effect + 1)].join("\r\n");
+    expect(prompt(linesOf(bare)).options).toHaveLength(4);
+  });
+
+  it.each([
+    ["a footer missing Enter confirm", replaceLast(consent, " · Enter confirm", "")],
+    ["Enter named as next", replaceLast(consent, "Enter confirm", "Enter next")],
+    ["arrows named as scroll", replaceLast(consent, "choose", "scroll")],
+    ["a plain (unpainted) footer", replaceLast(consent, "\x1b[0m\x1b[38;2;127;127;127m↑↓", "↑↓")],
+    ["a plain title row", replaceLast(consent, "\x1b[0m\x1b[1m\x1b[38;2;157;157;157mReview consent\x1b[0m", "Review consent")],
+    ["a second pointer", replaceLast(consent, "  2. Skip", "→ 2. Skip")],
+    ["no pointer", replaceLast(consent, "→ 1. Review", "  1. Review")],
+    ["noncontiguous numbers", replaceLast(consent, "  3. Review and", "  5. Review and")],
+    ["a row after the footer", `${consent}\r\n$ `],
+    ["a row of prose between options and footer", replaceLast(consent, "\r\n\r\n\x1b[0m\x1b[38;2;127;127;127m↑↓", "\r\nmore prose here\r\n\r\n\x1b[0m\x1b[38;2;127;127;127m↑↓")],
+  ])("stays raw: %s", (_name, text) => {
+    expect(detectPiQuestion(linesOf(text))).toBeNull();
+    expect(piAdapter.buildBlocks(linesOf(text)).every((b) => b.kind === "raw")).toBe(true);
+  });
+
+  it("keeps the Escape card when only the Enter hint is missing, and never types", () => {
+    const lines = linesOf(replaceLast(consent, " · Enter confirm", ""));
+    expect(piModalOnScreen(lines)).toBe(true);
+    expect(piAdapter.composerReady?.(lines)).toBe(false);
+  });
+
+  it("stays raw when the same rows are quoted in agent prose above pi's real editor", () => {
+    const dialog = consent.slice(consent.lastIndexOf("Review consent") - 20);
+    const editor = load("pi--v110-idle.txt");
+    const quoted = [...linesOf(dialog), ...editor];
+    expect(detectPiQuestion(quoted)).toBeNull();
+    expect(piAdapter.buildBlocks(quoted).every((b) => b.kind === "raw")).toBe(true);
+    expect(piAdapter.composerReady?.(quoted)).toBe(true);
+  });
+
+  it("stays raw when the same rows are quoted with a plain footer at the end of the screen", () => {
+    const plainFooter = replaceLast(consent, "\x1b[0m\x1b[38;2;127;127;127m↑↓", "↑↓");
+    expect(detectPiQuestion(linesOf(plainFooter))).toBeNull();
+    expect(piModalOnScreen(linesOf(plainFooter))).toBe(false);
   });
 });
 
@@ -933,5 +1062,157 @@ describe("transcript text above a real frame", () => {
     expect(piAdapter.extractInputDraft(lines)).toBeNull();
     expect(piAdapter.modalOnScreen?.(lines)).toBe(true);
     expect(actual(lines)).toBe(plan);
+  });
+});
+
+describe("a pi question whose key hint a narrow pane wrapped", () => {
+  const RAW_NARROW = raw("pi--v0871-question-narrow.txt");
+  const HINT_NARROW = " \x1b[0m\x1b[38;2;102;102;102m↑↓ navigate • Enter to select • Esc to cancel\x1b[0m";
+  const dim = (text: string) => ` \x1b[0m\x1b[38;2;102;102;102m${text}\x1b[0m`;
+  const GATE_NARROW = raw("pi--v0871-permission-gate-narrow.txt");
+
+  function questionModel(text: string): PromptModel | null {
+    const found = detectPiQuestion(linesOf(text));
+    return found?.kind === "prompt-select" ? found.model : null;
+  }
+
+  it("reads a two-space footer wrapped between two hints, Escape included", () => {
+    expect(RAW_NARROW).toContain(HINT_NARROW);
+    const wrapped = RAW_NARROW.replace(
+      HINT_NARROW,
+      `${dim("↑↓ navigate  enter select")}\n${dim("escape/ctrl+c cancel")}`,
+    );
+    const model = questionModel(wrapped);
+    expect(model?.options.at(-1)).toMatchObject({ label: "Cancel", keys: ["Escape"] });
+    expect(model?.options.map((o) => o.label).slice(0, 3)).toEqual(["Red", "Green", "Blue"]);
+  });
+
+  it("still reads a footer wrapped inside one hint, as before", () => {
+    const wrapped = RAW_NARROW.replace(
+      HINT_NARROW,
+      `${dim("↑↓ navigate • Enter to")}\n${dim("select • Esc to cancel")}`,
+    );
+    expect(questionModel(wrapped)?.options.at(-1)).toMatchObject({ label: "Cancel", keys: ["Escape"] });
+  });
+
+  it("reads pi's own selector with its hint wrapped below 47 columns, as the permission gate draws it", () => {
+    const rows = GATE_NARROW.split(/\r?\n/);
+    const hint = rows.findIndex((r) => r.includes("escape/ctrl+c"));
+    const cut = rows[hint]!.indexOf("  \x1b[0m\x1b[38;2;102;102;102mescape");
+    expect(cut).toBeGreaterThan(0);
+    rows.splice(hint, 1, rows[hint]!.slice(0, cut), ` ${rows[hint]!.slice(cut + 2)}`);
+    const model = questionModel(rows.join("\n"));
+    expect(model?.options.map((o) => [o.label, o.keys])).toEqual([
+      ["Yes", ["Enter"]],
+      ["No", ["Down", "Enter"]],
+      ["Cancel", ["Escape"]],
+    ]);
+  });
+});
+
+// M78 spec 07: herdr-core's `terminal.read` hands Collie the screen with no styling at all, so every
+// paint test stands for a text fact there (ask.ts header, "A READ WITH NO STYLING"). Styled reads keep
+// every paint test, which the rest of this file pins.
+describe("a read with no styling (herdr-core)", () => {
+  const plain = (name: string) => linesOf(stripSgr(raw(name)));
+  const CORE = "pi--v130-core-question--w120.txt";
+  const text = (row: string): StyledLine => ({ segments: [{ text: row, style: {}, muted: false }] });
+
+  it("lifts pi 1.3.0's question through a core bridge with its options, the pointer's walk and Escape", () => {
+    const model = prompt(load(CORE));
+    expect(model.question).toBe("Which colour should the lab use?");
+    expect(model.options.map((o) => [o.label, o.keys])).toEqual([
+      ["Red", ["Enter"]],
+      ["Green", ["Down", "Enter"]],
+      ["Blue", ["Down", "Down", "Enter"]],
+      ["Cancel", ["Escape"]],
+    ]);
+    expect(model.feedback?.purpose).toBe("free-text");
+    expect(piAdapter.modalOnScreen?.(load(CORE))).toBe(true);
+    expect(piAdapter.composerReady?.(load(CORE))).toBe(false);
+  });
+
+  it("gives the same ask hash on two reads of the same screen, and reads as an ask on the Surface", () => {
+    const first = liftDialog(piAdapter.buildBlocks(load(CORE)));
+    const second = liftDialog(piAdapter.buildBlocks(load(CORE)));
+    expect(first?.hash).toBeDefined();
+    expect(second?.hash).toBe(first?.hash);
+    const read = readScreen(load(CORE), "pi", idleFor("pi"));
+    expect(modalWord(read.surface.modal)).toBe("ask");
+    expect(askOf(read.surface.modal)?.options.map((o) => o.label)).toEqual(["Red", "Green", "Blue", "Cancel"]);
+  });
+
+  it.each([
+    "pi--v0871-question-single.txt",
+    "pi--v110-question-single-moved.txt",
+    "pi--v0871-permission-gate.txt",
+    "pi--omo-v5130-single-described.txt",
+    "pi--v110-questionnaire-single.txt",
+    "pi--v130-gentle-choice.txt",
+  ])("%s stripped lifts the styled read's question, options, keys and signatures", (name) => {
+    const styled = prompt(load(name));
+    const stripped = prompt(plain(name));
+    expect(stripped).toEqual(styled);
+  });
+
+  it("lifts a tab page of several questions uncaptioned, the current chip being a colour only", () => {
+    for (const name of ["pi--v110-questionnaire-tabs.txt", "pi--v110-questionnaire-tabs-second-moved.txt"]) {
+      const styled = prompt(load(name));
+      const stripped = prompt(plain(name));
+      expect(styled.caption, name).toBeDefined();
+      expect(stripped.caption, name).toBeUndefined();
+      expect({ ...stripped, caption: styled.caption }, name).toEqual(styled);
+    }
+  });
+
+  it("lifts the Submit page as the styled read's review: a strip with no option row under it", () => {
+    for (const name of ["pi--v0871-questionnaire-submit-ready.txt", "pi--v110-questionnaire-submit-ready.txt"]) {
+      expect(detectPiQuestion(plain(name)), name).toEqual(detectPiQuestion(load(name)));
+    }
+    // An incomplete Submit page stays raw stripped as styled.
+    expect(detectPiQuestion(plain("pi--v110-questionnaire-submit-incomplete.txt"))).toBeNull();
+  });
+
+  it("keeps a quoted dialog raw: above the editor, and above a shell after pi exited", () => {
+    for (const name of ["pi--prose-quoted-dialog-above-editor.txt", "pi--prose-quoted-omo-dialog-above-editor.txt", "pi--prose-quoted-dialog-in-tool-result.txt", "pi--prose-quoted-dialog-then-shell.txt"]) {
+      expect(detectPiQuestion(plain(name)), name).toBeNull();
+      expect(piAdapter.buildBlocks(plain(name)).every((b) => b.kind === "raw"), name).toBe(true);
+    }
+  });
+
+  it("refuses pi's status rows once a shell prompt or two output rows stand under them", () => {
+    const core = load(CORE);
+    expect(detectPiQuestion(core)?.kind).toBe("prompt-select");
+    for (const shell of ["$ ", "alice@box:~/project$ ", "# ", "❯ "]) {
+      expect(detectPiQuestion([...core, text(shell)]), shell).toBeNull();
+    }
+    expect(detectPiQuestion([...core, text("● Wrote the file"), text("  ⎿  done")])).toBeNull();
+    // The limit, stated: one plain row under stock pi's two is an extension's status row, as on a
+    // styled read (paintedStatus lets the last row be plain), so one output row there still lifts.
+    expect(detectPiQuestion([...core, text("● Wrote the file")])?.kind).toBe("prompt-select");
+  });
+
+  it("refuses status rows that are not pi's own: no working directory first, or no session cost", () => {
+    const core = load(CORE);
+    const bottom = core.findLastIndex((line) => /^─{8,}$/.test(lineText(line).trimEnd()));
+    const frame = core.slice(0, bottom + 1);
+    expect(detectPiQuestion([...frame, text("/tmp/project"), text("↑10 ↓20 $0.000 0.0%/200k (auto)")])?.kind).toBe("prompt-select");
+    expect(detectPiQuestion([...frame, text("↑10 ↓20 $0.000 0.0%/200k (auto)")])).toBeNull();
+    expect(detectPiQuestion([...frame, text("/tmp/project"), text("↑10 ↓20 0.0%/200k (auto)")])).toBeNull();
+    expect(detectPiQuestion([...frame, text("Agent resumed"), text("done")])).toBeNull();
+    // Nothing under the bottom rule is a frame on a styled read too (issue 455): the same limit.
+    expect(detectPiQuestion(frame)?.kind).toBe("prompt-select");
+  });
+
+  it("takes no key hints typed into a draft for a dialog", () => {
+    const typed = replaceLast(stripSgr(raw("pi--v0871-draft.txt")), "collie stock pi draft probe", "see this:\r\n ↑↓ navigate • Enter to select • Esc to cancel");
+    expect(detectPiQuestion(linesOf(typed))).toBeNull();
+  });
+
+  it("states what stays paint-only: a frameless dialog, and an extension footer with no session cost", () => {
+    expect(detectPiQuestion(load("pi--v130-gentle-review-consent.txt"))?.kind).toBe("prompt-select");
+    expect(detectPiQuestion(plain("pi--v130-gentle-review-consent.txt"))).toBeNull();
+    expect(detectPiQuestion(load("pi--v110-single.txt"))?.kind).toBe("prompt-select");
+    expect(detectPiQuestion(plain("pi--v110-single.txt"))).toBeNull();
   });
 });

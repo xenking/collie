@@ -50,7 +50,7 @@ write it as the sentence an operator reads there. Do not touch the three version
 
 **A release needs something to ship.** Before you cut one, read `git log --oneline <last tag>..HEAD`.
 If the range holds only docs, tests and chores, do not release: the docs go out with the next real
-release, and the site's docs sync follows it. A docs-only release makes every self-updating lane
+release or on the docs line (below), and the site's docs sync follows either. A docs-only release makes every self-updating lane
 and crew member update for nothing. Never offer a release as "put the docs live"; name it as a
 release. 1.14.2 was cut this way on 2026-09-28.
 
@@ -125,8 +125,19 @@ release. 1.14.2 was cut this way on 2026-09-28.
    set: `bunx playwright test -c e2e/rig/playwright.config.ts` (*Browser tests*; the prerequisites are
    in `web/e2e/rig/README.md`). It starts a scratch bridge and Herdr with real Claude Code, pi and omp,
    and takes about 5 minutes. Then run the crew leg, `bunx playwright test -c e2e/rig/crew.config.ts`:
-   a lead and a member, about 4 minutes. All thirty-four cases (twenty-seven solo, seven on the crew leg)
+   a lead and a member, about 4 minutes. All forty-one cases (thirty-four solo, seven on the crew leg)
    must pass on the first tap. A failed case holds the tag, and so does a case that was not reached.
+
+   **Every tag, a patch tag too, also runs the legs on herdr-core** (M79, replay, no model turn on
+   recorded versions): the solo leg on the core, `make browser-leg DIR=<release worktree>
+   MUX=herdr-core` (about 30 minutes; that target also runs the crew leg after it, with both machines
+   on the core), and the crew leg with its member on the core, `make browser-leg-crew DIR=<release
+   worktree> MUX=herdr,herdr-core` (the lead on Herdr, the member on the core, about 4 minutes). The
+   same rule holds: every core case passes on the first tap, and a case that failed or was not reached
+   holds the tag. **On the core a red Claude case cascades:** Claude's recordings replay as one ordered
+   session, so after the first red Claude case every later Claude case fails on a recording mismatch,
+   and only the first one says anything about the core. The limits that remain are in `HC_API.md`
+   ("What stays an upstream ask") and in the rig README ("On herdr-core").
 
 **A PR from a fork is the exception: leave all four files alone.** Bump nothing, add no CHANGELOG
 line — send the functional commits only. The version is the maintainer's to pick, because it depends
@@ -149,11 +160,20 @@ is nothing to record. Touch one of them *and* the code under it and the ordinary
 source file is what the line is about. This is enforced two ways, but **you are the first line — do
 it as part of the change, not after**:
 
-**A docs change reaches colliepwa.dev only with a release.** Collie's `release.yml` tells the website
-on every tag, and the website re-quotes `docs/*.md` at the newest published release — so a doc-only
-fix pushed to `main` and not released sits unpublished, and the website's daily cron will not pick it
-up either. To publish sooner, run the website's sync by hand against a ref:
-`gh workflow run sync-docs.yml -R AltanS/collie-website -f ref=main`.
+**A docs change reaches colliepwa.dev with the next release, or sooner on the docs line.** Collie's
+`release.yml` tells the website on every tag, and the website re-quotes `docs/*.md` at the newest
+published release. A doc-only fix that sits on `main` waits for that release. To publish it sooner,
+put it on the docs line: a branch `docs/<newest tag>` (for example `docs/v1.24.1`) that the site
+quotes in place of the tag. Run `bun scripts/docs-line.ts <commit>...` (add `--dry-run` to see the
+result first). It cherry-picks the commits with `-x` onto the branch and pushes it. Two guards hold,
+in the script and again on the site: every path is under `docs/` or is `README.md`, and the tag is an
+ancestor of the branch head. The human rule is yours: put only a docs commit that describes the
+RELEASED version on the line. Docs for a feature that has not shipped stay on `main` until its
+release, or the site describes something users cannot run. The site syncs within minutes of the push
+and again in its daily run. When the next release is tagged, the site follows the new tag and
+ignores the old branch; the script prints the command to delete it. Do not use
+`gh workflow run sync-docs.yml -R AltanS/collie-website -f ref=main` any more: it quotes `main` for
+one run, and the next cron reverts it.
 
 - `scripts/check-version.sh` runs inside `collie build` (a release can't build while versions
   disagree).
@@ -400,8 +420,11 @@ component, not a spec. On 2026-10-17 the specs that did not pass that test moved
   crew leg** (`-c e2e/rig/crew.config.ts`): the same phone against a lead and a member, for the walky
   talky cases that need a crew. It is **the gate before
   every release tag**, and **the proof for a change to a harness reader, the Surface, the Send
-  Protocol or the ask code**: run it on the branch, and all thirty-four cases (twenty-seven solo, seven
-  on the crew leg) pass on the first tap. A
+  Protocol or the ask code**: run it on the branch, and all forty-one cases (thirty-four solo, seven
+  on the crew leg) pass on the first tap. Every tag also runs the solo leg on herdr-core
+  (`make browser-leg DIR=... MUX=herdr-core`) and the crew leg with its member on the core
+  (`make browser-leg-crew DIR=... MUX=herdr,herdr-core`), and a change to a harness reader, the Surface,
+  the Send Protocol or the ask code runs both solo legs, Herdr and herdr-core. A
   unit test cannot show that a tap works on a real screen. `web/e2e/rig/nightly.ts` also runs it every
   night on `origin/main`, once for each main commit and set of agent versions. The README beside it
   (*When it runs*) has the rules and the cost.
@@ -506,7 +529,8 @@ lint guard, the crew-wire guard or the `flake.lock` guard.
   followed by `revalidator.revalidate()`. There is **no TanStack Query** — don't reintroduce it.
 - Routes (`web/src/router.tsx`): `/`, `/space/:spaceId`, `/settings` (an INDEX of four sections:
   `/settings/appearance`, `/settings/device`, `/settings/alerts`, `/settings/system`), `/pane/:paneId`,
-  `/pane/:paneId/history`, `/pane/:paneId/changes` and `/space/:spaceId/changes` (both matched as
+  `/pane/:paneId/history`, `/pane/:paneId/zoom` (the zoomed output, a child of the pane route,
+  so the pane stays mounted under it), `/pane/:paneId/changes` and `/space/:spaceId/changes` (both matched as
   `changes/*`, so the commit view `…/changes/commit` and a folder or file of the tree `…/changes/files`
   share the screen's route; the tree's root is `…/changes` itself, ADR 0083). The router
   instance is module-scoped so it keeps its location.
@@ -579,7 +603,7 @@ lint guard, the crew-wire guard or the `flake.lock` guard.
   and the length, not the line ([ADR 0095](./.adr/0095-one-off-commands-and-their-history.md)).
 - **Every user-facing string goes through `t()`/`tn()` from `@/lib/i18n`**, and a component that
   calls them subscribes via `useLocale()` so it re-renders on a locale (or lazy-dictionary) change.
-  `messages/en.ts` is the source of truth; all six dictionary files change together, enforced by
+  `messages/en.ts` is the source of truth; all twelve dictionary files change together, enforced by
   `tsc`. Not translated: terminal/agent output, quick replies, menu/dialog labels the screen printed,
   key caps, crew role names, push notification bodies, service-worker strings, crew-link errors, and
   the slash-command descriptions in `web/src/lib/agent-commands.ts` (another tool's vocabulary —
@@ -639,9 +663,17 @@ lint guard, the crew-wire guard or the `flake.lock` guard.
   may read that row as one line, and no mid-flight identity may reach above the question.
   Feedback is sent as a verified sequence, never a keystroke — the ground truth for every state is
   [`PLAN_FEEDBACK_NOTES.md`](./web/src/lib/grammar/PLAN_FEEDBACK_NOTES.md); re-walk it before touching
-  `harness/claude/prompt-select.ts` or `lib/prompt-action.ts`. AskUserQuestion's "Type something."
-  row and a permission dialog's amend note are the same kind of field, found by position, modelled
-  with the `free-text` purpose, and never typed into (same notes file, 2026-09-26 section).
+  `harness/claude/prompt-select.ts` or `lib/prompt-action.ts`. A permission dialog's amend note is
+  the same kind of field, found by position, modelled with the `free-text` purpose, and never typed
+  into (same notes file, 2026-09-26 section).
+- **AskUserQuestion's "Type something." field IS typed into, by one recipe** (`lib/answer-field.ts`,
+  [ADR 0113](./.adr/0113-an-askuserquestion-answer-is-typed-into-its-field.md)), on a single
+  question, a wizard step and a multi-select question. Its digit is sent only while the field is
+  EMPTY: on a filled field it submits the held text. A filled field is reached by a verified
+  `Up`/`Down` walk and cleared with `ctrl+u ctrl+k` rounds only while it holds exactly what the
+  person saw. The ground truth is
+  [`ASK_FIELD_NOTES.md`](./web/src/lib/grammar/ASK_FIELD_NOTES.md); re-walk it before touching the
+  recipe. Other harnesses' free-text rows (Grok, pi, opencode) stay `free-text` and untyped.
 - **The phone parses what the phone draws; the bridge parses only what it must act on alone.** Every
   pane grammar is client-side, under `web/src/lib/harness/`. The bridge holds one,
   `extractClaudeSessionName`, and only because the bridge itself consumes it, for a label that must

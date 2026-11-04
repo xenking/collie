@@ -826,6 +826,10 @@ describe("list: entries git ignores carry ignored: true", () => {
     mkdirSync(repoRoot, { recursive: true });
     mkdirSync(plainRoot, { recursive: true });
     git(repoRoot, "init", "-q");
+    // Keep the fixture's rules independent of the operator's global ignore patterns.
+    const excludes = join(ibase, "empty-excludes");
+    writeFileSync(excludes, "");
+    git(repoRoot, "config", "core.excludesFile", excludes);
     put(
       join(repoRoot, ".gitignore"),
       ["node_modules/", "build/", "*.log", "!keep.log", "tracked.txt", "-dash*", "*.tmp", "vendor-clone/", ""].join("\n"),
@@ -858,6 +862,7 @@ describe("list: entries git ignores carry ignored: true", () => {
     const inner = join(repoRoot, "vendor-clone");
     mkdirSync(inner, { recursive: true });
     git(inner, "init", "-q");
+    git(inner, "config", "core.excludesFile", excludes);
     put(join(inner, ".gitignore"), "*.cache\n");
     put(join(inner, "x.cache"));
     put(join(inner, "x.log"));

@@ -43,6 +43,8 @@ interface KeyFate {
 const KEYS = new Map<string, KeyFate>([
   // ── Wiped: what a pairing leaves behind ──
   ["collie:draft:", { area: "local", prefix: true, fate: "wiped", why: "unsent words typed under the pairing" }],
+  // The draft store's second version (lib/drafts.ts, PR 560); under the first one's prefix, so its wipe covers both.
+  ["collie:draft:v2:", { area: "local", prefix: true, fate: "wiped", why: "unsent words typed under the pairing" }],
   // The token and the push endpoint are named by constants, so the scan sees them through those.
   ["collie:device-token", { area: "local", prefix: false, fate: "wiped", why: "the credential itself" }],
   ["collie:push-endpoint", { area: "local", prefix: false, fate: "wiped", why: "names this phone's push endpoint" }],
@@ -67,11 +69,17 @@ const KEYS = new Map<string, KeyFate>([
   ["collie:zen-enabled:v1", { area: "local", prefix: false, fate: "kept", why: "preference" }],
   ["collie:auto-zen-enabled:v1", { area: "local", prefix: false, fate: "kept", why: "preference" }],
   ["collie:pins:v1", { area: "local", prefix: false, fate: "kept", why: "pinned pane ids, no content" }],
+  ["collie:report-episodes:v1", { area: "local", prefix: false, fate: "kept", why: "failed-send episodes for a report: pane ids, request ids, outcome and reason codes, no content (ADR 0123)" }],
+  ["collie:wide-layout:v1", { area: "local", prefix: false, fate: "kept", why: "large-screen columns per space: pane addresses and widths, no content (ADR 0120)" }],
+  ["collie:wide-sidebar:v1", { area: "local", prefix: false, fate: "kept", why: "preference" }],
+  ["collie:wide-layout-mode:v1", { area: "local", prefix: false, fate: "kept", why: "preference: Auto or Off for the large-screen layout (ADR 0120)" }],
   ["collie:pin-hint:v1", { area: "local", prefix: false, fate: "kept", why: "a dismissed hint" }],
   ["collie:masked-hint:v1", { area: "local", prefix: false, fate: "kept", why: "a dismissed hint" }],
+  ["collie:pane-nav-hint:v1", { area: "local", prefix: false, fate: "kept", why: "the Two fingers first-arm hint was shown (ADR 0121)" }],
   ["collie:hidden-machines:v1", { area: "local", prefix: false, fate: "kept", why: "machine names hidden here" }],
   ["collie:mirror-native:", { area: "local", prefix: true, fate: "kept", why: "a per-pane colour choice" }],
   ["collie:tour:v1", { area: "local", prefix: false, fate: "kept", why: "the tour was seen" }],
+  ["collie:diff-comments:v1:", { area: "session", prefix: true, fate: "wiped", why: "the Changes batch of diff comments: quoted lines and the notes on them" }],
   ["collie:new-sheet:again:v1", { area: "local", prefix: false, fate: "wiped", why: "the last start per machine names its folders" }],
   ["collie:no-prompts-confirmed:v1", { area: "local", prefix: false, fate: "wiped", why: "the per-device No prompts confirms name machines and command lines" }],
   ["collie:new-page:kind:v1", { area: "local", prefix: false, fate: "kept", why: "Agent or Command per machine, one word, no folder" }],

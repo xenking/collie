@@ -93,6 +93,9 @@ export function TabActionsSheet({
       const res = await api.renameTab(tab.tabId, trimmed, scope);
       if (res.ok) {
         setStatus(t("space.tab.renamed"), "success");
+        // The same catch-up as a close: the strip should not wait out an idle-timed gap to show
+        // the new name (pane-actions-sheet.tsx says why the revalidate alone can read the old one).
+        stampTopology();
         onRenamed();
         onClose();
       } else {
@@ -180,6 +183,12 @@ export function TabActionsSheet({
               label={t("space.tab.rename")}
               onClick={() => setMode("rename")}
             />
+          )}
+          {/* Rename and Close tab are never neighbours: Close ends every pane in the tab, so it sits
+              last, behind a divider and a gap of its own (a thumb aiming at Rename must not reach it).
+              The divider only draws when both rows do. */}
+          {canRename.capable && canClose.capable && (
+            <hr data-slot="tab-actions-divider" className="my-2 border-border" />
           )}
           {canClose.capable && (
             <DestructiveActionRow

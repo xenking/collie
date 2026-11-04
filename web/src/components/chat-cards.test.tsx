@@ -69,6 +69,12 @@ describe("groupRuns", () => {
     expect(groupRuns([x("a"), agent, x("b")], 1).map((g) => g.length)).toEqual([1, 1, 1]);
   });
 
+  it("never folds a step that returned a picture", () => {
+    const shot = tool({ kind: "read", path: "/shot.png" }, { id: "shot", image: "data:image/png;base64,AAAA" });
+    expect(groupRuns([t("a"), t("b"), shot, t("c")]).map((g) => g.map((i) => i.id).join(""))).toEqual(["a", "b", "shot", "c"]);
+    expect(groupRuns([shot], 1).map((g) => g.length)).toEqual([1]);
+  });
+
   it("never folds the agent's own walky talky send or reply, but folds who, status and inbox", () => {
     const x = (id: string): ChatItem => tool({ kind: "execute", command: "ls" }, { id });
     const walky = (id: string, command: string): ChatItem => tool({ kind: "execute", command }, { id });
@@ -586,5 +592,82 @@ describe("ToolCard paths", () => {
     const links = [...container.querySelectorAll("pre a")];
     expect(links.map((a) => a.getAttribute("href"))).toEqual(["/pane/w1%3Ap1/changes/files?path=src%2Fcart.ts&line=3"]);
     expect(container.querySelector("pre")!.textContent).toBe(output);
+  });
+});
+
+describe("a plan card", () => {
+  const plan: Extract<ChatToolCall, { kind: "plan" }> = {
+    kind: "plan",
+    name: "todo",
+    tasks: [
+      { title: "Write the ADR", status: "done" },
+      { title: "Bridge reducer", status: "in_progress" },
+      { title: "Web card", status: "pending" },
+      { title: "Needs a decision", status: "blocked" },
+      { title: "Old idea", status: "dropped" },
+    ],
+  };
+
+  it("draws the label, done/total and one row per task with its status glyph", () => {
+    render(<ToolCard tool={plan} status="done" />);
+    expect(screen.getByText("Plan")).toBeInTheDocument();
+    expect(screen.getByText("1/5")).toBeInTheDocument();
+    const rows = screen.getAllByRole("listitem");
+    expect(rows.map((r) => r.textContent)).toEqual(plan.tasks.map((x) => x.title));
+    expect(rows.map((r) => r.getAttribute("data-status"))).toEqual(["done", "in_progress", "pending", "blocked", "dropped"]);
+    expect(screen.getByRole("img", { name: "done" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "in progress" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "blocked" })).toBeInTheDocument();
+  });
+
+  it("strikes a dropped task through, in the content face", () => {
+    render(<ToolCard tool={plan} status="done" />);
+    const dropped = screen.getByText("Old idea");
+    expect(dropped).toHaveClass("line-through", "font-content");
+    expect(screen.getByText("Web card")).not.toHaveClass("line-through");
+  });
+
+  it("draws a short muted line for an empty list", () => {
+    render(<ToolCard tool={{ ...plan, tasks: [] }} status="done" />);
+    expect(screen.getByText("No tasks")).toHaveClass("text-muted-foreground");
+    expect(screen.queryByRole("listitem")).toBeNull();
+  });
+
+  it("renders a task title as text", () => {
+    render(<ToolCard tool={{ ...plan, tasks: [{ title: "<img src=x onerror=alert(1)>", status: "pending" }] }} status="done" />);
+    expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
+    expect(document.querySelector("img[src]")).toBeNull();
+  });
+
+  it("reads as the plan label and done/total in a folded run, and counts among the other steps", () => {
+    expect(stepLine(plan)).toEqual({ verb: "Plan", subject: "1/5", mono: false });
+    const items: ChatItem[] = [
+      tool(plan, { id: "a" }),
+      tool({ kind: "read", path: "/a.ts" }, { id: "b" }),
+      tool({ kind: "read", path: "/b.ts" }, { id: "c" }),
+    ];
+    render(<ToolGroup items={items} />);
+    expect(screen.getByText("2 reads, 1 other step")).toBeInTheDocument();
+  });
+});
+
+describe("a background command", () => {
+  it("shows a background marker in its head, and none on an ordinary command", () => {
+    const { rerender } = render(<ToolCard tool={{ kind: "execute", command: "sleep 9", background: true }} status="running" />);
+    expect(screen.getByText("background")).toBeInTheDocument();
+    rerender(<ToolCard tool={{ kind: "execute", command: "sleep 9" }} status="running" />);
+    expect(screen.queryByText("background")).toBeNull();
+  });
+});
+
+describe("a quiet other tool", () => {
+  it("is a muted line: lower-contrast label and summary, still one row", () => {
+    const { container, rerender } = render(<ToolCard tool={{ kind: "other", name: "mem_save", summary: "saved a note", quiet: true }} status="done" />);
+    expect(container.querySelector("[data-quiet]")).not.toBeNull();
+    expect(screen.getByText("mem_save")).toHaveClass("opacity-60");
+    expect(screen.getByText("saved a note")).toHaveClass("opacity-60");
+    rerender(<ToolCard tool={{ kind: "other", name: "mem_save", summary: "saved a note" }} status="done" />);
+    expect(container.querySelector("[data-quiet]")).toBeNull();
+    expect(screen.getByText("mem_save")).not.toHaveClass("opacity-60");
   });
 });

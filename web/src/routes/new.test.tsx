@@ -1,3 +1,4 @@
+import { readAgentLaunch } from "@/lib/agent-startup";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
@@ -256,6 +257,45 @@ describe("the New page: the address", () => {
   });
 });
 
+describe("the New page: ?beside= (an agent in this space)", () => {
+  const beside = `/new?beside=${encodeURIComponent("w1:p1")}`;
+
+  it("starts on that pane's folder, with no worktree block and no machine select, titled for the space", async () => {
+    serveLaunchers();
+    mount({ entries: [beside], agents: [PANE], servers: roster });
+    expect(await screen.findByRole("heading", { name: "New in this space" })).toBeInTheDocument();
+    await agentSelect();
+    expect(screen.getByRole("textbox", { name: "Folder" })).toHaveValue("/home/op/src/app");
+    expect(screen.queryByRole("switch", { name: /New worktree/ })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Host" })).toBeNull();
+  });
+
+  it("sends the pane as the launch route's paneId, with the request id, and lands on the new pane as a tab", async () => {
+    serveLaunchers();
+    const bodies: unknown[] = [];
+    serveLaunch(bodies);
+    const router = mount({ entries: [beside], agents: [PANE] });
+    await waitFor(async () => expect(await agentSelect()).toHaveValue("harness:claude"));
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/pane/w9%3Ap1"));
+    expect(bodies).toEqual([
+      { harness: "claude", cwd: "/home/op/src/app", paneId: "w1:p1", requestId: expect.stringMatching(/^[0-9a-f-]{36}$/) },
+    ]);
+  });
+
+  it("a pane that is gone leaves the plain page: a new space, no paneId", async () => {
+    serveLaunchers();
+    const bodies: unknown[] = [];
+    serveLaunch(bodies);
+    mount({ entries: [`/new?beside=${encodeURIComponent("w9:p9")}`], agents: [PANE] });
+    await waitFor(async () => expect(await agentSelect()).toHaveValue("harness:claude"));
+    expect(screen.getByRole("heading", { name: "New" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).not.toHaveProperty("paneId");
+  });
+});
+
 describe("the New page: Agent and Command", () => {
   it("Agent lists every agent the machine knows; one not installed stays, disabled, with its reason in brackets", async () => {
     serveLaunchers();
@@ -448,6 +488,7 @@ describe("the New page: Start", () => {
     expect(summary()).toHaveTextContent("Codex in ~/src/app");
     await userEvent.click(screen.getByRole("button", { name: "Start" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/pane/w9%3Ap1"));
+    expect(readAgentLaunch(router.state.location.state, "w9:p1")?.harness).toBe("codex");
     expect(bodies).toEqual([{ harness: "codex", cwd: "~/src/app", requestId: expect.stringMatching(/^[0-9a-f-]{36}$/) }]);
     // The page was REPLACED by the pane, so Back from the pane does not land on a used form.
     await router.navigate(-1);
@@ -480,6 +521,7 @@ describe("the New page: Start", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Again: Codex/ }));
     await waitFor(() => expect(bodies).toHaveLength(2));
     expect(bodies[1]).toMatchObject({ harness: "codex" });
+    await waitFor(() => expect(readAgentLaunch(router.state.location.state, "w9:p1")?.harness).toBe("codex"));
   });
 
   it("an older Collie starts Shell through its space create", async () => {

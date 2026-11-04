@@ -10,6 +10,7 @@ import {
   cmdHooksStatus,
   cmdHooksUninstall,
   HOLD_FLAG,
+  hooksAreBehind,
   HOOK_MARKER,
   HOOK_MARKER_PREFIX,
   type HooksDeps,
@@ -19,7 +20,9 @@ import {
   serializeSettings,
   uninstallDocument,
 } from "./hooks.ts";
-import { codexConfigPath, installNotify, notifyState } from "./codex-hooks.ts";
+import { codexConfigPath, installNotify, notifyState, scanTopLevel } from "./codex-hooks.ts";
+import { wrapCommand } from "./statusline.ts";
+import { HOST } from "../bridge/host.ts";
 import { EXIT } from "./io.ts";
 import type { Environment } from "./context.ts";
 import { collieBinary } from "./unit.ts";
@@ -50,6 +53,9 @@ const COMMAND = `${OWN} beacon emit ${HOOK_MARKER}`;
 /** A second Claude profile, named by `COLLIE_TRANSCRIPT_ROOT`, and the settings file beside its journal. */
 const OPS_PROFILE = join("/srv", "ops");
 const OPS_SETTINGS = join(OPS_PROFILE, "settings.json");
+/** A profile named by `CLAUDE_CONFIG_DIR` alone, the way Claude Code is pointed at it. */
+const WORK_PROFILE = join("/srv", "work-profile");
+const WORK_SETTINGS = join(WORK_PROFILE, "settings.json");
 /** Where a stow/chezmoi-style `~/.claude` link points. */
 const DOTFILES = join("/dotfiles", "claude");
 /** A path segment that only a version directory has — the hook command must never contain it. */
@@ -84,6 +90,16 @@ describe("the targets", () => {
       { dir: work, path: join(work, "settings.json") },
       { dir: OPS_PROFILE, path: OPS_SETTINGS },
     ]);
+  });
+
+  test("are the CLAUDE_CONFIG_DIR profile alone when the variable is set, because Claude reads only that one", () => {
+    expect(claudeSettingsTargets(context({ CLAUDE_CONFIG_DIR: WORK_PROFILE }))).toEqual([{ dir: WORK_PROFILE, path: WORK_SETTINGS }]);
+  });
+
+  test("ignore a CLAUDE_CONFIG_DIR that is relative or empty, and keep ~/.claude", () => {
+    for (const value of ["", "  ", "profiles/work"]) {
+      expect(claudeSettingsTargets(context({ CLAUDE_CONFIG_DIR: value }))).toEqual([{ dir: CLAUDE_DIR, path: SETTINGS }]);
+    }
   });
 
   test("never name a project settings file, and never repeat one", () => {
@@ -356,6 +372,17 @@ describe("install", () => {
     expect(d.files.entries.has(OPS_SETTINGS)).toBe(true);
   });
 
+  test("with CLAUDE_CONFIG_DIR set, writes that profile and touches nothing under ~/.claude", () => {
+    const mine = serializeSettings({ model: "opus" });
+    const d = deps({ env: { CLAUDE_CONFIG_DIR: WORK_PROFILE }, files: { [SETTINGS]: mine } });
+    expect(cmdHooksInstall(d, ["claude"])).toBe(EXIT.OK);
+    expect(d.files.entries.has(WORK_SETTINGS)).toBe(true);
+    expect(d.files.entries.get(SETTINGS)!.text).toBe(mine);
+    // No backup, no temp file, no new file beside the seeded one, and no operation names the folder.
+    expect([...d.files.entries.keys()].filter((key) => key.includes(".claude"))).toEqual([posixKey(SETTINGS)]);
+    expect(d.files.ops.filter((op) => op.includes(".claude"))).toEqual([]);
+  });
+
   test("refuses a symlinked settings file, untouched, with a remedy", () => {
     const d = deps({ files: { [SETTINGS]: "{}\n" } });
     d.fs.entries.set(SETTINGS, { kind: "symlink", target: join("/elsewhere", "settings.json") });
@@ -504,6 +531,68 @@ describe("codex: the notify setting in config.toml (M56 spec 13)", () => {
     expect(notifyState(after.split("\n"))).toMatchObject({ kind: "theirs", line: 9 });
   });
 
+  test("codex: a multi-line string closed by 3 to 5 quotes is one statement, as TOML defines it (#592)", () => {
+    // Up to two quotes of the content may sit directly before the closing three.
+    const values = [
+      "'''sh -c 'echo \"hi\" \\n' '''",
+      "'''sh -c 'echo hi''''",
+      "'''sh -c ''echo hi'''''",
+      '"""say "hi""""',
+      '"""say ""hi"""""',
+      "'''one line ''' ",
+    ];
+    for (const value of values) {
+      const text = [`helper = ${value}`, 'model = "gpt-6-luna"', "", "[projects.x]", 'trust_level = "trusted"', ""].join("\n");
+      const top = scanTopLevel(text.split("\n"));
+      expect(top).toMatchObject({ ok: true });
+      if (top.ok) {
+        expect(top.statements.map((s) => s.key)).toEqual(["helper", "model"]);
+        expect(top.headers).toEqual([{ line: 3, head: "projects" }]);
+      }
+      expect(installNotify(text, OWN)).toEqual({ text: `${NOTIFY}\n${text}` });
+    }
+  });
+
+  test("codex: the same closing runs work across lines, and the string's own `[` rows stay inside it (#592)", () => {
+    for (const q of ["'''", '"""']) {
+      const text = [`helper = ${q}`, "[not a table]", `ends with a quote${q[0]}${q}`, 'model = "gpt-6-luna"', "[projects.x]", ""].join("\n");
+      const top = scanTopLevel(text.split("\n"));
+      expect(top).toMatchObject({ ok: true });
+      if (top.ok) expect(top.statements.map((s) => s.key)).toEqual(["helper", "model"]);
+    }
+  });
+
+  test("codex: a backslash escapes only the next character in a basic multi-line string (#592)", () => {
+    // `\"` is a quote and not a close; `\\` is a backslash, so the three quotes after it do close.
+    expect(scanTopLevel(['a = """x \\""" y"""', 'b = 1'])).toMatchObject({ ok: true });
+    expect(scanTopLevel(['a = """x \\\\"""', 'b = 1'])).toMatchObject({ ok: true, statements: [{ key: "a" }, { key: "b" }] });
+    // A literal string has no escapes: the backslash is content and the quotes close.
+    expect(scanTopLevel(["a = '''x \\'''", "b = 1"])).toMatchObject({ ok: true, statements: [{ key: "a" }, { key: "b" }] });
+  });
+
+  test("codex: a run of six or more closing quotes is still refused, and nothing is written (#592)", () => {
+    for (const broken of ["a = '''x''''''\n", 'a = """x""""""\n', "a = '''x'''''''\n"]) {
+      const d = deps({ files: { [CONFIG]: broken } });
+      expect(cmdHooksInstall(d, ["codex"])).toBe(EXIT.FAIL);
+      expect(d.io.stderr.join("\n")).toMatch(/cannot read its TOML at line 1/u);
+      expect(d.files.entries.get(CONFIG)!.text).toBe(broken);
+    }
+    // A string that never closes is refused as before, whatever quotes it holds.
+    expect(scanTopLevel(["a = '''x ''", "b = 1"])).toMatchObject({ ok: false, problem: "a multi-line string with no end" });
+  });
+
+  test("codex: install, repeat and uninstall keep every byte of a config holding a 4-quote closing run (#592)", () => {
+    const text = ["helper = '''sh -c 'ok''''", 'model = "gpt-6-luna"', "", "[projects.x]", 'trust_level = "trusted"', ""].join("\n");
+    const d = deps({ files: { [CONFIG]: text } });
+    expect(cmdHooksInstall(d, ["codex"])).toBe(EXIT.OK);
+    const once = d.files.entries.get(CONFIG)!.text;
+    expect(once).toBe(`${NOTIFY}\n${text}`);
+    expect(cmdHooksInstall(d, ["codex"])).toBe(EXIT.OK);
+    expect(d.files.entries.get(CONFIG)!.text).toBe(once);
+    expect(cmdHooksUninstall(d, ["codex"])).toBe(EXIT.OK);
+    expect(d.files.entries.get(CONFIG)!.text).toBe(text);
+  });
+
   test("codex: a table whose path starts with notify is refused with its line, and nothing is written (N1)", () => {
     for (const header of ["[notify]", "[notify.desktop]", '["notify".x]', "[[notify]]"]) {
       const text = ['model = "gpt-6-luna"', "", "[projects.x]", 'trust_level = "trusted"', "", header, 'sound = "ding"', ""].join("\n");
@@ -587,6 +676,16 @@ describe("uninstall", () => {
     cmdHooksInstall(d, ["claude"]);
     expect(cmdHooksUninstall(d, ["claude"])).toBe(EXIT.OK);
     expect(settingsOf(d)).toEqual({ model: "opus", hooks: { Stop: [THEIRS] } });
+  });
+
+  test("with CLAUDE_CONFIG_DIR set, removes from that profile and touches nothing under ~/.claude", () => {
+    const mine = serializeSettings({ model: "opus" });
+    const d = deps({ env: { CLAUDE_CONFIG_DIR: WORK_PROFILE }, files: { [SETTINGS]: mine } });
+    cmdHooksInstall(d, ["claude"]);
+    expect(cmdHooksUninstall(d, ["claude"])).toBe(EXIT.OK);
+    expect(settingsOf(d, WORK_SETTINGS)).toEqual({});
+    expect(d.files.entries.get(SETTINGS)!.text).toBe(mine);
+    expect(d.files.ops.filter((op) => op.includes(".claude"))).toEqual([]);
   });
 
   test("says so when there is nothing of ours anywhere", () => {
@@ -1146,5 +1245,108 @@ describe("hold: the sockets come from the hook target registry", () => {
     expect(d.connects.map((c) => c.path)).toEqual([holdSocketPath(STATE)]);
     expect(holdSocketPaths(d)).toEqual([holdSocketPath(STATE)]);
     expect(d.printed).toEqual([]);
+  });
+});
+
+describe("the statusLine wrap (.adr/0115, opt-in since 2026-10-24)", () => {
+  const MINE = "bash /home/pat/.claude/statusline-command.sh";
+  const withLine = (line: JsonObject): string => `${JSON.stringify({ model: "opus", statusLine: line }, null, 2)}\n`;
+  // Windows keeps the operator's command as it is: the wrapper's shell is not the one Claude Code uses there.
+  const wraps = HOST.platform !== "win32";
+
+  test("install WITHOUT the flag leaves a plain statusLine byte for byte and says nothing about it", () => {
+    const before = withLine({ type: "command", command: MINE, padding: 0 });
+    const d = deps({ files: { [SETTINGS]: before } });
+    expect(cmdHooksInstall(d, ["claude"])).toBe(EXIT.OK);
+    const line = asJsonObject(asJsonObject(settingsOf(d))?.statusLine);
+    expect(line).toEqual({ type: "command", command: MINE, padding: 0 });
+    expect(d.io.stdout.join("\n").toLowerCase()).not.toContain("statusline");
+    expect(d.io.stderr).toEqual([]);
+  });
+
+  test("install WITHOUT the flag on a file with no statusLine adds none and says nothing", () => {
+    const d = deps({ files: { [SETTINGS]: `{"model":"opus"}\n` } });
+    expect(cmdHooksInstall(d, ["claude"])).toBe(EXIT.OK);
+    expect(asJsonObject(settingsOf(d))?.statusLine).toBeUndefined();
+    expect(d.io.stdout.join("\n").toLowerCase()).not.toContain("statusline");
+  });
+
+  test("--statusline wraps the operator's statusLine, keeps its other keys, and says so", () => {
+    const d = deps({ files: { [SETTINGS]: withLine({ type: "command", command: MINE, padding: 0 }) } });
+    expect(cmdHooksInstall(d, ["claude", "--statusline"])).toBe(EXIT.OK);
+    const line = asJsonObject(asJsonObject(settingsOf(d))?.statusLine);
+    expect(line?.padding).toBe(0);
+    if (!wraps) {
+      expect(line?.command).toBe(MINE);
+      expect(d.io.stdout.join("\n")).toContain("statusLine not wrapped on Windows");
+      return;
+    }
+    expect(line?.command).toBe(wrapCommand(OWN, MINE));
+    expect(d.io.stdout.join("\n")).toContain("your own command still runs");
+  });
+
+  test("--statusline adds no statusLine where there is none, and says so", () => {
+    const d = deps({ files: { [SETTINGS]: `{"model":"opus"}\n` } });
+    expect(cmdHooksInstall(d, ["claude", "--statusline"])).toBe(EXIT.OK);
+    expect(asJsonObject(settingsOf(d))?.statusLine).toBeUndefined();
+    if (wraps) expect(d.io.stdout.join("\n")).toContain("Collie never adds a statusLine");
+  });
+
+  test("an install without the flag keeps a wrap that is already there and re-points it to this binary", () => {
+    if (!wraps) return;
+    const old = "/opt/collie-old/bin/collie";
+    const d = deps({ files: { [SETTINGS]: withLine({ type: "command", command: wrapCommand(old, MINE), padding: 2 }) } });
+    expect(cmdHooksInstall(d, ["claude"])).toBe(EXIT.OK);
+    const line = asJsonObject(asJsonObject(settingsOf(d))?.statusLine);
+    expect(line?.command).toBe(wrapCommand(OWN, MINE));
+    expect(line?.padding).toBe(2);
+    expect(d.io.stdout.join("\n")).toContain("your own command still runs");
+  });
+
+  test("the install refuses --statusline for codex, and names both options for an unknown one", () => {
+    const d = deps({});
+    expect(cmdHooksInstall(d, ["codex", "--statusline"])).toBe(EXIT.USAGE);
+    expect(d.io.stderr.join("\n")).toContain("no statusLine to wrap");
+    const e = deps({});
+    expect(cmdHooksInstall(e, ["claude", "--bogus"])).toBe(EXIT.USAGE);
+    expect(e.io.stderr.join("\n")).toContain("`--hold-permissions` and `--statusline`");
+  });
+
+  test("uninstall puts the operator's command back byte for byte, with the hooks gone", () => {
+    const before = withLine({ type: "command", command: MINE });
+    const d = deps({ files: { [SETTINGS]: before } });
+    cmdHooksInstall(d, ["claude", "--statusline"]);
+    expect(cmdHooksUninstall(d, ["claude"])).toBe(EXIT.OK);
+    expect(d.files.entries.get(SETTINGS)?.text).toBe(before);
+  });
+
+  test("an unwrapped statusLine is NOT behind; a wrapped one that names another binary is", () => {
+    const d = deps({ files: { [SETTINGS]: withLine({ type: "command", command: MINE }) } });
+    cmdHooksInstall(d, ["claude"]);
+    expect(hooksAreBehind(d)).toBe(false);
+    d.io.stdout.length = 0;
+    expect(cmdHooksStatus(d, ["--check"])).toBe(EXIT.OK);
+    expect(d.io.stdout).toEqual([]);
+    if (!wraps) return;
+    // A wrap written by another binary prints nothing until it is re-pointed.
+    const doc = asJsonObject(settingsOf(d)) ?? {};
+    d.files.entries.set(SETTINGS, { text: `${JSON.stringify({ ...doc, statusLine: { type: "command", command: wrapCommand("/opt/gone/collie", MINE) } }, null, 2)}\n` });
+    expect(hooksAreBehind(d)).toBe(true);
+    d.io.stdout.length = 0;
+    // `--check` says which thing is behind in one word, for the updater's nudge, and only then.
+    expect(cmdHooksStatus(d, ["--check"])).toBe(EXIT.STATE);
+    expect(d.io.stdout).toEqual(["statusline"]);
+    // The install re-points it, with no flag.
+    cmdHooksInstall(d, ["claude"]);
+    expect(hooksAreBehind(d)).toBe(false);
+  });
+
+  test("status names the wrap when the statusLine is wrapped", () => {
+    const d = deps({ files: { [SETTINGS]: withLine({ type: "command", command: MINE }) } });
+    cmdHooksInstall(d, ["claude", "--statusline"]);
+    d.io.stdout.length = 0;
+    cmdHooksStatus(d);
+    if (wraps) expect(d.io.stdout.join("\n")).toContain("wraps the statusLine");
+    expect(hooksAreBehind(d)).toBe(false);
   });
 });

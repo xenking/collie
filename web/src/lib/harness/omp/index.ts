@@ -99,7 +99,7 @@
 // last non-blank row. Each declines on any modal and on every other shape's tail.
 
 import { trimTrailingBlank, type Block, type StyledLine } from "../../blocks";
-import type { HarnessAdapter } from "../types";
+import type { DialogDetector, HarnessAdapter } from "../types";
 import { locatePiComposer, piComposerPrompt, piDraft } from "./pi-shape";
 import {
   extractGlyphInputDraft,
@@ -155,6 +155,14 @@ import { detectSwitchPickerRegion } from "./switch";
  * a contract Claude's `/model` picker is pinned against. The unread-dialog card (`cancelKey` below)
  * delivers the way out, and `composerReady` already delivers the safety half.
  */
+/** The detectors `ompBuildBlocks` runs, in its order, for the unread-dialog card's report (ADR 0123). */
+const OMP_DIALOG_DETECTORS: readonly DialogDetector[] = [
+  { name: "resume-picker", detect: (lines) => detectResumePickerRegion(withoutStatusTail(lines)) },
+  { name: "ask-select", detect: (lines) => detectAskSelectRegion(withoutStatusTail(lines)) },
+  { name: "approval", detect: (lines) => detectApprovalRegion(withoutStatusTail(lines)) },
+  { name: "switch-picker", detect: (lines) => detectSwitchPickerRegion(withoutStatusTail(lines)) },
+];
+
 export function ompBuildBlocks(screen: StyledLine[]): Block[] {
   // The status row and the widget rows under a dialog are chrome of the patched omp, not of the dialog.
   const lines = withoutStatusTail(screen);
@@ -252,6 +260,7 @@ export const ompAdapter: HarnessAdapter = {
   // (modal.ts). A composer never has that, so the ZWJ pane shows no card.
   cancelKey: "Escape",
   modalOnScreen: (lines) => ompModalOnScreen(withoutStatusTail(lines)),
+  dialogDetectors: OMP_DIALOG_DETECTORS,
   // …and the exact on-screen draft region the destructive pre-clear is bound to on the wire: the
   // box's bottom prompt row or all of the rule composer's prompt rows. The box scanner declines when
   // a long palette pushes that row out of range; the rule region ends one status row from the tail.

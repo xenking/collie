@@ -175,7 +175,7 @@ function isDrawableEntry(value: JsonValue): boolean {
 export async function loadChatTail(
   scope: Scope | undefined,
   paneId: string,
-  instance: string | undefined,
+  instance?: string,
 ): Promise<SavedTail | null> {
   const record = await getRecord("chat-tail", paneScopeKey(scope, paneId));
   if (record === null) return null;

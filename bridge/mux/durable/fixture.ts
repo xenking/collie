@@ -53,7 +53,7 @@
 // the next read is a real read. A test of the floor itself uses the clock directly.
 
 import { createHash, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -437,8 +437,8 @@ export class FakeDurableProgram {
 
   /** Start a program on a fresh socket under the temp directory. */
   static async start(): Promise<FakeDurableProgram> {
-    // `mkdtemp` makes the directory mode 0700.
-    const dir = mkdtempSync(join(tmpdir(), "collie-durable-"));
+    // `mkdtemp` makes the directory mode 0700; resolve macOS's /var alias before the socket checks.
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "collie-durable-")));
     const program = new FakeDurableProgram(join(dir, "s.sock"), dir, null);
     program.listen();
     return program;

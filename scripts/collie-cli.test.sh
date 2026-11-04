@@ -33,7 +33,7 @@ if [ -n "${COLLIE_HERMETIC_PROBE:-}" ]; then
   exit 0
 fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 BIN="${ROOT}/bin/collie"
 TMP_ROOT="$(mktemp -d)"
 TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)"
@@ -329,14 +329,14 @@ assert_contains "$STDOUT" "machine   ${C_HOME}/.collie/config.toml  (present)"
 assert_contains "$STDOUT" "instance  ${C_CONFIG}/config.toml  (absent)"
 
 # One key uncommented is read, and the source column says which file won it.
-sed -i.bak 's/^#port = 8787$/port = 8800/' "${C_HOME}/.collie/config.toml"
+sed -i.bak -e 's/^#port = 8787$/port = 8800/' "${C_HOME}/.collie/config.toml"
 c_collie config show || fail "config show failed over an edited file"
 assert_contains "$STDOUT" "8800  [file:home]"
 
 # The instance file beats the machine's, key by key.
 c_collie config init --instance || fail "config init --instance failed"
 assert_eq "$STDOUT" "${C_CONFIG}/config.toml"
-sed -i.bak 's/^#port = 8787$/port = 8801/' "${C_CONFIG}/config.toml"
+sed -i.bak -e 's/^#port = 8787$/port = 8801/' "${C_CONFIG}/config.toml"
 c_collie config show || fail "config show failed over two files"
 assert_contains "$STDOUT" "8801  [file:instance]"
 
@@ -347,7 +347,7 @@ c_collie config show || fail "config show failed with a .env"
 assert_contains "$STDOUT" "8802  [env]"
 
 # A secret in the file is never printed back, whatever it says.
-sed -i.bak 's|^#vapid_private = ""$|vapid_private = "a-signing-key-nobody-should-see"|' "${C_CONFIG}/config.toml"
+sed -i.bak -e 's|^#vapid_private = ""$|vapid_private = "a-signing-key-nobody-should-see"|' "${C_CONFIG}/config.toml"
 c_collie config show || fail "config show failed with a secret in the file"
 assert_contains "$STDOUT" "vapid_private"
 case "$STDOUT" in *a-signing-key-nobody-should-see*) fail "config show printed a secret" ;; esac
@@ -510,8 +510,23 @@ assert_contains "$STDERR" "the tailnet front door did not come up"
 
 cli "$BIN" status || fail "\`collie status\` failed"
 assert_contains "$STDOUT" "✓ Collie is running"
+# M76: the head, then the census. The tailscale serve dump left `status`: it is `serve status` now,
+# and `status --verbose` still prints it.
+assert_contains "$STDOUT" "no crew"
+assert_contains "$STDOUT" "  devices   "
+assert_contains "$STDOUT" "  sessions  "
+case "$STDOUT" in *"serve config:"*) fail "\`collie status\` still prints the serve dump" ;; esac
+
+cli "$BIN" status --verbose || fail "\`collie status --verbose\` failed"
 assert_contains "$STDOUT" "serve config:"
 assert_contains "$STDOUT" "    https://host.example (tailnet only)"
+
+cli "$BIN" serve status || fail "\`collie serve status\` failed"
+assert_contains "$STDOUT" "serve config:"
+assert_contains "$STDOUT" "    https://host.example (tailnet only)"
+
+cli "$BIN" status --json || fail "\`collie status --json\` failed"
+assert_contains "$STDOUT" '"census":{"members":[],"devices":'
 
 cli "$BIN" restart || fail "\`collie restart\` failed"
 assert_contains "$(cat "$L_CALLS")" "systemctl --user disable --now collie"
@@ -539,8 +554,10 @@ assert_contains "$STDOUT" "⚠ Collie isn't answering on :${DEAD_PORT} yet"
 F_HOME="${TMP_ROOT}/firstrun-home"
 F_CONFIG="${TMP_ROOT}/firstrun-config"
 mkdir -p "$F_HOME" "$F_CONFIG"
+# XDG_RUNTIME_DIR points at an empty scratch folder: herdr-core's socket sits under it, and without
+# it the probe falls back to /run/user/<uid>, where a herdr-core on the test host would be found.
 firstrun() {
-  run_stripped HOME="$F_HOME" HERDR_PLUGIN_CONFIG_DIR="$F_CONFIG" PATH="$L_BIN" \
+  run_stripped HOME="$F_HOME" HERDR_PLUGIN_CONFIG_DIR="$F_CONFIG" PATH="$L_BIN" XDG_RUNTIME_DIR="${F_HOME}/run" \
     COLLIE_PORT="$PORT" COLLIE_TMUX_BIN=/nonexistent/tmux COLLIE_ZELLIJ_BIN=/nonexistent/zellij "$@"
 }
 
@@ -550,7 +567,7 @@ firstrun HERDR_SOCKET_PATH="${F_HOME}/absent.sock" "$BIN" start \
   && fail "\`collie start\` came up with no multiplexer to mirror"
 assert_contains "$STDERR" "no COLLIE_MUX is set"
 assert_contains "$STDERR" "no multiplexers are running"
-assert_contains "$STDERR" "COLLIE_MUX=<durable|herdr|tern|tmux|tuios|zellij> collie start"
+assert_contains "$STDERR" "COLLIE_MUX=<durable|herdr|herdr-core|tern|tmux|tuios|zellij> collie start"
 [ -f "${F_CONFIG}/.env" ] && fail "a refused start still wrote a config"
 
 # Exactly one found, and no terminal to ask at: auto-selected, said out loud, and written down.
@@ -1442,6 +1459,24 @@ exec env HOME="$UPDATE_HOME" XDG_CONFIG_HOME="$UPDATE_GIT_XDG" \
   COLLIE_DETACHED_ENV_PROBE=1 "\$@"
 EOF
 chmod +x "${U_BIN}/systemd-run"
+# macOS chooses setsid rather than systemd. Give that launch boundary the same fixture-owned Git
+# environment; neither stand-in simulates a manager, but both run the real swap-and-verify updater.
+cat > "${U_BIN}/setsid" <<EOF
+#!/bin/sh
+echo "setsid \$*" >> "$U_CALLS"
+exec "${U_BIN}/systemd-run" "\$@"
+EOF
+chmod +x "${U_BIN}/setsid"
+case "$(uname -s)" in
+  Linux)
+    UPDATE_HANDOFF_NOTE="handed off to systemd-run --user --collect"
+    UPDATE_HANDOFF_CALL="systemd-run --user --collect --unit collie-update-"
+    ;;
+  *)
+    UPDATE_HANDOFF_NOTE="handed off to a setsid double-forked child"
+    UPDATE_HANDOFF_CALL="setsid "
+    ;;
+esac
 cat > "${U_BIN}/tailscale" <<EOF
 #!/bin/sh
 echo "tailscale \$*" >> "$U_CALLS"
@@ -1579,7 +1614,7 @@ upd "$CLONE" "$BIN" update || fail "\`collie update\` failed on a linked clone: 
 assert_contains "$STDOUT" "staged checkout"
 # The verb STAGES and hands off (M15/04): the swap, the restart and the health gate all run in a
 # process with its own lifetime, because the restart would otherwise kill the bridge that asked.
-assert_contains "$STDOUT" "handed off to systemd-run --user --collect"
+assert_contains "$STDOUT" "$UPDATE_HANDOFF_NOTE"
 assert_contains "$STDOUT" "Watch it with: collie update --status"
 wait_for_run done
 # The fake current binary only runs when the detached real updater restarts through the flipped
@@ -1600,7 +1635,7 @@ GIT_CONFIG_VALUE_2=false
 EOF
 )"
 [ ! -e "$GIT_HOSTILE_HIT" ] || fail "the detached updater ran a hostile Git hook"
-assert_contains "$(cat "$U_CALLS")" "systemd-run --user --collect --unit collie-update-"
+assert_contains "$(cat "$U_CALLS")" "$UPDATE_HANDOFF_CALL"
 # The version is a worktree of the tag, and `current` is a RELATIVE symlink at it.
 assert_eq "$(git -C "${CLONE}/versions/v9.10.0" rev-parse HEAD)" "$(git -C "$ORIGIN" rev-parse "v9.10.0^{commit}")"
 assert_eq "$(readlink "${CLONE}/current")" "versions/v9.10.0"
@@ -1929,7 +1964,9 @@ run_stripped HOME="$HOME_DIR" HERDR_PLUGIN_CONFIG_DIR="$CONFIG_DIR" COLLIE_STATE
   COLLIE_PLUGIN_ROOT="$EMPTY_ROOT" PATH="$BIN_DIR" "$BIN" doctor || rc=$?
 assert_eq "$rc" "1"
 assert_contains "$STDOUT" "error:"
-assert_contains "$STDOUT" "collie build"
+# Rows wrap at 80 columns when piped, so a remedy can break across lines: compare it with the
+# line breaks and continuation indent folded to single spaces.
+assert_contains "$(printf '%s' "$STDOUT" | tr -s ' \n' '  ')" "collie build"
 assert_contains "$STDOUT" "crew: none"
 
 # ── Device pairing ───────────────────────────────────────────────────────────
@@ -2505,7 +2542,7 @@ assert_contains "$(cat "${BEACON_HOME}/.codex/AGENTS.md")" "Be brief."
 beacon_env skill status || fail "\`collie skill status\` failed after install: ${STDERR}"
 assert_contains "$STDOUT" "AGENTS.md: installed"
 beacon_env skill status --check || fail "a fresh install read as stale: ${STDERR}"
-sed -i 's/Walky talky/Walky talky (older)/' "${BEACON_HOME}/.codex/AGENTS.md"
+sed -i.bak -e 's/Walky talky/Walky talky (older)/' "${BEACON_HOME}/.codex/AGENTS.md"
 rc=0
 beacon_env skill status --check || rc=$?
 assert_eq "$rc" "3"
@@ -2540,7 +2577,7 @@ assert_eq "$rc" "0"
 assert_eq "$(cat "${TMP_ROOT}/emit.out")" ""
 [ ! -d "${BEACON_STATE}/beacons" ] || fail "garbage on stdin still wrote a beacon"
 
-# A real payload: one owner-only beacon file, named by the digest of the markers it carries.
+# A real payload: one owner-only beacon file on hosts with the required /proc pid start time.
 set +e
 printf '{"session_id":"ff2dd3c2-e3d5-40db-9474-eea02e606c6c","hook_event_name":"UserPromptSubmit","cwd":"/tmp"}' \
   | env -i HOME="$BEACON_HOME" HERDR_PLUGIN_CONFIG_DIR="$CONFIG_DIR" COLLIE_PLUGIN_ROOT="$BEACON_ROOT" \
@@ -2550,6 +2587,10 @@ rc=$?
 set -e
 assert_eq "$rc" "0"
 assert_eq "$(cat "${TMP_ROOT}/emit.out")" ""
+# beacon.ts deliberately writes no beacon without /proc/<pid>/stat: a fabricated start time would
+# make every record expire. Keep the real-emitter record assertions on Linux, and check that honest
+# no-record result elsewhere; hook/skill installation and silent emitter checks above run everywhere.
+if [ -r "/proc/$$/stat" ]; then
 BEACON_FILE="$(ls "${BEACON_STATE}/beacons")"
 assert_eq "$(printf '%s\n' "$BEACON_FILE" | wc -l | tr -d ' ')" "1"
 case "$BEACON_FILE" in
@@ -2578,6 +2619,10 @@ rc=$?
 set -e
 assert_eq "$rc" "0"
 assert_eq "$(cat "${BEACON_STATE}/beacons/${BEACON_FILE}")" "$(cat "${TMP_ROOT}/beacon.before")"
+else
+  [ ! -d "${BEACON_STATE}/beacons" ] || fail "the emitter wrote a beacon without a readable pid start time"
+  echo "SKIP: real beacon record/subagent assertions require Linux /proc pid start times"
+fi
 
 # Neither verb shelled out to anything: both are one filesystem edit and nothing else.
 assert_eq "$(cat "$PAIR_CALLS")" ""

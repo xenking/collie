@@ -694,13 +694,26 @@ export class TurnController {
 export class VoiceBroker {
   #relays = new Map<string, TurnController>();
   #reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  #openings = new Map<string, Promise<void>>();
 
   constructor(
     private readonly cfg: Config,
     private readonly audit: AuditLog,
   ) {}
 
-  async open(ws: VoiceSocket): Promise<void> {
+  open(ws: VoiceSocket): Promise<void> {
+    const session = ws.data.sessionFile;
+    // Keep invocation order: token reads and daemon replies can finish in the opposite order.
+    const prior = this.#openings.get(session) ?? Promise.resolve();
+    const opening = prior.catch(() => undefined).then(() => this.#open(ws));
+    this.#openings.set(session, opening);
+    return opening.finally(() => {
+      if (this.#openings.get(session) === opening) this.#openings.delete(session);
+    });
+  }
+
+  async #open(ws: VoiceSocket): Promise<void> {
+    if (ws.readyState >= 2) return;
     const session = ws.data.sessionFile;
     const prior = this.#relays.get(session);
     if (prior?.attach(ws)) {
@@ -731,15 +744,6 @@ export class VoiceBroker {
     if (ws.readyState === 2 || ws.readyState === 3) {
       if (ws.data.replySpeechSupported) await this.#setRemote(session, "remote-release").catch(() => undefined);
       return;
-    }
-    // Another phone opened the same session while the daemon was being asked: the later opener wins, and the
-    // earlier one is told, not left holding a socket nobody reads.
-    const raced = this.#relays.get(session);
-    if (raced) {
-      const lost = raced.socket;
-      raced.close();
-      this.#relays.delete(session);
-      lost?.close?.(1000, "voice taken over by another device");
     }
     this.#relays.set(session, new TurnController(this.cfg, this.audit, ws,
       (text) => this.#setRemote(session, "transcript", text)));

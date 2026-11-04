@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -114,7 +114,7 @@ describe.skipIf(SOCKET_ONLY_SKIP)("the privacy check (WIRE.md section 1A)", () =
 
   test("a regular file, a directory and a symlink to a socket are not sockets", async () => {
     const program = await startProgram();
-    const dir = mkdtempSync(join(tmpdir(), "collie-durable-client-"));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "collie-durable-client-")));
     scratch.push(dir);
     const file = join(dir, "file.sock");
     writeFileSync(file, "", { mode: 0o600 });
@@ -128,7 +128,7 @@ describe.skipIf(SOCKET_ONLY_SKIP)("the privacy check (WIRE.md section 1A)", () =
 
   test("socketFault names the check a path fails", async () => {
     const program = await startProgram();
-    const dir = mkdtempSync(join(tmpdir(), "collie-durable-client-"));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "collie-durable-client-")));
     scratch.push(dir);
     const file = join(dir, "file.sock");
     writeFileSync(file, "", { mode: 0o600 });
@@ -148,7 +148,7 @@ describe.skipIf(SOCKET_ONLY_SKIP)("the privacy check (WIRE.md section 1A)", () =
   });
 
   test("a missing path is not a privacy problem: nothing is listening yet", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "collie-durable-client-"));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "collie-durable-client-")));
     scratch.push(dir);
     const missing = join(dir, "none.sock");
     expect(await socketAccessProblem(missing)).toBe(`no socket at ${missing}`);
@@ -247,7 +247,7 @@ describe.skipIf(SOCKET_ONLY_SKIP)("the path walk (WIRE.md section 1A)", () => {
 
   test("a real folder with a symlink in its path is refused, and nothing is dialled", async () => {
     const program = await startProgram();
-    const dir = mkdtempSync(join(tmpdir(), "collie-durable-walk-"));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "collie-durable-walk-")));
     scratch.push(dir);
     const via = join(dir, "via");
     symlinkSync(dirname(program.socketPath), via);

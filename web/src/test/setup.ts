@@ -15,6 +15,7 @@ import { __resetStore } from "@/lib/store";
 import { __resetChatTail } from "@/lib/chat-tail";
 import { resetFoldersCacheForTests } from "@/lib/folders";
 import { __resetSessionCards } from "@/lib/session-cards";
+import { __resetReport } from "@/lib/report/store";
 
 // Node 25 exposes a disabled process-level localStorage; use jsdom's native Storage in test globals.
 const storageWindow = new JSDOM("", { url: "http://localhost" }).window;
@@ -104,3 +105,6 @@ if (!("matchMedia" in window)) {
     }),
   });
 }
+// The report streaks and the open sheet are module-scoped (lib/report/store.ts, ADR 0123): one case's
+// failed sends would otherwise count toward the next case's card.
+beforeEach(() => __resetReport());

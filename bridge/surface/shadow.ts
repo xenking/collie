@@ -26,13 +26,14 @@ import { parseAnsi } from "../../web/src/lib/ansi.ts";
 import { splitLines } from "../../web/src/lib/blocks.ts";
 import { DEFAULT_EDGE_PROFILE, type EdgeKind } from "../../web/src/lib/surface/edges.ts";
 import { emptyFoldState, readFold, stepFold, type FoldContext, type FoldState, type SurfaceInput, type SurfaceRead } from "../../web/src/lib/surface/fold.ts";
-import type { IdleProfile } from "../../web/src/lib/surface/frame.ts";
+import { readIsUnstyled, rowText, type IdleProfile } from "../../web/src/lib/surface/frame.ts";
 import { legacyFree, liftAsk, liftDialog, readerBlocks } from "../../web/src/lib/surface/lift.ts";
 import { findProfile, loadProfiles, profileFor, type Profile } from "../../web/src/lib/surface/profile.ts";
-import { askOf, isFree, modalWord, shortHash, type Ask, type Surface } from "../../web/src/lib/surface/surface.ts";
+import { askOf, frameImageKey, isFree, modalWord, shortHash, type Ask, type Surface, type SurfaceTurn } from "../../web/src/lib/surface/surface.ts";
 import type { CounterKey } from "./counters.ts";
 import { ASK_LIFETIME_MS, type AskBook } from "./ask.ts";
 import { spawnBinaryVersion } from "./binary-version.ts";
+import { steerTrusted } from "./protocol.ts";
 import type { Block } from "../../web/src/lib/blocks.ts";
 
 /** How many rows of the viewport one shadow read asks for. `viewport` scope never moves a screen. */
@@ -134,10 +135,14 @@ interface PaneState {
   harness: string;
   version: string;
   status: string | null;
+  /** Whether the range the version fell in or borrowed is revoked, as `StopService` reads `match.range.status`. */
+  rangeRevoked: boolean;
   profileId: string;
   idle: IdleProfile | null;
   /** When each disagreement class last made a journal line on this pane. */
   logged: Map<string, number>;
+  /** The box rows a request proved stale ({@link SurfaceShadow.markStale}), until a read shows other rows; null with none. */
+  staleFrame: string | null;
 }
 
 function emptyCounters(): ShadowCounters {
@@ -183,6 +188,43 @@ export class SurfaceShadow {
     return this.panes.get(paneId)?.read?.surface;
   }
 
+  /** Whether the pane's newest read shows an ask (a card the phone can answer). The poll lifts such a
+   *  pane to `blocked` (state-engine.ts `liftScreenAsks`, M78 spec 07). A box proven stale is no ask. */
+  askOnScreen(paneId: string): boolean {
+    const surface = this.surfaceOf(paneId);
+    return surface !== undefined && surface.staleFrame !== true && askOf(surface.modal) !== null;
+  }
+
+  /**
+   * The input box of the pane's newest screen read, when it was read and the turn the Surface claimed
+   * (ADR 0122): the box's text, "" when
+   * empty or showing the placeholder, null when that read found no box (a dialog over it, an unreadable
+   * screen). Null before the pane's first read. The Send Protocol reads it for queued sends that came
+   * back to the box; the box text never leaves the bridge from here.
+   */
+  boxOf(paneId: string): { readonly box: string | null; readonly at: number; readonly turn: SurfaceTurn; readonly plain: boolean } | null {
+    const state = this.panes.get(paneId);
+    const fold = state?.fold;
+    if (fold?.screen == null) return null;
+    const frame = fold.screenRead?.frame ?? null;
+    const turn = state?.read?.surface.turn ?? "unknown";
+    // A read with no styling at all (herdr-core): a draft there may be the placeholder (M78 spec 06).
+    const plain = fold.screen.rows !== null && readIsUnstyled(fold.screen.rows);
+    return { box: frame === null ? null : frame.placeholder ? "" : frame.interior.text, at: fold.screen.at, turn, plain };
+  }
+
+  /**
+   * Whether a Stop (M68) has a key to press on this pane: the pane was read under a profile whose
+   * `keys.interrupt` names a key, and the profile is not revoked at the binary's version. The phone
+   * draws its Stop button from this and from nothing else, so no harness name lives in the web app.
+   */
+  canStopOf(paneId: string): boolean {
+    const state = this.panes.get(paneId);
+    if (state === undefined || state.read === null || state.status === "revoked" || state.rangeRevoked) return false;
+    const profile = loadProfiles().get(state.profileId);
+    return profile !== undefined && profile.keys.interrupt.length > 0;
+  }
+
   /** Every pane's Surface and every counter, for the debug route. */
   report(): ShadowReport {
     const panes: ShadowPane[] = [];
@@ -191,6 +233,17 @@ export class SurfaceShadow {
       panes.push({ pane, harness: state.harness, version: state.version, status: state.status, surface: state.read.surface, legacyFree: state.lastLegacy });
     }
     return { panes, counters: Object.fromEntries(this.counters) };
+  }
+
+  /**
+   * Whether the pane's harness may be steered from the phone (M69): its profile names a steer key and
+   * the binary's version may be trusted with a running turn ({@link steerTrusted}), the rule the Send
+   * Protocol applies to a steer. False before the pane's first read and on an unread version.
+   */
+  canSteer(paneId: string): boolean {
+    const state = this.panes.get(paneId);
+    if (state === undefined || state.profileId === "-" || state.version === "unread") return false;
+    return steerTrusted(profileFor(state.profileId, state.version, { log: () => undefined }));
   }
 
   /** The persisted counter key of a pane (spec 09's row), or undefined before its first read. */
@@ -217,7 +270,7 @@ export class SurfaceShadow {
     if (this.observing) {
       for (const state of this.panes.values()) {
         this.push(state, { seq: ++state.seq, source: "tick", at });
-        if (state.read !== null) state.read = readFold(state.fold, this.contextOf(state));
+        if (state.read !== null) state.read = this.folded(state);
       }
       return;
     }
@@ -288,7 +341,9 @@ export class SurfaceShadow {
     // The status is looked up once the binary was read, so its once-per-version note in the journal
     // names a real version. The anchors are the profile's whatever the status: the status gates the
     // send path (spec 05), not the reading.
-    const status = profile === null ? null : version === "unread" ? "provisional" : (profileFor(profile.id, version)?.status ?? null);
+    const match = profile === null || version === "unread" ? null : profileFor(profile.id, version);
+    const status = profile === null ? null : version === "unread" ? "provisional" : (match?.status ?? null);
+    const rangeRevoked = match?.range?.status === "revoked";
     const idle = profile?.idle ?? null;
 
     const edges = profile?.edges ?? DEFAULT_EDGE_PROFILE;
@@ -309,9 +364,11 @@ export class SurfaceShadow {
         harness: profile?.id ?? harness,
         version,
         status,
+        rangeRevoked,
         profileId: profile?.id ?? "-",
         idle,
         logged: new Map(),
+        staleFrame: null,
       };
       this.panes.set(agent.paneId, state);
     }
@@ -321,6 +378,7 @@ export class SurfaceShadow {
     state.harness = profile?.id ?? harness;
     state.version = version;
     state.status = status;
+    state.rangeRevoked = rangeRevoked;
     state.profileId = profile?.id ?? "-";
     state.idle = idle;
 
@@ -345,7 +403,7 @@ export class SurfaceShadow {
       state.lastLegacy = this.options.compare === false ? false : legacyFree(rows, blocks, harness);
     }
 
-    const read = readFold(state.fold, this.contextOf(state));
+    const read = this.folded(state);
     state.read = read;
     if (state.countedRead === readKey) return;
     state.countedRead = readKey;
@@ -354,6 +412,32 @@ export class SurfaceShadow {
     // grammar, so it is not counted: parked panes polled for hours drowned the live omp row in no-match.
     if (agent.sleeping === true) return;
     this.count(agent.paneId, state, read);
+  }
+
+  /**
+   * The Send Protocol proved that the box a pane shows does not take keys and a second read showed the same rows
+   * (2026-10-25): `frame` names the box's rows ({@link frameImageKey}). The pane's Surface carries
+   * `staleFrame` on every read that shows the same rows, and the mark goes at the first read that shows
+   * other rows or no box. A pane the shadow has not read takes no mark. Never throws.
+   */
+  markStale(paneId: string, frame: string): void {
+    const state = this.panes.get(paneId);
+    if (state === undefined) return;
+    state.staleFrame = frame;
+    if (state.read !== null) state.read = this.folded(state);
+  }
+
+  /** The fold's read of a pane, marked `staleFrame` while its newest screen shows the box rows a request proved stale. */
+  private folded(state: PaneState): SurfaceRead {
+    const read = readFold(state.fold, this.contextOf(state));
+    if (state.staleFrame === null) return read;
+    const rows = state.fold.screen?.rows ?? null;
+    const frame = state.fold.screenRead?.frame ?? null;
+    if (rows === null || frame === null || frameImageKey(rows.map((row) => rowText(row)), frame.top, frame.bottom) !== state.staleFrame) {
+      state.staleFrame = null;
+      return read;
+    }
+    return { ...read, surface: { ...read.surface, staleFrame: true } };
   }
 
   /** The ask a read lifted: through the session's book when it has one, else named by its content. */
@@ -387,7 +471,7 @@ export class SurfaceShadow {
     if (state === undefined) return false;
     try {
       this.push(state, { seq: ++state.seq, source: "edge", at, kind });
-      if (state.read !== null) state.read = readFold(state.fold, this.contextOf(state));
+      if (state.read !== null) state.read = this.folded(state);
       this.countEdge(state, kind);
       state.reread?.();
       state.reread = (this.options.schedule ?? timerSchedule)(() => {
@@ -404,7 +488,30 @@ export class SurfaceShadow {
     return true;
   }
 
-  /** One edge word into the persisted counters (a kind, or `lost-stop`). A failure is a warning. */
+  /**
+   * Collie's own Stop receipt said `stopped` on this pane (M68): two fresh reads after the interrupt
+   * key showed the turn idle and no dialog. A harness that fires no stop hook on an interrupt (Claude
+   * Code 2.1.309, on Escape and on a refused permission) leaves the prompt edge's running block open,
+   * and the screen may hold nothing that ends it: Escape before the first token puts the prompt back
+   * into the box, a draft, so the lost-Stop reads never count (live rerun 2026-10-23: 20 s and more).
+   * This is the stop the hook did not send: it goes into the fold as a `stop` edge, which ends the
+   * blocks and makes no free, and is counted as `stop-receipt`, apart from the hooks' own `stop`.
+   * No fresh read is asked for: the route pokes the engine. Returns whether the pane took it. Never throws.
+   */
+  stopSeen(paneId: string): boolean {
+    const state = this.panes.get(paneId);
+    if (state === undefined) return false;
+    try {
+      this.push(state, { seq: ++state.seq, source: "edge", at: this.now(), kind: "stop" });
+      if (state.read !== null) state.read = this.folded(state);
+      this.countEdge(state, "stop-receipt");
+    } catch (err) {
+      console.warn(`[surface] stop receipt on ${paneId} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
+  /** One edge word into the persisted counters (a kind, `lost-stop` or `stop-receipt`). A failure is a warning. */
   private countEdge(state: PaneState, word: string): void {
     const ledger = this.options.ledger;
     if (ledger?.edge === undefined) return;

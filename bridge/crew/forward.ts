@@ -3,7 +3,7 @@ import type { JsonObject, JsonValue } from "../json.ts";
 import { MASK_VERSION } from "../redact.ts";
 import { MAX_UPLOAD_OVERHEAD, uploadTooLarge } from "../uploads.ts";
 import { DEVICE_HEADER, encodeDeviceHeader } from "./admission.ts";
-import { type CrewLink, type PeerFailure, type PeerOutcome, WRITE_BUDGET_MS } from "./peer-client.ts";
+import { type CrewLink, type PeerFailure, type PeerOutcome, PANE_READ_BUDGET_MS, PANE_WRITE_BUDGET_MS, WRITE_BUDGET_MS } from "./peer-client.ts";
 import { HOST_PARAM, type PeerState } from "./registry.ts";
 
 // The LEAD side of a per-pane request: `?host=laptop` came in, the pane lives on the laptop, so the
@@ -67,9 +67,10 @@ const FORWARDABLE: readonly RegExp[] = [
   // pane, where its receipt lives. Additive-optional (§7.1): a member that predates it answers 404.
   // `send` and `abort` (ADR 0101): a control that names the turn the phone saw, a WRITE to the member
   // that owns the pane, where its receipt lives. Additive-optional the same way.
+  // `clear` (ADR 0116, the Clear paragraph): the same, for the receipt of a Clear of the box on a pane with a screen.
   // `action` (M53 spec 07): a tap on one of the program's belt buttons, a WRITE to the member that owns the
   // pane, where its receipt lives. Additive-optional the same way.
-  /^pane\/[^/]+(?:\/(?:reply|keys|upload|close|rename|history|chat|changes|files|commands|focus|answer|send|abort|action))?$/,
+  /^pane\/[^/]+(?:\/(?:reply|keys|upload|close|rename|history|chat|changes|files|commands|focus|answer|send|abort|clear|action))?$/,
   // One picture under the Files root, as bytes (ADR 0090): off the disk of the member that owns the
   // pane or the space, like the Files read it sits beside. Mirrors `PANE_FILES_IMAGE_ROUTE` and
   // `WORKSPACE_FILES_IMAGE_ROUTE` in bridge/server.ts one-for-one. Additive-optional (§7.1).
@@ -246,6 +247,19 @@ export function forwardKind(route: string, method?: string): ForwardKind {
   return isPaneRead(action) ? "read" : "write";
 }
 
+/** `pane/<id>`: the read of one pane's screen, the one read whose member-side work can outlast a poll. */
+const PANE_SCREEN_ROUTE = /^pane\/[^/]+$/;
+
+/**
+ * The explicit budget a forwarded request dials on: {@link PANE_WRITE_BUDGET_MS} for a write to a pane (a send on a
+ * herdr-core member costs about 6.4 s), {@link WRITE_BUDGET_MS} for every other write, {@link PANE_READ_BUDGET_MS}
+ * for a pane's screen read, none for every other read (the transport's own poll budget and bootstrap credit).
+ */
+export function budgetOf(kind: ForwardKind, route: string): number | undefined {
+  if (kind === "write") return route.startsWith("pane/") ? PANE_WRITE_BUDGET_MS : WRITE_BUDGET_MS;
+  return PANE_SCREEN_ROUTE.test(route) ? PANE_READ_BUDGET_MS : undefined;
+}
+
 /** The pane id a route addresses, for the lead's own audit line. `undefined` for tab/workspace. */
 export function forwardPaneId(route: string): string | undefined {
   if (!route.startsWith("pane/")) return undefined;
@@ -289,7 +303,8 @@ export function forwardAuditAction(route: string, method?: string): string | nul
   if (route.startsWith("space/")) return "space.rename";
   const action = route.split("/")[2];
   if (isPaneRead(action)) return null; // reads, and a read is audited on neither side
-  if (action === "close" || action === "rename") return `pane.${action}`;
+  // close, rename and focus namespace themselves on the peer's own handler; the rest stay bare.
+  if (action === "close" || action === "rename" || action === "focus") return `pane.${action}`;
   // The member writes the same name for the message it takes (bridge/walky/crew.ts).
   if (action === "walky") return "walky.deliver";
   return action; // reply | keys | upload
@@ -545,11 +560,42 @@ export function classifyReadFailure(failure: PeerFailure, memberId: string): Res
   return forwardError(code, `host ${memberId}: ${failure.reason}`, 503, { host: memberId });
 }
 
+/** How many failing (member, pane) reads {@link MemberPaneReads} remembers; the oldest is forgotten first. */
+const MAX_FAILING_READS = 256;
+
+/**
+ * The lead's log line for a member's pane that it could not read for the phone. A failed forwarded
+ * read changed nothing, so the phone only redraws its last mirror; without a line the lead's log
+ * said nothing at all (M78 spec 03, crew case 21: a member pane read answered 503). One line per
+ * (member, pane) when a read starts failing or fails with another status, none per poll while it
+ * keeps failing, and the next answered read clears it.
+ */
+export class MemberPaneReads {
+  private readonly failing = new Map<string, number>();
+
+  constructor(private readonly log: (line: string) => void = (line) => console.log(line)) {}
+
+  /** One forwarded read of `paneId` on `memberId` ended with `status`; `why` says what the lead learned. */
+  record(memberId: string, paneId: string, status: number, why: string): void {
+    const key = `${memberId}\u0000${paneId}`;
+    if (status < 400) {
+      this.failing.delete(key);
+      return;
+    }
+    if (this.failing.get(key) === status) return;
+    this.failing.delete(key);
+    this.failing.set(key, status);
+    if (this.failing.size > MAX_FAILING_READS) this.failing.delete(this.failing.keys().next().value!);
+    this.log(`[crew] ${memberId}: a read of pane ${paneId} through the lead failed, status ${String(status)} (${why})`);
+  }
+}
+
 /**
  * The transport, narrowed to what forwarding needs — {@link CrewLead.forward} in production.
  *
- * `budgetMs` is the deadline for THIS dial, and it is present for exactly one shape of request: a
- * forwarded write, on {@link WRITE_BUDGET_MS} (§10.1). Absent means "the transport's own default",
+ * `budgetMs` is the deadline for THIS dial, and it is present for two shapes of request: a
+ * forwarded write, on {@link WRITE_BUDGET_MS} or {@link PANE_WRITE_BUDGET_MS} (§10.1), and a pane's screen read, on
+ * {@link PANE_READ_BUDGET_MS}. Absent means "the transport's own default",
  * which for `PeerClient.proxy` is the poll budget plus a cold link's bootstrap credit — i.e. every
  * forwarded read keeps the budget it has always had.
  */
@@ -601,6 +647,8 @@ export interface ForwardDeps {
    * a text submit to this member's reply route before any peer call ({@link REPLY_OLD_MEMBER_TEXT}).
    */
   readonly surfaceVersion?: number | null | undefined;
+  /** Where a pane read that fails is logged ({@link MemberPaneReads}). Absent, nothing is logged. */
+  readonly paneReads?: MemberPaneReads | undefined;
 }
 
 /**
@@ -835,7 +883,7 @@ export async function forwardToPeer(req: Request, url: URL, deps: ForwardDeps): 
     route,
     forwardParams(url),
     init,
-    kind === "write" ? WRITE_BUDGET_MS : undefined,
+    budgetOf(kind, route),
   );
   const action = forwardAuditAction(route, req.method);
   const paneId = forwardPaneId(route);
@@ -863,6 +911,7 @@ export async function forwardToPeer(req: Request, url: URL, deps: ForwardDeps): 
           ? "refused"
           : "unknown",
     );
+    if (kind === "read" && paneId !== undefined) deps.paneReads?.record(deps.link.memberId, paneId, response.status, `${outcome.state}: ${outcome.reason}`);
     return response;
   }
 
@@ -870,6 +919,7 @@ export async function forwardToPeer(req: Request, url: URL, deps: ForwardDeps): 
   // `receivedAt` is when the response landed on this lead, not when the phone finished reading it.
   deps.onExchange?.(outcome.receivedAt);
   record(`http ${outcome.value.status}`);
+  if (kind === "read" && paneId !== undefined) deps.paneReads?.record(deps.link.memberId, paneId, outcome.value.status, "the member answered it");
   const answered =
     answer === null || deps.mask === undefined
       ? outcome.value

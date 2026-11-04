@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseJsonObject, type JsonObject } from "./json";
-import { capSentence, isCommand, offerMode, readHeldCancelAnswer, readSend, readSendReceipts, readSendReply, readSurface, receiptLabelKey, receiptSentence, sendNote, surfaceNote } from "./send-protocol";
-import type { SendReceiptRow } from "./surface/send";
+import { capSentence, isCommand, offerMode, readHeldCancelAnswer, readSend, readSendReceipts, readSendReply, readSurface, receiptLabelKey, noteKey, receiptSentence, sendNote, surfaceNote, type SendReply } from "./send-protocol";
+import { STALE_SCREEN, type SendReceiptRow } from "./surface/send";
 import type { Surface } from "./surface/surface";
 
 const RUNNING: Surface = { revision: 3, turn: "running", modal: "none", composer: "empty" };
@@ -100,6 +100,28 @@ describe("readSend", () => {
     // No commit offered (a running turn, a Replace): the sentence names the card and the turn's end, not Type here.
     expect(readSend(readSendReply(running)!)).toMatchObject({ note: "noticeKeyHeld", offers: [], detail: null });
     expect(readSend(reply("refused", "unconfirmed", ["commit", "keys"])).note).toBe("unconfirmed");
+  });
+
+  // 2026-10-25: a box that did not take the probe, and a second read of the same rows. The phone says it in
+  // its own words; the line that adds a probe character that may remain gets its own sentence.
+  it("a refusal with the stale-screen cause has its own sentence, with or without the probe that may remain", () => {
+    const plain: JsonObject = { receipt: { outcome: "refused", reason: "probe_failed" }, offers: ["keys"], cause: "stale_screen", detail: STALE_SCREEN };
+    expect(readSend(readSendReply(plain)!)).toMatchObject({ clear: false, note: "staleScreen", detail: null });
+    const probe: JsonObject = { ...plain, detail: `${STALE_SCREEN} A probe character (⌁) may remain in the box. Check the pane before you type.` };
+    expect(readSend(readSendReply(probe)!)).toMatchObject({ clear: false, note: "staleScreenProbe", detail: null });
+  });
+
+  it("an unconfirmed refusal with the short-pane cause keeps the bridge's line: it names the rows and what to resize", () => {
+    const detail = "The read holds 2 rows, and the claude input box takes at least 3. The pane may be too short to draw it: zoom or resize it on the desktop, or close the panes beside it in its tab, then send again.";
+    const body: JsonObject = { receipt: { outcome: "refused", reason: "unconfirmed" }, offers: ["commit", "keys"], rowsHash: "0f00ba", cause: "short_pane", detail };
+    expect(readSend(readSendReply(body)!)).toMatchObject({ clear: false, note: "unconfirmed", offers: ["commit"], detail });
+    // Without the cause a probe_failed keeps its old sentence.
+    expect(readSend(reply("refused", "probe_failed", ["keys"])).note).toBe("probeFailed");
+  });
+
+  it("a Surface carries staleFrame only as true", () => {
+    expect(readSurface({ revision: 3, turn: "idle", modal: "none", composer: "draft", staleFrame: true })).toEqual({ revision: 3, turn: "idle", modal: "none", composer: "draft", staleFrame: true });
+    expect(readSurface({ revision: 3, turn: "idle", modal: "none", composer: "draft", staleFrame: "yes" })).toEqual({ revision: 3, turn: "idle", modal: "none", composer: "draft" });
   });
 
   it("a send queued behind the running turn clears the draft and says it waits for the turn; the receipt's queued is read off the wire", () => {
@@ -293,6 +315,17 @@ describe("the session page's rows (send drill 3)", () => {
     expect(receiptSentence({ ...base, outcome: "sent" }, say)).toBeNull();
   });
 
+  it("a queued send that Stop gave back wears Sent and says it is back in the box; `late` is read off the wire only as a known word (ADR 0122)", () => {
+    const row: SendReceiptRow = { ...base, outcome: "sent", queued: true, late: "returned" };
+    expect(receiptLabelKey(row.outcome)).toBe("sendReceipts.outcome.sent");
+    expect(receiptSentence(row, say)).toBe("sendReceipts.returned");
+    const wire = { requestId: "r1abcdefgh", at: 5, mode: "send", outcome: "sent", keys: ["ctrl+q"], gapsMs: {}, harness: "omp", version: "18.6.1", queued: true };
+    const rows = readSendReceipts({ receipts: [{ ...wire, late: "returned" }, { ...wire, requestId: "r2abcdefgh", late: "teleported" }] });
+    expect(rows.receipts[0]?.late).toBe("returned");
+    expect(rows.receipts[1] && "late" in rows.receipts[1]).toBe(false);
+    expect(rows.receipts[1] && receiptSentence(rows.receipts[1], say)).toBe("sendReceipts.queued");
+  });
+
   it("a send queued behind the turn wears Sent and says it was queued; queued is read off the wire only when true", () => {
     const row: SendReceiptRow = { ...base, outcome: "sent", queued: true };
     expect(receiptLabelKey(row.outcome)).toBe("sendReceipts.outcome.sent");
@@ -317,6 +350,37 @@ describe("the session page's rows (send drill 3)", () => {
     expect(rows.receipts[1]!.detail).toBeUndefined();
     expect(rows.receipts[1]!.saw).toBeUndefined();
     expect(rows.receipts[2]!.detail).toHaveLength(240);
+  });
+
+  it("reads the line of a row off the wire, and leaves out one that is empty or not a string (2026-10-21)", () => {
+    const row = { requestId: "r1abcdefgh", at: 5, mode: "send", outcome: "sent", keys: ["Enter"], gapsMs: {}, harness: "claude", version: "2.1.302" };
+    const rows = readSendReceipts({
+      receipts: [
+        { ...row, line: "ok check please it's past 2pm" },
+        { ...row, requestId: "r2abcdefgh", line: "" },
+        { ...row, requestId: "r3abcdefgh", line: 7 },
+        { ...row, requestId: "r4abcdefgh" },
+      ],
+    });
+    expect(rows.receipts[0]!.line).toBe("ok check please it's past 2pm");
+    expect(rows.receipts[1]!.line).toBeUndefined();
+    expect(rows.receipts[2]!.line).toBeUndefined();
+    expect(rows.receipts[3]!.line).toBeUndefined();
+  });
+
+  it("reads the reader profile and its status off the wire, and drops a status it does not know (ADR 0123)", () => {
+    const row = { requestId: "r1abcdefgh", at: 5, mode: "send", outcome: "sent", keys: ["Enter"], gapsMs: {}, harness: "claude", version: "2.1.302" };
+    const rows = readSendReceipts({
+      receipts: [
+        { ...row, profileId: "claude@2.1", profileStatus: "verified" },
+        { ...row, requestId: "r2abcdefgh", profileId: "", profileStatus: "trusted" },
+        { ...row, requestId: "r3abcdefgh" },
+      ],
+    });
+    expect(rows.receipts[0]).toMatchObject({ profileId: "claude@2.1", profileStatus: "verified" });
+    expect(rows.receipts[1]!.profileId).toBeUndefined();
+    expect(rows.receipts[1]!.profileStatus).toBeUndefined();
+    expect(rows.receipts[2]!.profileId).toBeUndefined();
   });
 
   it("reads the cap of a row off the wire and drops one that is not whole", () => {
@@ -362,5 +426,39 @@ describe("offerMode and isCommand", () => {
     expect(isCommand(" /model")).toBe(true);
     expect(isCommand("@src/app.ts look here")).toBe(true);
     expect(isCommand("look at @src/app.ts")).toBe(false);
+  });
+});
+
+describe("a steer (M69)", () => {
+  const reply = (outcome: string, reason?: string): SendReply => {
+    const receipt: JsonObject = reason === undefined ? { outcome, keys: [] } : { outcome, reason, keys: [] };
+    const read = readSendReply({ receipt, offers: [], surface: { revision: 2, turn: "running", modal: "none", composer: "empty" } });
+    if (read === null) throw new Error("the wire answer was not readable");
+    return read;
+  };
+
+  it("steered clears the draft and has its own sentence key, the same words as the outcome word", () => {
+    const reading = readSend(reply("steered"));
+    expect(reading).toMatchObject({ clear: true, note: "steered", offers: [] });
+    expect(noteKey("steered")).toBe("composer.steer.steered");
+    expect(receiptLabelKey("steered")).toBe("sendReceipts.outcome.steered");
+  });
+
+  it("the two refusals keep the draft and name their own sentences", () => {
+    const unsupported = readSend(reply("refused", "steer_unsupported"));
+    expect(unsupported).toMatchObject({ clear: false, note: "steerUnsupported" });
+    expect(noteKey(unsupported.note)).toBe("composer.steer.unsupported");
+    const notAllowed = readSend(reply("refused", "steer_not_allowed"));
+    expect(notAllowed).toMatchObject({ clear: false, note: "steerNotAllowed" });
+    expect(noteKey(notAllowed.note)).toBe("composer.steer.notAllowed");
+  });
+
+  it("Recent sends: a steered row says nothing under its label, a refused steer row says its sentence", () => {
+    const base = { requestId: "req00001", at: 1, mode: "send" as const, keys: [], gapsMs: {}, harness: "pi", version: null };
+    const say = (key: string) => key;
+    expect(receiptSentence({ ...base, outcome: "steered" }, say)).toBeNull();
+    expect(receiptSentence({ ...base, outcome: "refused", reason: "steer_not_allowed" }, say)).toBe("composer.steer.notAllowed");
+    const rows = readSendReceipts({ receipts: [{ requestId: "r1abcdefgh", at: 5, mode: "send", outcome: "steered", keys: ["Enter"], gapsMs: {}, harness: "pi", version: "1.3.0" }] });
+    expect(rows.receipts[0]?.outcome).toBe("steered");
   });
 });

@@ -278,6 +278,8 @@ const SESSION_SUMMARY_KEYS = {
   working: true,
   blocked: true,
   host: true,
+  // NOT a crew dimension, the operator's display label from spaces.toml, absent without the file.
+  label: true,
 } satisfies Record<keyof SessionSummary, true>;
 
 const PANE_WIRE_KEYS = {
@@ -367,16 +369,27 @@ const PANE_WIRE_KEYS = {
   // (COLLIE_SEND_PROTOCOL=0 turns text sending off), but a pane carries it only when its session runtime
   // has a Send Protocol, and this harness builds none, so it is absent here and no golden byte moved.
   sendProtocol: true,
+  // Not a crew dimension: whether a send may steer the pane's turn (M69). It rides with `sendProtocol`
+  // only, on a pane whose Surface shadow reads a harness Collie may steer, and this harness builds no
+  // Send Protocol, so it is absent here and no golden byte moved.
+  canSteer: true,
   // Not a crew dimension: the pane's held sends (M56 spec 15). They ride with `sendProtocol` and only
   // when a send is held, and this harness builds no Send Protocol, so no golden byte moved.
   held: true,
   // Not a crew dimension: Herdr parked this pane's omp (`omp (sleeping)`), read by `collie doctor`.
   // Set only on a parked pane, and this baseline parks none, so no golden byte moved.
   sleeping: true,
+  // Not a crew dimension: whether a Stop (M68) has a key to press on this pane. It rides with `surface` only,
+  // and only when the pane's profile names an interrupt key; this harness builds no Surface, so no golden byte moved.
+  canStop: true,
   // Not a crew dimension: the pane's walky talky instance token (bridge/walky/instances.ts, added
   // 2026-10-18). A live solo bridge carries it on every pane, the change this baseline records on
   // purpose; the harness builds its wire with no instance registry, so no golden byte moved.
   instance: true,
+  // Not a crew dimension: the pane's usage dots (bridge/usage.ts, .adr/0115). Attached at serialise
+  // time from the statusLine wrapper's file, and this harness builds its body with no reader, so no
+  // golden byte moved.
+  usage: true,
 } satisfies Record<keyof PaneWire, true>;
 
 const DEVICE_AUTH_KEYS = {
@@ -478,12 +491,15 @@ describe("solo zero-tax — wire shapes carry no crew dimension", () => {
     ]);
   });
 
-  test("SessionSummary gained `host` and nothing else", () => {
+  // `label` is the operator's spaces.toml display label: not a crew dimension, and absent from
+  // every body here because no baseline writes the file.
+  test("SessionSummary gained `host` as its one crew dimension, and the optional `label`", () => {
     expect(Object.keys(SESSION_SUMMARY_KEYS).toSorted()).toEqual([
       "agents",
       "blocked",
       "host",
       "isPrimary",
+      "label",
       "name",
       "reachable",
       "working",
@@ -502,6 +518,8 @@ describe("solo zero-tax — wire shapes carry no crew dimension", () => {
       "asks",
       "badge",
       "cache",
+      "canSteer",
+      "canStop",
       "cwd",
       "effort",
       "focused",
@@ -537,6 +555,7 @@ describe("solo zero-tax — wire shapes carry no crew dimension", () => {
       "terminalTitleStale",
       "todos",
       "turnId",
+      "usage",
       "workspaceId",
       "workspaceLabel",
       "workspaceNumber",
@@ -737,7 +756,7 @@ describe("solo zero-tax — routes", () => {
       // pane whose adapter raises asks as data takes it, so a solo Herdr bridge answers it the refusal.
       // `send` and `abort` name the turn the phone saw (ADR 0101): writes, forwarded the same way, and
       // only a pane whose adapter takes guarded controls takes them; a Herdr pane gets the refusal.
-      "/^\\/api\\/pane\\/([^/]+)(?:\\/(reply|keys|upload|close|rename|history|chat|changes|files|commands|focus|answer|send|abort|action))?$/",
+      "/^\\/api\\/pane\\/([^/]+)(?:\\/(reply|keys|upload|close|rename|history|chat|changes|files|commands|focus|answer|send|abort|clear|action))?$/",
       // The slash commands Claude Code would load in the pane's cwd: a read of this machine's disk,
       // asked only when the palette opens, so a solo instance pays nothing per poll.
       "/^\\/api\\/pane\\/([^/]+)\\/claude-commands$/",
@@ -752,6 +771,9 @@ describe("solo zero-tax — routes", () => {
       // Walky talky's list for one pane (M62): the messages that reached it, newest first. A read, gated
       // like the pane read, this collie's own panes only until spec 03 makes it forwardable.
       "/^\\/api\\/pane\\/([^/]+)\\/walky$/",
+      // The pane owner's Drop on a held walky talky message (M62 spec 03): a write, this collie's own
+      // panes only. A message held on a crew member is dropped on that machine; the lead answers 400.
+      "/^\\/api\\/pane\\/([^/]+)\\/walky\\/([^/]+)\\/drop$/",
       // A space's rename (M53 spec 05): a write, forwarded to the owning member, and only an adapter that
       // declares `renameSpace` takes it; every other bridge answers it the refusal.
       "/^\\/api\\/space\\/([^/]+)\\/rename$/",
@@ -759,6 +781,9 @@ describe("solo zero-tax — routes", () => {
       // with the held file's and never made into a path. Lead-local, not forwardable.
       "/^\\/api\\/stt\\/model\\/([^/]+)$/",
       "/^\\/api\\/tab\\/([^/]+)\\/(rename|close)$/",
+      // The operator's Cancel on a held walky talky message it sent (M62 spec 03): a write, solo; a
+      // record held on a member answers `elsewhere`, never a route of its own.
+      "/^\\/api\\/walky\\/([^/]+)\\/cancel$/",
       // The Changes view asked by workspace (ADR 0065): the same read as the pane route's `changes`,
       // read-gated and forwarded with `?host=` to the member that owns the space.
       "/^\\/api\\/workspace\\/([^/]+)\\/changes$/",
@@ -856,6 +881,7 @@ describe("solo zero-tax — routes", () => {
       // than exempted. It is session-scoped and read-gated, and it registers no crew route of its
       // own: a lead reaches a peer's through the peer's existing `/crew/v1/*` dispatch.
       "/api/refresh",
+      "/api/report/context",
       // The Send Protocol (M56 spec 05): a SOLO route that legitimately extends this list, named here
       // rather than exempted. Write-gated through the same closure a reply rides, this collie's own
       // sessions only, and a 404 only when the operator set COLLIE_SEND_PROTOCOL=0 (the flag is on by
@@ -956,6 +982,8 @@ describe("solo zero-tax — routes", () => {
 const CONFIG_KEYS = {
   mux: true,
   muxEndpoint: true,
+  muxPickedBecause: true,
+  muxNotPickedBecause: true,
   tmuxBin: true,
   zellijBin: true,
   ternBin: true,
@@ -971,6 +999,7 @@ const CONFIG_KEYS = {
   fontsDir: true,
   launchersFile: true,
   cacheRulesFile: true,
+  spacesFile: true,
   maxUploadBytes: true,
   port: true,
   host: true,
@@ -980,6 +1009,7 @@ const CONFIG_KEYS = {
   readLines: true,
   transcript: true,
   journalRoots: true,
+  modelCatalogs: true,
   submitKeys: true,
   trustedUser: true,
   trustedUserOptional: true,
@@ -1002,6 +1032,7 @@ const CONFIG_KEYS = {
   surfaceShadow: true,
   sendProtocol: true,
   walky: true,
+  accountWindows: true,
   skipServe: true,
   basePath: true,
   uploadExtraTypes: true,
@@ -1016,6 +1047,7 @@ describe("solo zero-tax — config", () => {
     expect(keys).toEqual([
       "accessAud",
       "accessTeam",
+      "accountWindows",
       "allowAnyHost",
       "allowNonLoopbackBind",
       "allowedOrigins",
@@ -1033,9 +1065,12 @@ describe("solo zero-tax — config", () => {
       "keysFile",
       "launchersFile",
       "maxUploadBytes",
+      "modelCatalogs",
       "multiSession",
       "mux",
       "muxEndpoint",
+      "muxNotPickedBecause",
+      "muxPickedBecause",
       "notifyDelayMs",
       "pollIdleMs",
       "pollMs",
@@ -1050,6 +1085,7 @@ describe("solo zero-tax — config", () => {
       "socketPath",
       "sonioxApiKey",
       "sonioxTtsVoice",
+      "spacesFile",
       "stateDir",
       "submitKeys",
       "surfaceShadow",
@@ -1092,7 +1128,7 @@ describe("solo zero-tax — config", () => {
   // Read from `bridge/config-schema.ts` rather than by grepping `config.ts`'s source, because the
   // schema is now the single declaration of what every setting is (ADR 0040). The rows that carry a
   // `configField` are exactly the settings `loadConfig` resolves, which is the list §11 pins. A
-  // CONFIG FILE ADDS NO ENV KEY, so this list is the 38 names it has always been plus `COLLIE_BASE_PATH` (ADR 0052), `COLLIE_MUSE_ROOT`, `COLLIE_OPENCLAW_ROOT` (#401), the two `COLLIE_ACCESS_*` keys (ADR 0081) and `COLLIE_SENT` (ADR 0107) — the two
+  // CONFIG FILE ADDS NO ENV KEY, so this list is the 38 names it has always been plus `COLLIE_BASE_PATH` (ADR 0052), `COLLIE_MUSE_ROOT`, `COLLIE_OPENCLAW_ROOT` (#401), `COLLIE_KIRO_ROOT`, `COLLIE_DSH_ROOT`, the two `COLLIE_ACCESS_*` keys (ADR 0081) `COLLIE_SENT` (ADR 0107) and `COLLIE_ACCOUNT_WINDOWS` (ADR 0118) — the two
   // `COLLIE_MUX_ENDPOINT_<NAME>` rows collapse back to the prefix the old grep saw, because the env
   // name is built at the call site and the file key must not be.
   test("the schema names exactly today's COLLIE_* env keys — no crew enrollment key", () => {
@@ -1106,6 +1142,8 @@ describe("solo zero-tax — config", () => {
     expect(keys).toEqual([
       "COLLIE_ACCESS_AUD",
       "COLLIE_ACCESS_TEAM",
+      "COLLIE_ACCOUNT_WINDOWS",
+      "COLLIE_AGY_ROOT",
       "COLLIE_ALLOWED_ORIGINS",
       "COLLIE_ALLOW_ANY_HOST",
       "COLLIE_ALLOW_NON_LOOPBACK_BIND",
@@ -1115,10 +1153,12 @@ describe("solo zero-tax — config", () => {
       "COLLIE_CODEX_ROOT",
       "COLLIE_DEVICE_ALLOWLIST",
       "COLLIE_DEVICE_HEADER",
+      "COLLIE_DSH_ROOT",
       "COLLIE_GROK_ROOT",
       "COLLIE_HERDR_DIAL",
       "COLLIE_HERMES_ROOT",
       "COLLIE_HOST",
+      "COLLIE_KIRO_ROOT",
       "COLLIE_MAX_UPLOAD_MB",
       "COLLIE_MULTI_SESSION",
       "COLLIE_MUSE_ROOT",
@@ -1268,6 +1308,9 @@ const STATE_DIR_ENTRIES = [
   "update.json",
   "update.lock",
   "uploads",
+  // The usage readings, `usage/` (ADR 0115): one small file per Claude session, written by the
+  // statusLine wrapper, read and pruned by the bridge. Absent until a wrapped statusLine runs.
+  "usage",
   // The Whistle model's folder, `whistle/` (ADR 0096): the model, its manifest and a download's
   // part file. Absent until a write device taps "Download to host" or the operator runs
   // `collie stt whistle`; nothing else creates it.
@@ -1573,6 +1616,7 @@ describe("solo zero-tax — notifications", () => {
       body: "demo · /home/you",
       paneId: "p1",
       renotify: true,
+      badge: 1,
     });
     sink.clear();
     expect(sent).toEqual([
@@ -1584,6 +1628,7 @@ describe("solo zero-tax — notifications", () => {
         tag: "collie:herd",
         paneId: "p1",
         renotify: true,
+        badge: 1,
       },
       { type: "clear", tag: "collie:herd" },
     ]);

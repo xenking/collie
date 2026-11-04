@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Copy, GitBranchPlus, Maximize2, MessagesSquare, Monitor, Pencil, Pin, PinOff, ScrollText, Search, SlidersHorizontal, SquareTerminal, XCircle } from "lucide-react";
+import { Bug, Copy, GitBranchPlus, Maximize2, MessagesSquare, Monitor, Pencil, Pin, PinOff, ScrollText, Search, SlidersHorizontal, SquareTerminal, XCircle } from "lucide-react";
 
 import { BottomSheet } from "@/components/ui/sheet";
 import { WalkyIcon } from "@/components/walky-icon";
@@ -38,7 +38,8 @@ interface PaneActionsSheetProps {
    * this device's own preference and writes nothing to the machine.
    */
   savedCopy?: boolean;
-  /** Fired after a successful rename so the parent can revalidate (the label lands on the next poll). */
+  /** Fired after a successful rename so the parent can revalidate. The sheet also stamps a topology
+   *  burst (lib/poll-intent.ts), so the label lands within a beat even when that read is early. */
   onRenamed: () => void;
   /** Fired after a successful close, with the closed pane id — the parent navigates Home if it's the
    *  pane currently open, or revalidates so it drops out of the list. */
@@ -75,6 +76,12 @@ interface PaneActionsSheetProps {
    *  this collie and types into nothing. Absence is the gate, as it is for find, history and zen — the
    *  pane strip passes no callback, so a strip pill opens the sheet it always did. */
   onSettings?: () => void;
+  /**
+   * Open the Report a problem sheet for this pane (ADR 0123). A read in the sense the others are: it
+   * opens a sheet that sends nothing on its own. The pane view passes it for a pane on this machine only
+   * (a crew member's pane is the next slice); absence is the gate, as for the rows above.
+   */
+  onReport?: () => void;
   /**
    * Open on the rename view instead of the action list. The pane name in the header opens Pane
    * settings (1.17.0) and its Rename row lands here, so there is one rename flow and not two. Read
@@ -172,6 +179,7 @@ export function PaneActionsSheet({
   onHistory,
   onCopyOutput,
   onSettings,
+  onReport,
   onMessages,
   openInRename = false,
   onZen,
@@ -260,6 +268,10 @@ export function PaneActionsSheet({
       const res = await api.renamePane(pane.paneId, next, scope);
       if (res.ok) {
         setStatus(next ? t("paneActions.status.renamed") : t("paneActions.status.labelCleared"), "success");
+        // The same catch-up as a close. The bridge pokes its own re-read before it answers but does
+        // not wait for it, so the revalidate below can still read the old name; the burst brings
+        // the new one within a beat instead of after a gap timed for an idle screen.
+        stampTopology();
         onRenamed();
         onClose();
       } else {
@@ -502,6 +514,18 @@ export function PaneActionsSheet({
             label={pinned ? t("paneActions.unpin.label") : t("paneActions.pin.label")}
             onClick={togglePin}
           />
+          )}
+          {/* Report a problem trails Pin, so no row the operator knows moves when it appears.
+              Close-then-act, for the reason the find row states. */}
+          {onReport && (
+            <ActionRow
+              icon={<Bug className="size-4 shrink-0 text-muted-foreground" />}
+              label={t("paneActions.report.label")}
+              onClick={() => {
+                onClose();
+                onReport();
+              }}
+            />
           )}
         </div>
       )}

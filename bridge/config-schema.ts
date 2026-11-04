@@ -18,6 +18,7 @@
 // not change what any process reads; `bridge/solo-baseline.test.ts` pins the same 37 names it always
 // pinned, now read from {@link CONFIG_SETTINGS} instead of from `bridge/config.ts`'s source.
 
+import { ACCOUNT_WINDOW_HARNESSES } from "./account-windows-setting.ts";
 import { DEFAULT_MUX } from "./mux/registry.ts";
 import { DEFAULT_MAX_UPLOAD_MB } from "./uploads.ts";
 
@@ -75,10 +76,11 @@ export const SECTION_DOC = {
  * How a value is read.
  *
  * One per reader in `bridge/config.ts` (`envInt`, `envBool`, `envEnum`, `envList`, `envRoots`) plus
- * `string` for a raw read and `secret` — a `string` that `config show` masks and that raises the
+ * `flags` (an on/off switch that may also name which of a closed set of ids are on, the file taking a
+ * boolean, a string or an array of strings), `string` for a raw read and `secret` — a `string` that `config show` masks and that raises the
  * `.env` permission rule on the file holding it.
  */
-export type ConfigKind = "int" | "bool" | "enum" | "list" | "roots" | "string" | "secret";
+export type ConfigKind = "int" | "bool" | "enum" | "flags" | "list" | "roots" | "string" | "secret";
 
 /** A default as it would appear in the file: the TOML value `config init` writes, commented out. */
 export type ConfigDefault = string | number | boolean | readonly string[];
@@ -126,6 +128,13 @@ export type ConfigSetting =
       readonly kind: "enum";
       /** One of {@link values}, or `""` when the feature is absent until something configures it. */
       readonly default: string;
+      readonly values: readonly string[];
+    })
+  | (ConfigSettingBase & {
+      readonly kind: "flags";
+      /** The words the environment reads: `on`, `off`, `all`, or a comma list of {@link values}. */
+      readonly default: string;
+      /** The ids a list may name. An id outside it is refused. */
       readonly values: readonly string[];
     })
   | (ConfigSettingBase & { readonly kind: "list" | "roots"; readonly default: readonly string[] })
@@ -233,6 +242,16 @@ export const CONFIG_SETTINGS: readonly ConfigSetting[] = [
     default: true,
     doc: "Take walky talky messages for this machine's agent panes. Off refuses each one; the CLI here still sends.",
     configField: "walky",
+  },
+  {
+    key: "account_windows",
+    env: "COLLIE_ACCOUNT_WINDOWS",
+    section: "bridge",
+    kind: "flags",
+    default: "on",
+    values: ACCOUNT_WINDOW_HARNESSES,
+    doc: "Show the 5-hour and 7-day windows. on = claude and codex, off = none, all = every source, or name harnesses (claude, codex, opencode, grok). Claude reads your login on this machine and asks api.anthropic.com; opencode and grok are unverified and off unless named.",
+    configField: "accountWindows",
   },
   {
     key: "transcript",
@@ -453,6 +472,15 @@ export const CONFIG_SETTINGS: readonly ConfigSetting[] = [
     doc: "The tuios daemon socket to drive. Empty takes the socket tuios itself uses.",
     configField: "muxEndpoint",
   },
+  {
+    key: "mux_endpoint_herdr_core",
+    env: "COLLIE_MUX_ENDPOINT_HERDR_CORE",
+    section: "mux",
+    kind: "string",
+    default: "",
+    doc: "The herdr-core socket to drive. Empty takes the socket hc itself dials: HC_SOCKET, else the HC_SESSION socket under XDG_RUNTIME_DIR or an existing /run/user/<uid>, else in the session's state directory (XDG_STATE_HOME or ~/.local/state, as on macOS).",
+    configField: "muxEndpoint",
+  },
 
   // ── access ─────────────────────────────────────────────────────────────────
   {
@@ -603,6 +631,15 @@ export const CONFIG_SETTINGS: readonly ConfigSetting[] = [
 
   // ── journal ────────────────────────────────────────────────────────────────
   {
+    key: "agy_root",
+    env: "COLLIE_AGY_ROOT",
+    section: "journal",
+    kind: "roots",
+    default: [],
+    doc: "Where Antigravity CLI keeps conversations and presence locks. Empty takes ~/.gemini/antigravity-cli.",
+    configField: "journalRoots",
+  },
+  {
     key: "transcript_root",
     env: "COLLIE_TRANSCRIPT_ROOT",
     section: "journal",
@@ -654,6 +691,24 @@ export const CONFIG_SETTINGS: readonly ConfigSetting[] = [
     kind: "roots",
     default: [],
     doc: "Where Hermes keeps its session logs. Empty takes $HERMES_HOME, else ~/.hermes. Its named profiles (profiles/<name>/) are read too.",
+    configField: "journalRoots",
+  },
+  {
+    key: "kiro_root",
+    env: "COLLIE_KIRO_ROOT",
+    section: "journal",
+    kind: "roots",
+    default: [],
+    doc: "Where Kiro V3 keeps its sessions. Empty follows KIRO_HOME, else ~/.kiro/sessions.",
+    configField: "journalRoots",
+  },
+  {
+    key: "dsh_root",
+    env: "COLLIE_DSH_ROOT",
+    section: "journal",
+    kind: "roots",
+    default: [],
+    doc: "Where DeepSeek Harness keeps the sessions dsh-tui writes. Empty follows DSH_HOME, else ~/.dsh/sessions.",
     configField: "journalRoots",
   },
   {

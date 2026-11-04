@@ -115,6 +115,9 @@ export const WALK_PAIRS: readonly WalkPair[] = [
   ["pi", "pi--v110-question-narrow.txt", "pi--v110-question-narrow-moved.txt"],
   ["pi", "pi--v0871-question-plain.txt", "pi--v0871-question-plain-moved.txt"],
   ["pi", "pi--v110-question-plain.txt", "pi--v110-question-plain-moved.txt"],
+  // The same stock `question` on pi 1.3.0 through a herdr-core bridge, a read with no styling: the
+  // pointer moved from 1 to 3 by two Down presses (M78 spec 07, live lab 2026-10-30).
+  ["pi", "pi--v130-core-question--w120.txt", "pi--v130-core-question-moved--w120.txt"],
   // pi's stock `questionnaire` example: one question, then both pages of a tabbed one.
   ["pi", "pi--v0871-questionnaire-single.txt", "pi--v0871-questionnaire-single-moved.txt"],
   ["pi", "pi--v110-questionnaire-single.txt", "pi--v110-questionnaire-single-moved.txt"],
@@ -131,6 +134,39 @@ export const WALK_PAIRS: readonly WalkPair[] = [
   // pi's example permission-gate (pi 0.87.1), pi's own selector: Down at 120 columns, Up at 80.
   ["pi", "pi--v0871-permission-gate.txt", "pi--v0871-permission-gate-moved.txt"],
   ["pi", "pi--v0871-permission-gate-narrow.txt", "pi--v0871-permission-gate-narrow-moved.txt"],
+  // gentle-pi 4.2.0's review-consent screen (pi 1.3.0): no rule frame, footer last; the Effect paragraph follows the pointer.
+  ["pi", "pi--v130-gentle-review-consent.txt", "pi--v130-gentle-review-consent-moved.txt"],
+  // Kiro V3 2.33.0: the startup workspace trust dialog, before and after one Down at each width.
+  ["kiro", "kiro--v3-workspace-trust-continue-w120.txt", "kiro--v3-workspace-trust-exit-w120.txt"],
+  ["kiro", "kiro--v3-workspace-trust-continue-w60.txt", "kiro--v3-workspace-trust-exit-w60.txt"],
+  ["kiro", "kiro--v3-workspace-trust-continue-w40.txt", "kiro--v3-workspace-trust-exit-w40.txt"],
+  // Kiro V3 2.32.0: the same shell request with Allow, Always allow and Deny pointed.
+  ["kiro", "kiro--v3-approval-allow-w120.txt", "kiro--v3-approval-deny-w120.txt"],
+  ["kiro", "kiro--v3-approval-always-w120.txt", "kiro--v3-approval-deny-w120.txt"],
+  ["kiro", "kiro--v3-approval-allow-w60.txt", "kiro--v3-approval-deny-w60.txt"],
+  ["kiro", "kiro--v3-approval-denied-request-allow-w120.txt", "kiro--v3-approval-denied-request-deny-w120.txt"],
+  ["kiro", "kiro--v3-shell-args-allow-w120.txt", "kiro--v3-shell-args-deny-w120.txt"],
+  ["kiro", "kiro--v3-shell-args-allow-w60.txt", "kiro--v3-shell-args-deny-w60.txt"],
+  ["kiro", "kiro--v3-shell-bare-allow-w120.txt", "kiro--v3-shell-bare-deny-w120.txt"],
+  ["kiro", "kiro--v3-shell-wrapped-allow-w120.txt", "kiro--v3-shell-wrapped-deny-w120.txt"],
+  ["kiro", "kiro--v3-shell-wrapped-allow-w60.txt", "kiro--v3-shell-wrapped-deny-w60.txt"],
+  // Installed V3 file tools: Allow and Deny with the complete read/diff preview unchanged.
+  ["kiro", "kiro--v3-read-allow-w120.txt", "kiro--v3-read-deny-w120.txt"],
+  ["kiro", "kiro--v3-read-allow-w60.txt", "kiro--v3-read-deny-w60.txt"],
+  ["kiro", "kiro--v3-read-denied-request-allow-w120.txt", "kiro--v3-read-denied-request-deny-w120.txt"],
+  ["kiro", "kiro--v3-write-allow-w120.txt", "kiro--v3-write-deny-w120.txt"],
+  ["kiro", "kiro--v3-write-allow-w60.txt", "kiro--v3-write-deny-w60.txt"],
+  ["kiro", "kiro--v3-write-lines-allow-w120.txt", "kiro--v3-write-lines-deny-w120.txt"],
+  ["kiro", "kiro--v3-write-denied-request-allow-w120.txt", "kiro--v3-write-denied-request-deny-w120.txt"],
+  ["kiro", "kiro--v3-replace-allow-w120.txt", "kiro--v3-replace-deny-w120.txt"],
+  ["kiro", "kiro--v3-replace-allow-w60.txt", "kiro--v3-replace-deny-w60.txt"],
+  ["kiro", "kiro--v3-replace-denied-request-allow-w120.txt", "kiro--v3-replace-denied-request-deny-w120.txt"],
+  ["kiro", "kiro--v3-read-wrapped-allow-w120.txt", "kiro--v3-read-wrapped-deny-w120.txt"],
+  ["kiro", "kiro--v3-read-wrapped-allow-w60.txt", "kiro--v3-read-wrapped-deny-w60.txt"],
+  // Kiro V3 2.32.0 with tools trusted: write and replace panels also offer Always allow.
+  ["kiro", "kiro--v3-write-trusted-allow-w120.txt", "kiro--v3-write-trusted-deny-w120.txt"],
+  ["kiro", "kiro--v3-write-trusted-always-w120.txt", "kiro--v3-write-trusted-deny-w120.txt"],
+  ["kiro", "kiro--v3-replace-trusted-allow-w120.txt", "kiro--v3-replace-trusted-deny-w120.txt"],
 ];
 
 /**
@@ -192,5 +228,17 @@ export const WALK_GAPS = {
   "omp | select | Pick a colour": {
     since: "2026-10-03",
     reason: "no pointer-only pair: the two captures differ by a `✎ note` mark, which is note state, not the pointer",
+  },
+  "omp | select | Which of these would be most useful for your work right now?": {
+    since: "2026-10-25",
+    reason:
+      "no second capture yet: one 18.12.6 capture of an Ask with option previews, pointer on the first row; " +
+      "ask-dialog.ts draws a preview under its option whatever the pointer, and ask.test.ts derives the moved screen",
+  },
+  "omp | select | What work should I plan?": {
+    since: "2026-10-25",
+    reason:
+      "no second capture yet: one 18.12.6 capture of the plan-mode Ask, pointer on the first row; the grammar is " +
+      "the previews dialog's, whose moved screen ask.test.ts derives",
   },
 } satisfies Record<string, WalkGap>;

@@ -21,7 +21,7 @@ const fixtureLines = (name: string): StyledLine[] =>
   linesOf(readFileSync(join(PANES_DIR, name), "utf8"));
 
 /** Every registered agent string. agy and antigravity are two registrations of one adapter. */
-const AGENTS = ["claude", "codex", "grok", "omp", "agy", "antigravity", "muse", "opencode", "hermes"] as const;
+const AGENTS = ["claude", "codex", "grok", "omp", "agy", "antigravity", "muse", "opencode", "hermes", "kiro"] as const;
 
 /** What the post-pass answers for `agent` on `lines` — the exact composition the three call sites
  *  use (harness/index.ts buildBlocks, agent-chat's dialogPresent, dialog-guard's dialogDetector). */
@@ -47,6 +47,7 @@ describe("the cancel key each adapter declares", () => {
     // Hermes's classic CLI binds no Escape on its panels; Ctrl+C was probed as the way out of each
     // (hermes/CLARIFY_NOTES.md, hermes/APPROVAL_NOTES.md).
     ["hermes", "ctrl+c"],
+    ["kiro", "Escape"],
   ])("%s declares %s", (agent, key) => {
     expect(adapterFor(agent)!.cancelKey).toBe(key);
   });
@@ -67,6 +68,7 @@ describe("a real unread modal gets the card", () => {
   it.each([
     ["claude", "claude-lab--menu-status-screen--w82.txt", "Escape"],
     ["codex", "codex--ask-notes-focused.txt", "Escape"],
+    ["kiro", "kiro--v3-approval-edit-w120.txt", "Escape"],
     ["grok", "grok--ask-multi.txt", "ctrl+c"],
     ["muse", "muse--ask-color-notes-open.txt", "Escape"],
     ["opencode", "oc--agents-picker.txt", "Escape"],
@@ -215,6 +217,22 @@ describe("the card never coexists with a live composer", () => {
 //                 second-tap override (.adr/0053) is what keeps each one costing a tap rather than a
 //                 locked composer. Shrink this list by fixing the probe, never by loosening the test.
 const CARD_FIXTURES = {
+  kiro: {
+    // Captured edit fields and MCP approvals remain raw; the 40-column footer wraps by column.
+    modals: [
+      "kiro--v3-approval-edit-w120.txt", "kiro--v3-approval-clipped-w40.txt",
+      "kiro--v3-replace-edit-w120.txt",
+      "kiro--v3-mcp-allow-w120.txt", "kiro--v3-mcp-allow-w60.txt",
+      "kiro--v3-mcp-deny-w120.txt", "kiro--v3-mcp-deny-w60.txt",
+      "kiro--v3-mcp-denied-request-allow-w120.txt", "kiro--v3-mcp-denied-request-deny-w120.txt",
+      "kiro--v3-mcp-wrapped-allow-w120.txt", "kiro--v3-mcp-wrapped-allow-w60.txt",
+      "kiro--v3-mcp-wrapped-deny-w120.txt", "kiro--v3-mcp-wrapped-deny-w60.txt",
+      "kiro--v3-mcp-wrapped-clipped-w40.txt",
+      "kiro--v3-write-viewport-allow-w120.txt", "kiro--v3-write-viewport-deny-w120.txt",
+      "kiro--v3-write-viewport-allow-w60.txt", "kiro--v3-write-viewport-deny-w60.txt",
+    ],
+    notModals: [],
+  },
   claude: {
     modals: [
       // corpus: a modal carrying its own typeable box; the locator's refusal is the safe read
@@ -260,22 +278,28 @@ const CARD_FIXTURES = {
     notModals: [],
   },
   muse: {
-    // README: the per-question note input, open and typed — real dialogs
+    // README: the per-question note input, open and typed — real dialogs. The filter pickers
+    // (/effort, /hud) joined them with MUSE-16: their field swallows every typed character
+    // as filter text, so no grammar lifts them and Escape (probed to exit without
+    // committing) is the way out.
     modals: [
       "muse--ask-color-notes-open.txt",
       "muse--ask-color-notes-typed.txt",
       "muse--ask-toppings-notes-open.txt",
+      "muse--filter-effort-nomatch.txt",
+      "muse--filter-effort-typed.txt",
+      "muse--filter-effort.txt",
+      "muse--filter-hud.txt",
     ],
     notModals: [],
   },
   // README: the `/resume` Conversations picker after a search that matched nothing, a real dialog
   // with no row to select, so the menu grammar declines it and Escape is the way out, and a checkbox
   // question, which no recipe here ticks. Every other AGY dialog fixture is one its grammars read.
-  // agy--working.txt is a mid-turn screen (M56 spec 14 review restored the first capture): its footer
-  // `esc to cancel` is also the key hint of an agy dialog, so the card shows on a busy pane and offers
-  // Escape over it. A known false positive of the agy grammar, left for its own fix.
-  agy: { modals: ["agy--ask-multi.txt", "agy--resume-picker-nomatch.txt"], notModals: ["agy--working.txt"] },
-  antigravity: { modals: ["agy--ask-multi.txt", "agy--resume-picker-nomatch.txt"], notModals: ["agy--working.txt"] },
+  // `agy--working.txt` keeps its composer live (`OWN_ESC_STATUS` in `agy/chrome.ts`), so no card shows
+  // on a busy pane.
+  agy: { modals: ["agy--ask-multi.txt", "agy--resume-picker-nomatch.txt"], notModals: [] },
+  antigravity: { modals: ["agy--ask-multi.txt", "agy--resume-picker-nomatch.txt"], notModals: [] },
   // Every opencode picker: composerReady refuses it (the picker shape) and no grammar reads it, so
   // Escape, which closes a picker (probed on 1.18.32), is its way out. The permission steps and every
   // question dialog the grammars lift (single select, multi select, a many-question call, the Confirm
@@ -291,6 +315,9 @@ const CARD_FIXTURES = {
       "oc--question--multi--free-text.txt",
       "oc--question--tall14.txt",
       "oc--update-available.txt",
+      // opencode 2.1.1's open free-text input: the list's footer becomes `enter done  esc close`, so
+      // no grammar lifts it and the card still has to stand over it (2026-10-27).
+      "oc--v211-question--multi--free-text.txt",
     ],
     notModals: [],
   },
@@ -318,6 +345,8 @@ const CARD_FIXTURES = {
       // omp 18.6.1's Models picker and settings screen (lab, 2026-10-17).
       "omp--v18-6-model-selector-empty--w120.txt",
       "omp--v18-6-settings-screen--w120.txt",
+      // omp 18.12.2's goal menu, which a bare `/goal` opens in a goal turn (lab, 2026-10-22).
+      "omp--v18-12-2-goal-bare-menu--w119.txt",
       "omp--v18-4-resume-nomatch.txt",
       "omp--v18-4-switch-nerd.txt",
       "omp--v18-4-switch-nomatch.txt",
@@ -374,6 +403,7 @@ describe("the declaration tracks the harness", () => {
   it.each([
     ["claude", "claude-lab--menu-status-screen--w82.txt", "Esc to cancel"],
     ["codex", "codex--ask-notes-focused.txt", "esc to"],
+    ["kiro", "kiro--v3-approval-edit-w120.txt", "esc to close"],
     ["muse", "muse--ask-color-notes-open.txt", "Esc to"],
     ["agy", "agy--permission-bash.txt", "esc to cancel"],
     ["antigravity", "agy--permission-bash.txt", "esc to cancel"],

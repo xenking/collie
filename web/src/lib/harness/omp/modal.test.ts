@@ -35,6 +35,8 @@ const MODALS_WITH_A_WAY_OUT = [
   // omp 18.6.1's Models picker and settings screen, the screens `/model` and `/settings` open (lab, 2026-10-17).
   "omp--v18-6-model-selector-empty--w120.txt",
   "omp--v18-6-settings-screen--w120.txt",
+  // omp 18.12.2's goal menu, which a bare `/goal` opens in a goal turn (lab, 2026-10-22): `⎋ cancel`.
+  "omp--v18-12-2-goal-bare-menu--w119.txt",
   "omp--approval-bash.txt",
   "omp--approval-write--deny.txt",
   "omp--approval-write.txt",
@@ -61,6 +63,8 @@ const MODALS_WITH_A_WAY_OUT = [
   "omp--v18-4-approval-write-long.txt",
   "omp--v18-4-approval-write-moved.txt",
   "omp--v18-4-approval-write.txt",
+  // omp 18.6.1's `Allow tool: goal`, a dialog with no body, LIFTED (approval.ts, BODYLESS_TOOLS).
+  "omp--v18-6-1-approval-goal--w120.txt",
   "omp--v18-4-ask-multi-checked.txt",
   "omp--v18-4-ask-multi.txt",
   "omp--v18-4-ask-single-moved.txt",
@@ -74,6 +78,11 @@ const MODALS_WITH_A_WAY_OUT = [
   "omp--v18-4-resume-untitled-dated.txt",
   "omp--v18-4-resume.txt",
   // The Ask tool in omp 18.8 with option descriptions (#372), LIFTED like the 18.4.10 single select.
+  // The Ask in omp 18.12.6 with option previews, LIFTED (omp/ask.ts).
+  "omp--v18-12-6-ask-previews--w120.txt",
+  "omp--v18-12-6-ask-plan-mode--w120.txt",
+  // The free-text-only Ask of omp 18.12.6 (`Other` alone), LIFTED.
+  "omp--v18-12-6-ask-freetext--w120.txt",
   "omp--v18-8-ask-single-described-moved.txt",
   "omp--v18-8-ask-single-described.txt",
   "omp--v18-10-ask-single.txt",

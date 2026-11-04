@@ -41,6 +41,7 @@ afterwards. A copy-paste gives you six places to remember instead.
 | `ui/fab.tsx` | The floating New button: a 48px-tall "+ New" pill in the outline-button look (page fill, a uniform 1px `--border` edge, foreground ink, `shadow-md`; `dark:bg-card` lifts it off the near-black page; hover and press take `--accent`) with the house 2px corner, that folds to a 48px round "+" once the list scrolls (`collapsed`) and opens out again at the top; width and corner move on one transition that `motion-reduce` turns off. It is `fixed` at the right edge of the content column, portalled to `<body>`, at `z-30` (under the toast's `z-40` and the sheets' `z-50`). The ONE exception to "the sheet is the app's only floating layer", and only on the dashboard's Dashboard tab. It owns the look, the busy spinner swap and the name; the caller owns whether it is drawn and the `bottom-` that clears its footer. Exception rules below the table. |
 | `ui/image-card.tsx` | One journal picture, framed, as an anchor to its bytes, with a caption saying where it came from. The mirror's placeholder clusters, and the newest turn's picture right after the mirror. Every element is a `<span>`, so it may sit inside the mirror's `<pre>`. `surface` picks the frame: dark-space inside the mirror, the app's tokens on the page. |
 | `ui/image-frame.tsx` | One picture shown whole in the content column: at most the column's width and 70% of the screen's height, centred, on a checkerboard of `--card` and `--muted` that shows transparency in both themes, with one caption line under it that is always there, so filling it moves nothing. The Files view's picture and SVG previews (ADR 0090). Not for a journal picture, which is `ImageCard`. |
+| `ui/inline-editor.tsx` | A short text the person types on the card itself: a bordered box with a labelled textarea, a help line, Cancel and a Send that can spin; plus the dashed offer button that opens it. Owns no words and no network. The plan card's feedback, and AskUserQuestion's typed answer. |
 | `ui/list-group.tsx` | A run of flat rows drawn as ONE bordered region. Gives a `divide-y` list a first and last edge. |
 | `ui/labelled-strip.tsx` | The structure of a named, horizontally scrolling pill row: non-scrolling label, `aria-labelledby`, edge-to-edge scroller. Also exports `STRIP_TAP_TARGET`. |
 | `ui/one-of.tsx` | One box, several alternatives, exactly one shown — all of them stacked in a single grid cell, so the box is sized by the widest and a swap is paint, not layout. The §2 technique for a run of text whose WORD changes with the state. |
@@ -49,8 +50,8 @@ afterwards. A copy-paste gives you six places to remember instead.
 | `ui/progress.tsx` | How far something is, as one bar: a width inside a box whose height is stated, so a moving value repaints and never re-lays-out. `thin` is a 4px bar on a `--muted` track (Chat's progress row); `hairline` is a 1px line with no track (the bottom edge of a pane card). The house 2px corner, `progressbar` role, clamped 0 to 100. Owns no words. |
 | `ui/search-field.tsx` | The search box: a 44px text field with a magnifier inside its left edge, 16px type so iOS does not zoom, every keyboard correction off, `inputMode="search"`. Forwards its ref to the `<input>` so a sheet can focus it on open. Owns the look and the field, not the list under it or the filtering. The command palette's and the Sent sheet's. |
 | `ui/section-label.tsx` | The small uppercase word that names a section. Type only — it renders a `<span>` and owns no structure. |
-| `ui/select.tsx` | A form select: a NATIVE `<select>` in a 44px box with our own chevron (`appearance-none`), a full `--border` edge and the house corner, so a phone draws its own picker and no sheet is needed. `lead` puts an inert glyph before the text; the caller's `className` sizes the box (`flex-1 min-w-0` for the flexible one, `shrink-0` for the compact one). The New page's machine, agent and command selects (`routes/new.tsx`), and the dashboard's workspace and order selects (`dash-selects.tsx`). The four Settings selects (language, typeface, terminal font, theme) carry the same construction by hand and have not been moved onto it. |
-| `ui/sheet.tsx` | `BottomSheet`. The app's only floating layer, with one exception: the dashboard's floating New button (`ui/fab.tsx`, below). There is no popover, no dialog, no tooltip. It also exports `useAnySheetOpen`, the count of open sheets that button hides itself on. |
+| `ui/select.tsx` | A form select: a NATIVE `<select>` in a 44px box with our own chevron (`appearance-none`), a full `--border` edge and the house corner, so a phone draws its own picker and no sheet is needed. `lead` puts an inert glyph before the text; the caller's `className` sizes the box (`flex-1 min-w-0` for the flexible one, `shrink-0` for the compact one). The New page's machine, agent and command selects (`routes/new.tsx`), and the dashboard's order select (`dash-selects.tsx`). The dashboard's workspace filter there draws the same box as a button, because it chooses several workspaces in a sheet of checks (issue #527). The four Settings selects (language, typeface, terminal font, theme) carry the same construction by hand and have not been moved onto it. |
+| `ui/sheet.tsx` | `BottomSheet`. The app's only floating layer, with one exception: the dashboard's floating New button (`ui/fab.tsx`, below). The pane navigation overlay floats too, but takes no touch (below). There is no popover, no dialog, no tooltip. It also exports `useAnySheetOpen`, the count of open sheets that button hides itself on. |
 | `ui/strip-host.tsx` | The ribbon band, an overlay hung from the header bar's bottom edge. Renders ONE `StripSlot` at a time, the highest priority, and keeps the two permanent `sr-only` live regions. It reserves no space: a zero-height anchor sits right after the header, and the band floats from it at `z-30` over the top of the route, on the page colour with a `shadow-md`. Domain-blind: a bigger number wins, and it does not know what a connection is. `flow` paints it in flow instead, for a playground stage with no route under it; the app never sets it. |
 | `ui/switch.tsx` | A boolean toggle, `role="switch"`. No Radix. |
 | `ui/tab-bar.tsx` | A bottom tab bar: equal icon-over-word tabs on the page colour, a rule above, the safe area below. The active mark is a reserved 2px top edge, and a count badge floats on the icon, so a switch or a count never moves a word. The dashboard footer (ADR 0066, ADR 0085): with a crew, Crew, Dashboard, Changes, so the default tab sits in the middle under the thumb and the two side tabs are the side trips. |
@@ -93,6 +94,21 @@ section first:
   "New" in both shapes, and the word is `aria-hidden`.
 - **The Spaces header's FolderPlus stays,** and opens the same page. So does the empty dashboard's
   "Start your first agent" card. The button adds an entry; it removes none.
+
+### The pane navigation overlay floats, and takes no touch
+
+`components/pane-nav-overlay.tsx` ([ADR 0121](./.adr/0121-two-fingers-move-between-panes.md)) is drawn
+only while a pane navigation gesture is armed: the target pane's name and the map at the top, and the
+four-arrow pad where the second finger first landed. It is not a control, so it does not count against
+the rule above, and it is bounded the same way:
+
+- **It holds no space and takes no touch.** Portalled to `<body>`, `fixed`, `pointer-events-none`,
+  `aria-hidden`, at `z-40`: over the band, under the sheets. Its coming and going moves nothing (§2).
+- **It lives only while the mode is armed,** and leaves on the commit, the cancel or an unmount. It is
+  never a standing condition.
+- **Tokens only:** `--card` with a uniform `--rule` edge and `shadow-md`, the house 2px corner, the
+  status marks from `StatusDot` and `UnseenMark`, the lit arrow in `--primary`. Its step pulse is
+  `.pane-nav-pulse` in index.css, which reduced motion turns off.
 
 ### The alert family: the primitive landed, the conversion did not finish
 
@@ -713,6 +729,19 @@ Stated so nobody reads this document as a description of a clean tree.
    new token, which is a new schema version (§13). These are not closed in M57, because that
    milestone's exit test is a zero pixel diff of the current theme, and each fix needs its own
    proof that it stays at zero.
+7. **`box-text-block.tsx:11` — the Authentication card's links are inline, below §6's 44px
+   floor.** A login URL sits inside the command's own sentence, so the card links it where it
+   stands, the way the mirror does: the same `py-[0.35em]` reach (`ansi-output.tsx:170` holds
+   the measurement), about 22px on a phone. Two different links can sit on neighbouring lines
+   of one card, which makes a mis-tap the cost. Closing it means a layout that pulls each link
+   out of its sentence onto a full-height row, and the sentence then no longer reads as the
+   command printed it.
+8. **The Authentication card leaves with keyboard focus inside it.** When the login finishes
+   the box goes, the card unmounts, and a link that held keyboard focus takes it to `<body>`.
+   Handing focus to the composer was tried and taken back: a tapped link holds focus too on
+   Android, so the hand-off opened the soft keyboard over a phone that had just come back from
+   the login tab, the case `focusFromMirror` (in `agent-chat.tsx`) declines for the mirror's
+   own links. Closing it needs a target that takes focus without raising the keyboard.
 
 ---
 
@@ -854,8 +883,8 @@ On a phone the edge swipe is history back, so the history stack must be the leve
 ([ADR 0067](./.adr/0067-back-goes-up-one-level.md)). Navigate through `useNav()`
 (`web/src/hooks/use-nav.ts`), never a bare `navigate(path)`:
 
-- **Down** (`nav.down`) pushes and records `from`. Opening a space, a pane, History, Changes,
-  Settings, Crew, Updates, New.
+- **Down** (`nav.down`) pushes and records `from`. Opening a space, a pane, History, Changes, the
+  zoomed output, Settings, Crew, Updates, New.
 - **Sideways** (`nav.side`) replaces and carries `from`. Pane to pane, tab to tab, space chip to
   space chip, the machine and session switchers. `nav.open` picks down or sideways for a new pane.
 - **Up** (`nav.up(parent)`, `nav.upTo(parent)`) steps back when the entry behind is a legitimate
@@ -863,10 +892,13 @@ On a phone the edge swipe is history back, so the history stack must be the leve
   and every automatic exit. Never push a parent.
 - **A new route** gets its place in `ancestorsOf` and `parentChain` (`web/src/lib/nav.ts`) in the
   same change.
-- **A sheet owns no history entry.** It opens and closes without navigating.
+- **A sheet owns no history entry.** It opens and closes without navigating. A full-screen view that
+  the phone's back must close is not a sheet. It is a level with its own path. The zoomed output is
+  `/pane/:id/zoom`, a child of the pane route, so the pane stays mounted under it.
 - **On phones, a screen below a pane repeats its Back at the bottom on the thumb side.** The header
-  arrow is out of reach of a thumb on a large phone. The bottom Back (`ui/bottom-bar.tsx`) takes the
-  same handler and the same name as the arrow, from one object, so the two cannot drift; it sits at
+  arrow is out of reach of a thumb on a large phone. The bottom Back (`BackBar`, in
+  `components/back-bar.tsx`, built on `ui/bottom-bar.tsx`) takes the same handler and the same name
+  as the arrow, from one object, so the two cannot drift; it sits at
   the right end, or the left with the `hand` pref on `left`, and it hides while the keyboard is up.
   The arrow stays at every width.
 
@@ -900,6 +932,10 @@ come from `light-dark()`.
 | Host identity (10) | `host-0` to `host-9` |
 
 `popover` and `popover-foreground` stay aliases of `card` and are not in a theme file.
+
+`pane-active` (1.24.0) is the frame of the pane you are working in on a large screen, and nothing else. It is outside the 43 but a theme can set it: from schema version 3 it is an optional token in either half. A theme that leaves it out keeps the `:root` pair in index.css, so every file written before version 3 reads and exports unchanged; a file that sets it must say version 3. The contrast report holds it to 3:1 on `background` in a half that sets it. Nightwatch sets its own, a warm sky for its amber palette.
+
+The name "ColliePWA" in the large screen's sidebar draws "PWA" in the three status tokens, always: P `status-done`, W `status-working`, A `status-blocked` (`components/wordmark.tsx`). Unlike the website, the app does not rest in grey. It is not a token of its own, and no application state may ever drive those inks.
 
 **The twelve version 2 tokens.** Each is a closed list. A file names a word, and one table says what the word
 does (`web/src/lib/theme/surface.ts`). The default word of every token is today's look.

@@ -8,6 +8,7 @@ import type { Confidence } from "./cache/claims.ts";
 import type { PaneCache } from "./cache/engine.ts";
 import type { ApiErrorDetail, ErrorCode } from "./error-codes.ts";
 import type { GitHead } from "./git-head.ts";
+import type { PaneUsage } from "./usage.ts";
 import type { ChatBody } from "./journal/live.ts";
 import type { AgentSessionRef, TranscriptEntry } from "./journal/types.ts";
 import type { MuxCapability, MuxSpaceCapacity, MuxTopologyLatency } from "./mux/capabilities.ts";
@@ -63,9 +64,12 @@ export interface AgentView {
   /** User-set pane label (herdr `pane.rename`), when one is set; absent when the pane is unlabelled. */
   paneLabel?: string;
   /**
-   * Claude's OWN session name, set in-agent via `/rename` and read out of the pane's rendered text
-   * (see `extractClaudeSessionName` in state-engine.ts). Claude-only and derived, not a wire field —
-   * absent for unnamed sessions and every non-claude pane. Display priority is `paneLabel` first.
+   * The harness's OWN session name, set in-agent by the operator: Claude's via `/rename`, read
+   * out of the pane's rendered text (see `extractClaudeSessionName` in state-engine.ts), and
+   * Muse's user-given name, read out of its journal's `session.name.changed` rows (see
+   * `museSessionNameReader` in journal/muse.ts) — never Muse's automatic session name, which
+   * every session carries and the operator never chose. Derived, not a wire field — absent for
+   * unnamed sessions and every other harness. Display priority is `paneLabel` first.
    */
   sessionName?: string;
   /**
@@ -193,10 +197,11 @@ export interface AgentView {
    */
   todos?: PaneTodo[];
   /**
-   * The subagents of this pane's session that have not finished yet, read from the session's
-   * subagent meta files by the subagent tracker (bridge/subagents.ts). Claude Code only in this
-   * release. Attached at serialise time and ABSENT, NEVER A PLACEHOLDER: a pane with none running
-   * carries no key at all, never `[]`.
+   * The subagents of this pane's session that have not finished yet. For Claude Code, read from the
+   * session's subagent meta files by the subagent tracker (bridge/subagents.ts). For a harness with no
+   * such files (Oh My Pi, Gentle Shell), the ongoing task cards of the session's live Chat window, from
+   * memory (bridge/subagents-journal.ts); those rows carry `transcript: false`. Attached at serialise
+   * time and ABSENT, NEVER A PLACEHOLDER: a pane with none running carries no key at all, never `[]`.
    */
   subagents?: PaneSubagent[];
   /**
@@ -217,6 +222,15 @@ export interface AgentView {
    * ABSENT, NEVER A PLACEHOLDER: no model, a log that names no level, or an older bridge.
    */
   effort?: string;
+  /**
+   * How full this pane's context is and how much of the subscription's windows the account has used,
+   * as the harness's own statusLine reported them (bridge/usage.ts, .adr/0115). Numbers only; the
+   * phone draws them as dots beside the model and nothing decides on them.
+   *
+   * ABSENT, NEVER A PLACEHOLDER: a harness that reports none, an operator with no statusLine to
+   * wrap, a window that has reset, or an older bridge.
+   */
+  usage?: PaneUsage;
   /**
    * What the checkout holding this pane's folder is on: a branch, or a detached head at a full
    * object name. Read off disk by `bridge/git-head.ts` (two small files, no git process, no lock) and
@@ -334,6 +348,20 @@ export type PaneWire = Omit<AgentView, "agentSession" | "sessionAgent"> & {
    * Absent otherwise, so a bridge without the flag sends the same bytes as before.
    */
   sendProtocol?: true;
+  /**
+   * Present (and `true`) when a Stop (M68) has a key to press on this pane: it has a screen Surface and
+   * its profile names an interrupt key (`keys.interrupt`) and is not revoked at the binary's version.
+   * The phone draws the belt's Stop only with it, and only while the turn runs. Absent otherwise, on a
+   * program pane and from every older bridge.
+   */
+  canStop?: true;
+  /**
+   * Present (and `true`) when a send on this pane may steer the running turn (M69): the pane carries
+   * `sendProtocol`, its harness's profile names a steer key (`keys.steer`), the binary's version may be
+   * trusted with a turn, and the pane is no program's (a durable pane never steers). The phone offers
+   * Steer on the Send button's long press only then. Absent otherwise, and from an older bridge.
+   */
+  canSteer?: true;
   /**
    * The pane's held sends (M56 spec 15), oldest first: what the harness could not take during its turn
    * and Collie sends once the pane reads free, plus ended ones whose text waits for a Resend. Present
@@ -702,6 +730,12 @@ export function muxFaultOf(message: string): MuxFault | undefined {
 export interface SessionSummary {
   /** Registry name, e.g. "default" or "collie-demo". Client passes this back as `?session=`. */
   name: string;
+  /**
+   * The operator's display label from `spaces.toml` (bridge/operator-space-labels.ts), already
+   * cleaned of controls and capped. Display-only: {@link name} stays the identity. Absent when the
+   * operator gave this session none, so an install without the file sends the bytes it always did.
+   */
+  label?: string;
   /** The session cfg.socketPath points at — all pre-multi-session behaviour maps to it. */
   isPrimary: boolean;
   /** Whether this session's last poll succeeded (a stale/unreachable socket reads false). */
@@ -838,6 +872,18 @@ export interface ServerSummary {
    */
   linkState?: "reconnecting" | "attention";
   /**
+   * The registry name of the multiplexer this member drives (`herdr`, `herdr-core`, `tmux`, ...), for
+   * `collie sessions`. The lead states its own; a member's comes off its last status answer. Additive
+   * and optional (§7.1): absent when the member never said, or from a lead that predates the field.
+   */
+  mux?: string;
+  /**
+   * The machine's own host name (`os.hostname()`), as the member reported it on its status answer; the
+   * lead states its own. Additive and optional (§7.1): absent when the member never said, which means
+   * "its own machine" to any grouping and never "the same machine as another member".
+   */
+  host?: string;
+  /**
    * Epoch ms, **stamped by the lead on receipt — never the peer's clock** (§10.2). The client
    * derives "stale since …" from it (stale once older than 3 × pollMs or 15 s, whichever is first);
    * `0` means this member has never answered.
@@ -924,6 +970,20 @@ export interface CrewMemberStatus {
    * does not make the distinction" and the page renders today's single word (§7.1).
    */
   linkState?: "reconnecting" | "attention";
+  /**
+   * The multiplexer this member drives, by registry name (M76 spec 04, 1.25.0). **Omitted** when the
+   * member has not reported one: an older build, or no answer yet. Never an empty string.
+   */
+  mux?: string;
+  /**
+   * The agent panes this member serves, as its own `snapshot` answer counted them (1.25.0). **Omitted**
+   * when it sent no count: an older build, or a bridge still starting. Never `0` for "unknown".
+   */
+  panes?: number;
+  /**
+   * The host name this member's machine reported (M77 spec 01). **Omitted** when it did not say.
+   */
+  host?: string;
 }
 
 // ── Machines: every machine's load, kept by the lead (ADR 0084) ──────────────────
@@ -1232,6 +1292,12 @@ export interface PaneReadResponse {
    * to repair — the payload stays byte-identical to what it was for every other pane.
    */
   logicalText?: string;
+  /**
+   * Set only on a Load older read (`?purpose=older`) the multiplexer answered without the rows above
+   * the screen: one sentence that says why, for the phone to show (mux/types.ts `MuxGrid.olderNote`).
+   * Absent on every other read.
+   */
+  olderNote?: string;
 }
 
 /** One slash command currently available in a live OMP pane. */
@@ -1843,7 +1909,8 @@ export interface Launcher {
   label: string;
   /**
    * Absolute directory the new Space (or tab) opens in. Absent means "here": from the dashboard,
-   * the operator's home dir; from a pane, that pane's own cwd. Present, it is pinned and wins
+   * the session's `[folders]` entry in spaces.toml, else the operator's home dir; from a pane,
+   * that pane's own cwd. Present, it is pinned and wins
    * either way.
    */
   cwd?: string;
@@ -1950,7 +2017,7 @@ export interface LaunchersResponse {
 export interface RecentRunWire {
   /** The line, exactly as it ran. Running it again is `POST /api/launch` with `{ run: line }`. */
   line: string;
-  /** The folder it last ran in, absolute, or `null` for home. */
+  /** The folder it last ran in, absolute, or `null` for "here" (the session's folder, else home). */
   cwd: string | null;
   /** Epoch ms of the last run. */
   at: number;
@@ -1986,7 +2053,7 @@ export interface SentEntry {
   /** Stable per line on its machine: the first 16 hex characters of the line's sha256. */
   id: string;
   line: string;
-  /** Absolute, or `null` for home. */
+  /** Absolute, or `null` for "here" (the session's folder, else home). */
   cwd: string | null;
   /** Epoch ms of the newest record. */
   at: number;

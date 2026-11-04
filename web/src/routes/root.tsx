@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Outlet,
   useLoaderData,
+  useLocation,
   useNavigation,
   useParams,
   useRouteError,
@@ -9,6 +10,7 @@ import {
 } from "react-router";
 
 import { useNavTrail } from "@/hooks/use-nav";
+import { readAgentLaunch } from "@/lib/agent-startup";
 import { usePolling } from "@/hooks/use-polling";
 import { usePollBusy } from "@/hooks/use-poll-busy";
 import { useBusyWhile } from "@/lib/busy";
@@ -22,10 +24,12 @@ import { ConnectionBanner } from "@/components/connection-banner";
 import { AppHeaderHost } from "@/components/app-header";
 import { StripHost } from "@/components/ui/strip-host";
 import { ScreenTransition } from "@/components/screen-transition";
+import { ReportDoor } from "@/components/report-door";
 import { CrewProvider } from "@/components/crew-provider";
 import { CollieMark } from "@/components/collie-mark";
 import { TourHost } from "@/components/tour-sheet";
 import { describeThrownError } from "@/lib/api-error-message";
+import { findPane, paneRowKey } from "@/lib/hosts";
 import { homePath } from "@/lib/nav";
 import { scopeFromUrl } from "@/lib/session";
 import { noteLeadName, noteSnapshotCrew, noteSnapshotRun } from "@/lib/update-run-store";
@@ -85,7 +89,9 @@ export function RootLayout() {
 
   // The scope rides along so a "look now" on foreground lands on the machine and session the page is
   // actually showing — a refresh aimed at the lead would leave a peer's herd exactly as stale.
-  const pollMs = usePolling(data, paneId, data.scope);
+  const location = useLocation();
+  const launch = paneId === undefined ? undefined : readAgentLaunch(location.state, paneId, data.scope);
+  const pollMs = usePolling(data, paneId, data.scope, undefined, launch?.id);
   // Surface the busy bar when a navigation or a poll runs slow, each against its own threshold —
   // routine fast polls/navigations stay invisible. Mounted here so the whole app shares one
   // detector inside the router context.
@@ -100,7 +106,12 @@ export function RootLayout() {
   useBusyWhile(useNavigation().state !== "idle");
   // The history the tab has walked, for the Files breadcrumb's pop (lib/nav-trail.ts).
   useNavTrail();
-  useAgentTransitions(data.agents, paneId ?? null);
+  // The open pane as a ROW, so a peer's pane that shares its id is not silenced along with it.
+  const openPane =
+    paneId === undefined
+      ? undefined
+      : findPane(data.agents, paneId, pane?.scope ?? data.scope, data.servers, data.sessions);
+  useAgentTransitions(data.agents, openPane ? paneRowKey(openPane) : null);
   // THE PUSH RACE. `usePushSetup` can raise the browser's permission prompt on its own, behind the
   // tour's backdrop, so it waits until the tour has decided it is not showing. "pending" is what
   // makes this correct rather than racy: a child's effect runs before the parent's, but the state it
@@ -153,6 +164,9 @@ export function RootLayout() {
           inside it because it is not a strip: it covers the screen, it does not share the top of
           it. */}
       <TourHost home={data} onDecision={setTourDecision} />
+      {/* Report a problem (ADR 0123): the one sheet the composer's card, the pane menu and Settings open
+          through lib/report/store.ts. Renders nothing until the first open, and loads the sheet then. */}
+      <ReportDoor />
       <div className="flex h-(--app-h) flex-col overflow-hidden">
         {/* THE ONE HEADER, and the first thing on the screen in every state. It survives a
             navigation because it is rendered HERE rather than inside `<Outlet/>`: all six routes used

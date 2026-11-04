@@ -32,13 +32,14 @@ import {
 import { apiError, type ApiErrorBody, type ApiErrorDetail, type ErrorCode } from "./error-codes.ts";
 import { keysDeliverable, MUX_CAPABILITIES, supportsCapability, type MuxCapability, type MuxCapabilityDeclaration } from "./mux/capabilities.ts";
 import { muxUnsupported } from "./mux/types.ts";
-import type { MuxAdapter, MuxAck, MuxGrid, MuxHistoryPage, MuxStarters, MuxWorktreeCreateRequest } from "./mux/types.ts";
+import type { MuxAdapter, MuxAck, MuxGrid, MuxGridRequest, MuxHistoryPage, MuxReadHint, MuxReadPurpose, MuxStarters, MuxWorktreeCreateRequest } from "./mux/types.ts";
 import { allCacheRules } from "./cache/rules/index.ts";
 import type { CacheOverride } from "./cache/engine.ts";
 import type { GitHeadSurface } from "./git-head.ts";
 import { localWatchPane, peerWatchPane, type CacheWarnPane } from "./cache/watch-key.ts";
 import { watchKeyOf, type CacheWatchSurface } from "./cache/watch.ts";
 import { createCacheRulesReader } from "./operator-cache-rules.ts";
+import { createSessionFolders, createSessionLabels, resolveSessionFolder, withSessionLabels } from "./operator-space-labels.ts";
 import { computeEtag, gzipJsonResponse, notModified, wantsGzip } from "./http-cache.ts";
 import { discoverOmpCommands } from "./omp-commands.ts";
 import { pluginRoot } from "./root.ts";
@@ -48,6 +49,7 @@ import { MAX_FAVOURITES, MAX_FOLDER_CHARS, type FolderSurface } from "./folders.
 import { isValidWorktreeBranch } from "./worktree-branch.ts";
 import { createHarnessProbe, type HarnessProbe } from "./harness-launch.ts";
 import { launchReplay, memoryLaunchReceipts, type LaunchReceiptSurface } from "./launch-receipts.ts";
+import type { LaunchWindow } from "./launch-window.ts";
 import { isStarterBody, launchStarter, memoryStarterReceipts, starterItems, type StarterReceiptSurface } from "./starter-launch.ts";
 import { answerPane, memoryAnswerReceipts, type AnswerReceiptSurface } from "./durable/answer.ts";
 import { controlPane, memoryControlReceipts, rawInputRefusal, type ControlReceiptSurface } from "./durable/control.ts";
@@ -75,7 +77,8 @@ import {
   type WorktreeReceipt,
   type WorktreeReceiptSurface,
 } from "./worktree-receipts.ts";
-import { claudeConfigDir, discoverClaudeCommands } from "./claude-commands.ts";
+import { discoverAgentSkills, skillAgentFor } from "./agent-skills.ts";
+import { claudeConfigDir, discoverClaudeCommands, type ClaudeCommand } from "./claude-commands.ts";
 import { canonicalAgent } from "../web/src/lib/operator-scope.ts";
 import { createOperatorCommands } from "./operator-commands.ts";
 import { createOperatorKeys } from "./operator-keys.ts";
@@ -147,22 +150,27 @@ import {
   updateStartVerdict,
   type PreflightReport,
 } from "./update-action.ts";
-import { type UpdateLineRecord, withLine } from "./update-line.ts";
+import { type ReleaseLine, type UpdateLineRecord, withLine } from "./update-line.ts";
+import { REPORT_SCREEN_ROWS, reportDoctorRows, reportScreen, type DoctorRowSource, type ReportContext, type ReportDoctorRow } from "./report.ts";
 import type { StateEngine } from "./state-engine.ts";
-import { adapterFor, buildJournalRegistry } from "./journal/registry.ts";
+import { adapterFor, buildJournalRegistry, journalAgentName } from "./journal/registry.ts";
 import { readClaudeSubagent } from "./journal/claude.ts";
 import { chatParams, LiveWindows } from "./journal/live.ts";
+import { JournalSubagents } from "./subagents-journal.ts";
 import { parseDurableLog } from "./journal/durable.ts";
 import { redactText } from "./redact.ts";
 import { maskSurface, surfaceRouteBody, type SurfaceShadow } from "./surface/shadow.ts";
 import type { SurfaceTotals } from "./surface/counters.ts";
 import { SURFACE_VERSION } from "../web/src/lib/surface/surface.ts";
 import { gateFor } from "./surface/key-gate.ts";
-import type { SendProtocol, SendRequest } from "./surface/protocol.ts";
+import { BOX_CHANGED, type SendProtocol, type SendRequest } from "./surface/protocol.ts";
 import type { AskAnswerer } from "./surface/ask.ts";
+import type { ClearService } from "./surface/clear.ts";
+import type { StopService } from "./surface/stop.ts";
+import type { ReceiptQueued } from "./surface/queued.ts";
 import type { ProgramDriver } from "./surface/durable-driver.ts";
 import { parseAnswerBody, type AskReply } from "../web/src/lib/surface/ask.ts";
-import { REQUEST_ID, reservedLead, SEND_MODES, type HeldCancelAnswer, type SendAnswer, type SendReceiptsAnswer } from "../web/src/lib/surface/send.ts";
+import { REQUEST_ID, RETURNED_CARD_DROPPED, reservedLead, SEND_MODES, SEND_WHENS, type HeldCancelAnswer, type SendAnswer, type SendReceiptsAnswer } from "../web/src/lib/surface/send.ts";
 import {
   maskChatBody,
   maskDiff,
@@ -196,12 +204,14 @@ import type { CrewLead } from "./crew/lead.ts";
 import { crewDeviceOf, crewGate, type GateLevel } from "./crew/peer-gate.ts";
 import { snapshotPlan } from "./crew/merge.ts";
 import { selectHostFrom, type HostSelector } from "./crew/registry.ts";
+import { machineHost } from "./crew/machine-host.ts";
 import type { CrewHandler, CrewSurface } from "./crew/router.ts";
 import type { CrewTlsOptions } from "./crew/transport.ts";
 import { createSttAdmission, MAX_STT_AUDIO_BYTES, sttCapability, transcribeRequest } from "./stt/http.ts";
 import type { SttProvider } from "./stt/provider.ts";
 import { createWhistleModelStore, type WhistleModelStore } from "./stt/whistle-model.ts";
 import type { CodexDetector } from "./stt/codex-detect.ts";
+import { HOST } from "./host.ts";
 import { createHostCodexDetector, sttHostGet, sttHostPut, type SttHostRouteDeps } from "./stt/host-http.ts";
 import {
   modelResponse,
@@ -218,9 +228,10 @@ import { parseMachineAlerts } from "./machine-parse.ts";
 import { SPARK_MAX_MINUTES } from "./machine-history.ts";
 import type { MachineSurface } from "./machines.ts";
 import { isPaneId, parseAddress } from "./walky/address.ts";
-import { parsePhoneSend } from "./walky/parse.ts";
-import type { WalkyService } from "./walky/service.ts";
+import { isWalkyId, parsePhoneSend } from "./walky/parse.ts";
+import { NOT_THE_SENDER, type TakeBackAnswer, type WalkyService } from "./walky/service.ts";
 import { olderThanWalky, type WalkyCrew } from "./walky/crew.ts";
+import { journalModelShown, paneModel, type ModelReading } from "./pane-model.ts";
 import type {
   ActionResponse,
   AgentView,
@@ -273,6 +284,17 @@ import type {
 } from "./types.ts";
 import { prepareVoicePane } from "./voice-pane.ts";
 import { VoiceBroker, voiceProtocol, voiceTokenMatches, type VoiceSocketData } from "./voice.ts";
+
+/**
+ * The log's model reading for one session, from a ledger that may predate `modelReading` (a test's
+ * fake): then the plain `model` counts as a reading with no time, which every hook reading loses to,
+ * as the label behaved before the start hook named a model.
+ */
+function journalModelOf(cache: { model?(key: string): string | undefined; modelReading?(key: string): ModelReading | undefined } | undefined, key: string): ModelReading | undefined {
+  if (cache?.modelReading !== undefined) return cache.modelReading(key);
+  const model = cache?.model?.(key);
+  return model === undefined ? undefined : { model, at: Number.POSITIVE_INFINITY };
+}
 
 // Headroom the runtime's own body cap (Bun.serve maxRequestBodySize) keeps above the operator's
 // upload cap. It has to sit above cap + multipart overhead so the handler's own 413 fires first for
@@ -438,8 +460,17 @@ export function isLoopbackPeer(address: string | null | undefined): boolean {
  * ran), `unknown` (504, the receipt stays so the same request id may be sent again), or `refused`
  * (409, `unsupported` for a pane or program that cannot take the act). A body that is not one is a
  * plain 400. Such a pane refuses `reply` and `keys` with `unsupported`. See `bridge/durable/control.ts`.
+ *
+ * `abort` on a pane with a screen (M68 spec 01) is a Stop: `POST /api/pane/:id/abort` with `{ requestId }`
+ * only. The bridge reads the Surface, presses the profile's interrupt key as a person's tap, reads back,
+ * and answers `{ requestId, outcome: "stopped" | "pressed" | "refused", reason?, keys? }` (always 200).
+ * The same request id answers the same receipt. See `bridge/surface/stop.ts`.
+ *
+ * `clear` (ADR 0116, the Clear paragraph) is `POST /api/pane/:id/clear` with `{ requestId }` only, on a pane
+ * with a screen: it empties the harness's input box with the profile's clear key as a person's tap, reads
+ * back, and answers `{ requestId, outcome: "cleared" | "refused", reason? }` (always 200). See `bridge/surface/clear.ts`.
  */
-const PANE_ROUTE = /^\/api\/pane\/([^/]+)(?:\/(reply|keys|upload|close|rename|history|chat|changes|files|commands|focus|answer|send|abort|action))?$/;
+const PANE_ROUTE = /^\/api\/pane\/([^/]+)(?:\/(reply|keys|upload|close|rename|history|chat|changes|files|commands|focus|answer|send|abort|clear|action))?$/;
 
 /**
  * A pairing claim's refusal, as an error code.
@@ -509,6 +540,15 @@ const BLOB_ROUTE = /^\/api\/blobs\/([^/]+)$/;
  * phone's reply. `bridge/crew/forward.ts` mirrors this literal one-for-one (`forward.test.ts`).
  */
 const WALKY_PANE_ROUTE = /^\/api\/pane\/([^/]+)\/walky$/;
+/**
+ * The two take-backs of a held walky talky message (M62 spec 03). `POST /api/walky/<id>/cancel`: the
+ * sender's, for an operator message, from a paired device. `POST /api/pane/<pane>/walky/<id>/drop`: the
+ * pane owner's, for a message held for that pane, on the machine that owns the pane (no `?host=`
+ * forward: a member's held message is dropped on the member). Both are writes under the browser gate.
+ */
+// The id's shape is the handler's check (`isWalkyId`), so the route table keeps one shape of segment.
+const WALKY_CANCEL_ROUTE = /^\/api\/walky\/([^/]+)\/cancel$/;
+const WALKY_DROP_ROUTE = /^\/api\/pane\/([^/]+)\/walky\/([^/]+)\/drop$/;
 
 /**
  * How long a worktree create may hold its connection open, in seconds (ADR 0089). Above Herdr's own
@@ -552,11 +592,13 @@ const PANE_FILES_IMAGE_ROUTE = /^\/api\/pane\/([^/]+)\/files\/image$/;
 const WORKSPACE_FILES_IMAGE_ROUTE = /^\/api\/workspace\/([^/]+)\/files\/image$/;
 
 /**
- * `GET /api/pane/<id>/claude-commands`: the slash commands Claude Code would load in that pane's cwd,
- * read off this machine's disk. The pane id is only looked up in the snapshot; the cwd the read
- * starts from is the one the multiplexer reported, never the request's. Not in `FORWARDABLE`: a pane
- * on a crew member answers the lead's 501, and the phone keeps the palette it already had. A read
- * of this machine's disk, so it asks `device-read` like the Files routes.
+ * `GET /api/pane/<id>/claude-commands`: the commands the pane's agent would load in its cwd, read off
+ * this machine's disk: Claude Code's and seven other agents' (`bridge/agent-skills.ts`, which keeps
+ * the route's first name). Any other agent answers an empty list. The pane id is only looked up in
+ * the snapshot; the cwd the read starts from is the one the multiplexer reported, never the
+ * request's. Not in `FORWARDABLE`: a pane on a crew member answers the lead's 501, and the phone
+ * keeps the palette it already had. A read of this machine's disk, so it asks `device-read` like the
+ * Files routes.
  */
 const PANE_CLAUDE_COMMANDS_ROUTE = /^\/api\/pane\/([^/]+)\/claude-commands$/;
 
@@ -626,6 +668,7 @@ export function isPaneReadAction(action: string | undefined): boolean {
  * routes after which the operator watches the pane for an effect, so a landed one puts the engine
  * that owns the pane into its hot cadence (state-engine.ts § noteInput). Structural writes (close,
  * rename, focus, a new tab) settle their own topology and need no intent; an upload types nothing.
+ * Settling starts the re-read and does not wait for it (see `settleTopology`).
  */
 export function isPaneInput(pathname: string, method: string): boolean {
   if (method !== "POST") return false;
@@ -1148,6 +1191,8 @@ export function startServer(opts: {
   updateAction?: UpdateActionDeps;
   /** The release line record (M60 spec 01). See {@link UpdateLineDeps}. */
   updateLine?: UpdateLineDeps;
+  /** The doctor's send rows for Report a problem (M71 spec 05). See {@link ReportMachine.sendHealth}. */
+  sendHealth?: () => readonly DoctorRowSource[];
   /**
    * The BARE version string this process answers with (`bridge/version.ts`'s `collieVersionBare`) —
    * `<semver>` or `<semver>+<short sha>`. Resolved once in index.ts, never re-read here: it is the
@@ -1295,6 +1340,8 @@ export function startServer(opts: {
   cache?: {
     get(sessionKey: string): PaneCache | undefined;
     model?(sessionKey: string): string | undefined;
+    /** The model with the time the log named it; the label weighs it against the start hook's. */
+    modelReading?(sessionKey: string): ModelReading | undefined;
     effort?(sessionKey: string): string | undefined;
   };
   /**
@@ -1304,9 +1351,15 @@ export function startServer(opts: {
   todos?: { get(pane: AgentView): AgentView["todos"] };
   /**
    * Each pane's running subagents (bridge/subagents.ts), read synchronously at serialise time like
-   * `todos`. Absent means no pane carries a `subagents` key.
+   * `todos`. Where it answers nothing for a pane whose journal has no subagent files, the live
+   * windows' ongoing task cards answer instead (bridge/subagents-journal.ts).
    */
   subagents?: { get(pane: AgentView): AgentView["subagents"] };
+  /**
+   * Each pane's context use and subscription windows (bridge/usage.ts), read synchronously at
+   * serialise time like `todos`. Absent means no pane carries a `usage` key.
+   */
+  usage?: { get(pane: AgentView): AgentView["usage"] };
   /**
    * Which branch each pane's folder is on (bridge/git-head.ts), read synchronously at serialise time
    * like `cache`: it answers from memory and reads the disk in the background. Absent means no pane
@@ -1359,6 +1412,8 @@ export function startServer(opts: {
    * Absent means an in-memory store; `bridge/index.ts` passes the file-backed one.
    */
   launchReceipts?: LaunchReceiptSurface;
+  /** The launch window (bridge/launch-window.ts), shared with each session's Send Protocol. Absent: no pane is marked. */
+  launchWindow?: Pick<LaunchWindow, "mark"> | undefined;
   /**
    * One receipt per starter run (ADR 0102, `bridge/starter-launch.ts`). Absent means an in-memory
    * store; `bridge/index.ts` passes the file-backed one, which writes nothing until a starter runs.
@@ -1570,14 +1625,26 @@ export function startServer(opts: {
   };
   // The sixth on that contract: the operator's own prompt-cache TTLs, cache-rules.toml off the hot path.
   const operatorCacheRules = createCacheRulesReader(cfg.cacheRulesFile);
+  // The seventh: the operator's display labels for their sessions, spaces.toml. `localSnapshot` is
+  // synchronous, so the reader holds the labels and each snapshot refreshes them behind its answer:
+  // an edit shows on the next poll, browser and crew sweep alike. The first read starts here.
+  const sessionLabels = createSessionLabels(cfg.spacesFile ?? null);
+  void sessionLabels.refresh();
+  // The same file's `[folders]`: where a launch or a new space in a session opens when nothing named
+  // a folder. Read per launch, and only a folder that is there on disk is used; else home, as before.
+  const sessionFolders = createSessionFolders(cfg.spacesFile ?? null);
+  const sessionFolderOf = (name: string) => resolveSessionFolder(sessionFolders, name, diskFolderFs);
   // ONE registry for the process, built by the caller so the cache tracker probes through the same
   // adapters (and therefore the same memoised path caches) the history route reads.
-  const journals = cfg.transcript ? (opts.journals ?? buildJournalRegistry(cfg.journalRoots)) : null;
+  const journals = cfg.transcript ? (opts.journals ?? buildJournalRegistry(cfg.journalRoots, cfg.modelCatalogs)) : null;
   const transcripts = cfg.transcript ? new TranscriptStore() : null;
   // The live half of the same reading, over the same store: a `?before=` page IS a History page with
   // the live window's numbering put back on it, so the two must share one cache or a "load older" tap
   // would re-read a 32 MB log the History view already holds.
   const live = transcripts === null ? null : new LiveWindows(transcripts);
+  // The agents pill's second source: Oh My Pi's and Gentle Shell's ongoing task cards, read from the
+  // live windows above. Only for a pane whose journal has no subagent files (bridge/subagents-journal.ts).
+  const journalSubagents = live === null || journals === null ? null : new JournalSubagents(journals, live, () => Date.now());
   /** Does this agent have a journal at all — the snapshot's History-affordance gate. */
   const hasJournal = (agent: string) => adapterFor(journals ?? {}, agent) !== undefined;
   const discoversSessions = (agent: string) =>
@@ -1621,6 +1688,7 @@ export function startServer(opts: {
   ): SnapshotResponse | undefined => {
     const rt = registry.get(sessionName);
     if (!rt) return undefined;
+    void sessionLabels.refresh();
     const { workspaces, tabs, bridge, muxFault } = rt.engine.current();
     // Attach each pane's activity timestamps. Done here rather than in the state engine so the
     // engine stays a pure Herdr-poller with no knowledge of the ledger — and so the two numbers
@@ -1641,23 +1709,30 @@ export function startServer(opts: {
       const key = p.agentSession?.value;
       const reading = key === undefined ? undefined : cache?.get(key);
       const read = reading === undefined ? withTimes : { ...withTimes, cache: reading };
-      // The model label rides beside it, from the same probe's memo (bridge/cache/tracker.ts).
-      const model = key === undefined ? undefined : cache?.model?.(key);
+      // The model label rides beside it, from the same probe's memo (bridge/cache/tracker.ts), or from
+      // the start hook's edge where the log has not named one yet or named it before the start
+      // (bridge/pane-model.ts): a fresh session has no log until its first message.
+      const journalModel = key === undefined ? undefined : journalModelOf(cache, key);
+      const hookModel = from.hookModel?.(p.paneId);
+      const model = paneModel(journalModel, hookModel);
       const withModel = model === undefined ? read : { ...read, model };
-      // The effort rides with the model, and only with it: an effort alone names nothing (#463).
-      const effort = model === undefined || key === undefined ? undefined : cache?.effort?.(key);
+      // The effort rides with the log's model, and only with it: an effort alone names nothing (#463).
+      const effort = key === undefined || !journalModelShown(journalModel, hookModel) ? undefined : cache?.effort?.(key);
       const withCache = effort === undefined ? withModel : { ...withModel, effort };
       // The tasks are words the agent wrote, so they take the mirror's mask like the title above.
       const readTodos = opts.todos?.get(p);
       const todos = readTodos !== undefined && cfg.redact ? maskTodoList(readTodos) : readTodos;
       const withTodos = todos === undefined ? withCache : { ...withCache, todos };
       // The running subagents' descriptions are words the agent wrote too, so they take the same mask.
-      const readSubagents = opts.subagents?.get(p);
+      const readSubagents = opts.subagents?.get(p) ?? journalSubagents?.get(p);
       const subagents = readSubagents !== undefined && cfg.redact ? maskSubagentList(readSubagents) : readSubagents;
       const withSubagents = subagents === undefined ? withTodos : { ...withTodos, subagents };
+      // The usage dots: numbers only, the session's context and the account's windows (ADR 0118).
+      const readUsage = opts.usage?.get(p);
+      const withUsage = readUsage === undefined ? withSubagents : { ...withSubagents, usage: readUsage };
       // The branch rides the same way: from memory, never a wait, and no key when there is none.
       const gitHead = gitHeads?.get(p.cwd);
-      return gitHead === undefined ? withSubagents : { ...withSubagents, gitHead };
+      return gitHead === undefined ? withUsage : { ...withUsage, gitHead };
     };
     // The one place a pane leaves the bridge: the session ref is stripped to a presence flag here,
     // so an agent-reported filesystem path never reaches a browser (see toPaneWire). The flag is
@@ -1698,18 +1773,24 @@ export function startServer(opts: {
       const surface = from.driver !== undefined ? from.driver.surfaceOf(wire.paneId) : from.surface?.surfaceOf(wire.paneId);
       const masked = surface === undefined ? wire : { ...wire, surface: cfg.redact ? maskSurface(surface) : surface };
       const surfaced = surface === undefined || from.hooks === undefined ? masked : { ...masked, hooks: from.hooks(wire.paneId) };
+      // A pane with a screen says whether Stop (M68) has a key to press: its profile names an interrupt
+      // key and is not revoked. The phone draws its Stop button from this word, never from a harness name.
+      // Only a `true` rides; absent reads as "no Stop here".
+      const stoppable = surface !== undefined && from.driver === undefined && from.surface?.canStopOf(wire.paneId) === true ? { ...surfaced, canStop: true as const } : surfaced;
       // A hook-held permission (M56 spec 12) carries its note: the tool, the input shown, the state.
       // The input is a command line, so it takes the mirror's mask like the ask's labels do. A program
       // pane (M56 spec 14) takes its asks from its driver, so it never carries a hold.
       const note = surface === undefined || from.driver !== undefined ? null : (from.hold?.(wire.paneId) ?? null);
       // The option labels are screen text too. The hash stays: the hold card's tap carries it.
-      const withHold = note === null ? surfaced : { ...surfaced, hold: cfg.redact ? { ...note, input: redactText(note.input), options: note.options.map(redactText) } : note };
+      const withHold = note === null ? stoppable : { ...stoppable, hold: cfg.redact ? { ...note, input: redactText(note.input), options: note.options.map(redactText) } : note };
       if (from.send === undefined && from.driver === undefined) return withHold;
       // The pane's held sends (M56 spec 15), only when there is one; the text takes the mirror's mask.
       // A held send is the send queue's, a hold is a permission's (spec 12): both may stand at once.
       const held = from.send?.heldOf(from.name, wire.paneId) ?? [];
       const shown = cfg.redact ? held.map((row) => ({ ...row, text: redactText(row.text) })) : held;
-      return held.length === 0 ? { ...withHold, sendProtocol: true as const } : { ...withHold, sendProtocol: true as const, held: shown };
+      // M69: a pane the phone may steer says so (paneCanSteer).
+      const marked: PaneWire = paneCanSteer(from, wire.paneId) ? { ...withHold, sendProtocol: true as const, canSteer: true as const } : { ...withHold, sendProtocol: true as const };
+      return held.length === 0 ? marked : { ...marked, held: shown };
     };
     const sources = widen ? registry.ordered() : [rt];
     const paneList = (pick: (rtx: SessionRuntime) => AgentView[]): PaneWire[] => {
@@ -1737,7 +1818,8 @@ export function startServer(opts: {
       shellPanes: paneList((from) => from.engine.current().shellPanes),
       workspaces,
       tabs,
-      sessions: registry.list(),
+      // A label is display-only: `name` stays the identity the phone sends back as `?session=`.
+      sessions: withSessionLabels(registry.list(), sessionLabels.labelOf),
       notifications: { snoozedUntil: snooze.until() },
       update: updateStatusWithPeers(),
       ts: Date.now(),
@@ -1852,7 +1934,7 @@ export function startServer(opts: {
       if (denied) return denied;
       const rt = await caller.resolve();
       if (rt instanceof Response) return rt;
-      return createWorkspace(rt.herdr, rt.engine, req, caller.audit, caller.device(), rt.name, folders);
+      return createWorkspace(rt.herdr, rt.engine, req, caller.audit, caller.device(), rt.name, folders, await sessionFolderOf(rt.name));
     }
     // A launch is a `/api/workspace` create the operator pre-declared: the client names a row in
     // `launchers.toml` and the bridge, never the client, supplies the command line. It sits here
@@ -1865,11 +1947,13 @@ export function startServer(opts: {
       return launch(rt.herdr, rt.engine, req, caller.audit, caller.device(), rt.name, allowedLaunchers, {}, {
         harnesses,
         receipts: launchReceipts,
+        launchWindow: opts.launchWindow,
         starterReceipts,
         folders,
         switches: launcherSources.switches,
         recentRuns,
         sent,
+        sessionFolder: await sessionFolderOf(rt.name),
       });
     }
     // Rows must come from the host that runs them: today's `/api/config` (a lead-only body) sent
@@ -2051,18 +2135,27 @@ export function startServer(opts: {
         return text("malformed URL", 400);
       }
       const pane = rt.engine.current().agents.find((p) => p.paneId === paneId);
-      if (pane === undefined || canonicalAgent(pane.agent?.toLowerCase().trim() ?? "") !== "claude") {
+      if (pane === undefined) {
         return json({ commands: [] }, req.headers.get("accept-encoding"));
       }
       const home = homedir();
+      const cwd = pane.cwd === "" ? null : pane.cwd;
       // Fail closed: a fault anywhere in the scan is an empty list, never a 500 that names a path.
-      let commands: Awaited<ReturnType<typeof discoverClaudeCommands>> = [];
+      let commands: ClaudeCommand[] = [];
       try {
-        commands = await discoverClaudeCommands({
-          home,
-          cwd: pane.cwd === "" ? null : pane.cwd,
-          configDir: claudeConfigDir(cfg.journalRoots.claude, home),
-        });
+        if (canonicalAgent(pane.agent?.toLowerCase().trim() ?? "") !== "claude") {
+          const family = canonicalAgent(pane.agent?.toLowerCase().trim() ?? "");
+          const skillAgent = skillAgentFor(family);
+          if (skillAgent !== undefined) {
+            commands = await discoverAgentSkills(skillAgent, { home, cwd, env: process.env });
+          }
+        } else {
+          commands = await discoverClaudeCommands({
+            home,
+            cwd,
+            configDir: claudeConfigDir(cfg.journalRoots.claude, home),
+          });
+        }
       } catch (err) {
         console.warn(`[claude-commands] the scan failed, answering an empty list: ${String(err)}`);
       }
@@ -2189,11 +2282,11 @@ export function startServer(opts: {
       const device = isRead ? null : caller.device();
       const audit_ = caller.audit;
 
-      if (!action && req.method === "GET") return readPane(herdr, cfg, paneId, url, req);
+      if (!action && req.method === "GET") return readPane(herdr, cfg, paneId, url, req, paneReadHint(rt.engine, paneId));
       if (action === "history" && req.method === "GET")
         return paneHistory(cfg, journals, transcripts, rt.engine, herdr, paneId, url, req);
       if (action === "chat" && req.method === "GET")
-        return paneChat(cfg, journals, live, rt.engine, herdr, paneId, url, req);
+        return paneChat(cfg, journals, live, rt.engine, herdr, paneId, url, req, rt.send === undefined ? undefined : (pane) => rt.send!.queuedOf(rt.name, pane));
       if (action === "changes" && req.method === "GET") return paneChanges(rt.engine, paneId, url, req, homedir(), cfg.redact);
       if (action === "commands" && req.method === "GET")
         return paneCommands(rt.engine, paneId, req);
@@ -2210,9 +2303,9 @@ export function startServer(opts: {
       // A reply that submits text runs this session's Send Protocol (M56 spec 06), on any terminal
       // pane: an agent's (its string picks the profile) or a bare shell's (no profile, typed and Entered blind).
       if (action === "reply" && req.method === "POST")
-        return afterPaneInput(rt.engine, await replyPane(herdr, cfg, paneId, req, audit_, device, session, replySendOf(rt)));
+        return afterPaneInput(rt.engine, await replyPane(herdr, cfg, paneId, req, audit_, device, session, { ...replySendOf(rt), readHint: paneReadHint(rt.engine, paneId) }));
       if (action === "keys" && req.method === "POST")
-        return afterPaneInput(rt.engine, await keysPane(herdr, cfg, paneId, req, audit_, device, session));
+        return afterPaneInput(rt.engine, await keysPane(herdr, cfg, paneId, req, audit_, device, session, paneReadHint(rt.engine, paneId)));
       if (action === "upload" && req.method === "POST") return uploadPane(cfg, paneId, req, audit_, device, session);
       if (action === "close" && req.method === "POST") return closePane(herdr, rt.engine, paneId, req, audit_, device, session);
       if (action === "rename" && req.method === "POST") return renamePane(herdr, rt.engine, paneId, req, audit_, device, session);
@@ -2237,6 +2330,30 @@ export function startServer(opts: {
           settled: () => rt.engine.pokeNow(),
         });
         return "text" in answered ? text(answered.text, answered.status) : json(answered.body, req.headers.get("accept-encoding"), answered.status);
+      }
+      // A Stop on a pane with a screen (M68 spec 01): a person's tap presses the profile's interrupt key
+      // and answers a receipt. A pane that takes guarded controls (a program) keeps the abort below.
+      if (action === "abort" && req.method === "POST" && rt.stop !== undefined && rawInputRefusal(herdr) === null) {
+        let body: JsonValue | undefined;
+        try {
+          // SAFETY: `Request.json()` output IS a JsonValue by construction; `stopRoute` checks every field.
+          body = (await req.json()) as JsonValue;
+        } catch {
+          body = undefined;
+        }
+        return stopRoute(rt, paneId, body, { audit: audit_, device, session, acceptEncoding: req.headers.get("accept-encoding") });
+      }
+      // A Clear on a pane with a screen (ADR 0116, the Clear paragraph): a person's tap empties the harness's
+      // box with the profile's clear key and answers a receipt. A pane that takes guarded controls (a program) has no box.
+      if (action === "clear" && req.method === "POST" && rt.clear !== undefined && rawInputRefusal(herdr) === null) {
+        let body: JsonValue | undefined;
+        try {
+          // SAFETY: `Request.json()` output IS a JsonValue by construction; `clearRoute` checks every field.
+          body = (await req.json()) as JsonValue;
+        } catch {
+          body = undefined;
+        }
+        return clearRoute(rt, paneId, body, { audit: audit_, device, session, acceptEncoding: req.headers.get("accept-encoding"), redact: cfg.redact });
       }
       // A send or an abort that names the turn or ask the phone saw (ADR 0101), or a tap on one of the
       // program's belt buttons (M53 spec 07, the turn optional). The receipt is written before the control
@@ -2292,6 +2409,20 @@ export function startServer(opts: {
       const active = registry.get();
       return active === undefined ? null : muxConfigBody(active.herdr);
     },
+    // M76 spec 04: the agent panes this machine serves, for its `snapshot` answer. `null` until the
+    // primary session's engine has read its multiplexer once (`bridge` is `disconnected` before the
+    // first good poll and while the multiplexer is down): a count it cannot make is not zero.
+    panes: () => {
+      const runtimes = registry.ordered();
+      if (runtimes.find((rt) => rt.isPrimary)?.engine.current().bridge !== "connected") return null;
+      return runtimes
+        .map((rt) => rt.engine.current())
+        .filter((snap) => snap.bridge === "connected")
+        .reduce((sum, snap) => sum + snap.agents.length, 0);
+    },
+    // M77 spec 01: this machine's own host name, for its `snapshot` answer, so a lead can tell which
+    // members share a machine.
+    host: machineHost,
     // M55: every session's card, so the lead can answer `/api/config?host=&session=` for a program
     // session on this machine. Null on a machine that runs no program, so its `hello` is unchanged.
     sessions: () => registry.cards(),
@@ -2834,7 +2965,8 @@ export function startServer(opts: {
         return heldCancelRoute(rt, requestId, url.searchParams.get("pane"), { audit, device: whois(req).device, acceptEncoding: req.headers.get("accept-encoding") });
       }
       // The session page's list of recent sends for one pane (M56 spec 09): outcome, reason, time, keys
-      // by name and gaps, read from the receipts. Never a row of the screen and never the text.
+      // by name and gaps, read from the receipts, and of the text only the line Sent would keep
+      // (surface/requests.ts). Never a row of the screen.
       if (pathname === "/api/send/receipts" && req.method === "GET") {
         const denied = browserGate("read");
         if (denied) return denied;
@@ -2842,6 +2974,24 @@ export function startServer(opts: {
         const rt = localRuntime(sessionName, req.headers.get("accept-encoding"));
         if (rt instanceof Response) return rt;
         return sendReceiptsRoute(rt, url.searchParams.get("pane"), req.headers.get("accept-encoding"));
+      }
+      // Report a problem (ADR 0123): the setup block and, on `screen=1`, the pane's last rows, always
+      // masked. A read for a paired device only, since the screen goes to a public issue if the person
+      // sends it. This collie's own panes only: a crew member's pane is the next slice.
+      if (pathname === "/api/report/context" && req.method === "GET") {
+        const denied = browserGate("device-read");
+        if (denied) return denied;
+        if (host.kind === "member") return text("a report reads this machine's panes only for now", 400);
+        const rt = localRuntime(sessionName, req.headers.get("accept-encoding"));
+        if (rt instanceof Response) return rt;
+        const machine: ReportMachine = {
+          collie: opts.version,
+          line: opts.updateLine?.read().line ?? null,
+          os: HOST.platform,
+          arch: process.arch,
+          sendHealth: opts.sendHealth,
+        };
+        return reportContextRoute(rt, url.searchParams.get("pane"), url.searchParams.get("screen") === "1", machine, req.headers.get("accept-encoding"));
       }
       // ── Walky talky (M62) ────────────────────────────────────────────────
       // A message from the phone is an operator's, under the paired device's label, and a write under
@@ -2866,6 +3016,31 @@ export function startServer(opts: {
         if (denied) return denied;
         if (host.kind === "member") return text(WALKY_LOCAL_TEXT, 400);
         return walkyWhoRoute(walky, req.headers.get("accept-encoding"));
+      }
+      // The sender takes a held operator message back (M62 spec 03). No `?host=`: the message's log
+      // record is on the bridge the phone sent it through, and a lead's record of a member's hold has
+      // no pane here, which the answer says (`elsewhere`).
+      const walkyCancel = pathname.match(WALKY_CANCEL_ROUTE);
+      if (walkyCancel && req.method === "POST") {
+        const denied = browserGate("write");
+        if (denied) return denied;
+        return walkyCancelRoute(walky, walkyCancel[1]!, { audit, device: whois(req).device, acceptEncoding: req.headers.get("accept-encoding") });
+      }
+      // The pane's owner drops a message held for the pane (M62 spec 03): this machine's own panes only.
+      const walkyDrop = pathname.match(WALKY_DROP_ROUTE);
+      if (walkyDrop && req.method === "POST") {
+        const denied = browserGate("write");
+        if (denied) return denied;
+        if (host.kind === "member") return text(WALKY_DROP_LOCAL_TEXT, 400);
+        const rt = localRuntime(sessionName, req.headers.get("accept-encoding"));
+        if (rt instanceof Response) return rt;
+        let paneId: string;
+        try {
+          paneId = decodeURIComponent(walkyDrop[1]!);
+        } catch {
+          return text("malformed URL", 400);
+        }
+        return walkyDropRoute(walky, rt.name, paneId, walkyDrop[2]!, { audit, device: whois(req).device, acceptEncoding: req.headers.get("accept-encoding") });
       }
       const walkyPane = pathname.match(WALKY_PANE_ROUTE);
       // The POST on this path is the lead's, through the crew dispatch (§21): never a phone's.
@@ -4057,12 +4232,45 @@ export function hasSplitUrl(ansiText: string): boolean {
   );
 }
 
+/**
+ * What the bridge knows about a pane that its multiplexer may not, for a `recent` read of it
+ * (mux/types.ts `MuxReadHint`): `blocked` when the state engine reads the pane as waiting on a
+ * person. The engine lifts a pane whose screen shows an ask to `blocked` even when the multiplexer
+ * reports `working` (state-engine.ts `liftScreenAsks`), which is the case herdr-core cannot see on
+ * its own: pi under a dialog. `undefined` when the engine knows nothing to add.
+ */
+export function paneReadHint(
+  engine: { current(): { readonly agents: readonly Pick<AgentView, "paneId" | "status">[] } },
+  paneId: string,
+): MuxReadHint | undefined {
+  const pane = engine.current().agents.find((agent) => agent.paneId === paneId);
+  return pane?.status === "blocked" ? { blocked: true } : undefined;
+}
+
+/**
+ * A `recent` read in the mirror's shape (styling kept), carrying the bridge's hint when it has one
+ * and the purpose when it is `older`. A request without `purpose` is a `poll` (mux/types.ts
+ * `MuxGridRequest.purpose`), so the mirror's refresh and the bridge's own checks leave it out.
+ */
+function recentRead(lines: number, hint: MuxReadHint | undefined, purpose: MuxReadPurpose = "poll"): MuxGridRequest {
+  const base = { scope: "recent", lines, styling: "preserve" } as const;
+  const hinted: MuxGridRequest = hint === undefined ? base : { ...base, hint };
+  return purpose === "older" ? { ...hinted, purpose } : hinted;
+}
+
+/**
+ * The query word with which the phone's Load older asks for the rows above the screen:
+ * `GET /api/pane/:id?lines=N&purpose=older`. Any other value, or none, is the mirror's poll.
+ */
+export const PANE_READ_PURPOSE_PARAM = "purpose";
+
 export async function readPane(
   herdr: MuxAdapter,
   cfg: Config,
   paneId: string,
   url: URL,
   req: Request,
+  hint?: MuxReadHint,
 ): Promise<Response> {
   const linesParam = Number.parseInt(url.searchParams.get("lines") ?? "", 10);
   // Clamp to a sane ceiling — don't trust the client (or Herdr) to bound an enormous read.
@@ -4076,7 +4284,12 @@ export async function readPane(
     // an alt-screen pane — scrolling it up and back — in `text` format. `lines` here is whatever the
     // web app asked for (600 for the history view), well past any pane's height, so switching this
     // to `strip` would move someone's screen on every revalidate — see the adapter's `readGrid`.
-    const read = await herdr.readGrid(paneId, { scope: "recent", lines, styling: "preserve" });
+    // `hint` is the state engine's word on the pane (paneReadHint): a pane it reads as blocked gets
+    // no history read on herdr-core, whose history reads hold the terminal's keys. `purpose=older`
+    // is the phone's Load older; every other read is the mirror's poll, which herdr-core answers from
+    // the screen alone.
+    const purpose: MuxReadPurpose = url.searchParams.get(PANE_READ_PURPOSE_PARAM) === "older" ? "older" : "poll";
+    const read = await herdr.readGrid(paneId, recentRead(lines, hint, purpose));
     if (!read.ok) return text(`${herdr.mux} read failed: ${read.detail}`, 502);
     // A URL the pane's column edge cut in two is the one thing the mirror cannot repair on its own,
     // and the repair needs the same rows with soft wraps undone. Ask for them only when the grid
@@ -4161,6 +4374,8 @@ export function paneReadResponse(
   // Absent, never empty, when there is nothing to repair: the ETag is computed over this body, so an
   // always-present key would invalidate every client's cached copy once for no gain.
   if (logicalText !== undefined) body.logicalText = logicalText;
+  // Same rule: only a Load older the multiplexer answered without older rows carries it.
+  if (read.olderNote !== undefined) body.olderNote = read.olderNote;
   // The same mask a crew lead puts on a member's mirror (bridge/answer-mask.ts).
   return redact ? maskPaneRead(body) : body;
 }
@@ -4244,10 +4459,14 @@ export async function discoveryHints(
   return { screen: paneScreen(mux, paneId), processes: await discoverProcesses(mux, paneId) };
 }
 
-/** Another pane running `adapter`'s harness sits in `pane`'s folder. */
+/**
+ * Another pane running `adapter`'s harness sits in `pane`'s folder. A harness counts under any name
+ * its adapter answers to (`AGENT_ALIASES`): an `omp` pane and a `pi` pane write the same log format,
+ * and one adapter's folder walk would find either's session.
+ */
 function sharesFolder(adapter: JournalAdapter, pane: AgentView, panes: readonly AgentView[]): boolean {
   return panes.some(
-    (other) => other.paneId !== pane.paneId && other.agent === adapter.agent && other.cwd === pane.cwd,
+    (other) => other.paneId !== pane.paneId && journalAgentName(other.agent) === adapter.agent && other.cwd === pane.cwd,
   );
 }
 
@@ -4521,6 +4740,9 @@ async function paneSubagent(
  * and a field-composed tag would hand them the same validator. An unchanged poll re-serialises to the
  * same bytes (an empty `upserts` and three unmoved positions), so it is a 304 either way, which is
  * the requirement.
+ *
+ * `queuedOf` lists the pane's open queued sends from the session's Send Protocol (ADR 0122), absent
+ * with the protocol off. Unmasked here; the window answer is masked whole below.
  */
 export async function paneChat(
   cfg: Config,
@@ -4531,6 +4753,7 @@ export async function paneChat(
   paneId: string,
   url: URL,
   req: Request,
+  queuedOf?: (paneId: string) => readonly ReceiptQueued[],
 ): Promise<Response> {
   const accept = req.headers.get("accept-encoding");
   const unavailable = (reason: "disabled" | "no-session" | "no-log", detail?: "shared-folder") =>
@@ -4560,7 +4783,7 @@ export async function paneChat(
   try {
     const read =
       params.before === undefined
-        ? await live.window(adapter, ref, params)
+        ? await live.window(adapter, ref, params, queuedOf?.(paneId) ?? [])
         : await live.older(adapter, ref, params.before, params.limit);
     if (read === null) return unavailable("no-log");
     // Masked before the ETag is hashed, so the tag describes what was actually sent (bridge/redact.ts).
@@ -5124,6 +5347,8 @@ export async function typeIntoFreshShell(
 export interface ReplySendContext {
   readonly protocol: SendProtocol | undefined;
   readonly harnessOf: (paneId: string) => string | null;
+  /** The state engine's hint for the binding read of this pane (paneReadHint). Absent: none. */
+  readonly readHint?: MuxReadHint;
 }
 
 /** What a reply that ran the Send Protocol answers: the old shape for an old reader, and the protocol's answer beside it. */
@@ -5181,7 +5406,10 @@ export async function replyThroughProtocol(
     mode: fields.mode ?? (reservedLead(words, ["/", "!", "@"]) === null ? "send" : "command"),
   });
   if (request === null) return text("bad send request", 400);
-  const { pane: target, ...sendRequest } = request;
+  const { pane: target, ...asked } = request;
+  // A request id the caller minted is the phone's, on a crew member's pane (M56 spec 06): a person's
+  // send, which may steer (M69). A caller that names no id is not the phone and never steers.
+  const sendRequest: SendRequest = fields.id === undefined ? asked : { ...asked, fromPhone: true };
   const answer = await send.protocol.handle(sendRequest, { session, paneId: target, harness });
   const receipt = answer.receipt;
   const auditDetail: AuditDetail = { mode: sendRequest.mode, submit: true, textLength: words.length };
@@ -5194,7 +5422,7 @@ export async function replyThroughProtocol(
   const shown: SendAnswer = context.redact && answer.surface !== undefined ? { ...answer, surface: maskSurface(answer.surface) } : answer;
   const outcome = receipt?.outcome;
   // A held send (M56 spec 15) is taken: Collie sends it when the turn ends.
-  if (outcome === undefined || outcome === "sent" || outcome === "effective" || outcome === "discarded" || outcome === "held") return json({ ok: true, send: shown } satisfies ReplyProtocolResponse, context.acceptEncoding);
+  if (outcome === undefined || outcome === "sent" || outcome === "effective" || outcome === "steered" || outcome === "discarded" || outcome === "held") return json({ ok: true, send: shown } satisfies ReplyProtocolResponse, context.acceptEncoding);
   const textDelivered = outcome === "typed_not_submitted" || outcome === "unknown";
   const why = answer.detail ?? `${outcome}${receipt?.reason === undefined ? "" : ` (${receipt.reason})`}`;
   const failure = outcome === "typed_not_submitted" ? apiError("reply.not_submitted") : apiError("reply.send_failed", { reason: why });
@@ -5254,7 +5482,7 @@ export async function replyPane(
     return json(refusal, ae);
   }
   const binding = expected.present
-    ? await checkPromptBinding(herdr, cfg, paneId, expected.value, styled.value, columns.value, tail.value)
+    ? await checkPromptBinding(herdr, cfg, paneId, expected.value, styled.value, columns.value, tail.value, send.readHint)
     : null;
   if (binding && !binding.ok) {
     audit.record({
@@ -5317,6 +5545,7 @@ export async function keysPane(
   audit: AuditLog,
   device: string | null,
   session: string,
+  hint?: MuxReadHint,
 ): Promise<Response> {
   let body: JsonValue;
   try {
@@ -5340,7 +5569,7 @@ export async function keysPane(
   if (keys.length === 0) return text("no keys", 400);
   const ae = req.headers.get("accept-encoding");
   const binding = expected.present
-    ? await checkPromptBinding(herdr, cfg, paneId, expected.value, styled.value, columns.value, tail.value)
+    ? await checkPromptBinding(herdr, cfg, paneId, expected.value, styled.value, columns.value, tail.value, hint)
     : null;
   if (binding && !binding.ok) {
     audit.record({
@@ -5367,6 +5596,14 @@ export async function keysPane(
       detail: keysDetail,
     });
     return json({ ok: true } satisfies ActionResponse, ae);
+  }
+  if (!sent.ok && sent.reason === "unconfirmed") {
+    // The keys left and the multiplexer did not confirm them in time: they may still land (MuxRefusal,
+    // `unconfirmed`). Recorded as sent-unconfirmed, and answered as "not confirmed", never "failed",
+    // so nobody sends them twice on a wrong word.
+    keysDetail.sent = "unconfirmed";
+    audit.record({ action: "keys", paneId, session, device, detail: keysDetail });
+    return json({ ok: false, ...apiError("keys.unconfirmed", { reason: sent.detail }) } satisfies ActionResponse, ae);
   }
   if (binding) {
     audit.record({
@@ -5526,6 +5763,7 @@ async function checkPromptBinding(
   expectedStyledLines?: string,
   columns?: ColumnRange,
   tailLines?: number,
+  hint?: MuxReadHint,
 ): Promise<PromptBindingCheck> {
   const tailWindow = tailLines ?? DEFAULT_PROMPT_TAIL_LINES;
   let fresh: MuxGrid;
@@ -5542,11 +5780,7 @@ async function checkPromptBinding(
     // verifies the same kind of pane data the GET handler serves. The line count deliberately does
     // not follow cfg.readLines alone because a small legal setting may not contain the expected
     // region; include room for the accepted tail and for blank separator lines normalization drops.
-    const read = await herdr.readGrid(paneId, {
-      scope: "recent",
-      lines: bindingReadLines,
-      styling: "preserve",
-    });
+    const read = await herdr.readGrid(paneId, recentRead(bindingReadLines, hint));
     if (!read.ok) return readFailed(herdr, expected, read.detail);
     fresh = read.value;
   } catch (err) {
@@ -5630,6 +5864,13 @@ function promptBindingFailure(
  *
  * Cheap where it is already fresh — a pushing adapter's `refresh()` resolves immediately (see the
  * port) — so this costs a listing only on the adapters that actually needed one.
+ *
+ * IT STARTS THE ENGINE'S RE-READ AND DOES NOT WAIT FOR IT. `pokeNow()` fires a poll, so the route
+ * answers before that poll lands, and a phone that revalidates on the answer can still read the old
+ * herd. Measured on the dev lane on 2026-10-21: a new pane label reached `/api/snapshot` 100 to
+ * 117 ms after the answer, and a read sent within 100 ms of it missed the label 44 times in 44. So the
+ * phone also stamps a topology burst after a create, a close or a rename (web/src/lib/poll-intent.ts
+ * `stampTopology`), which reads again 300 ms on.
  */
 async function settleTopology(herdr: Pick<MuxAdapter, "refresh">, engine: Pick<StateEngine, "pokeNow">): Promise<void> {
   try {
@@ -5923,8 +6164,8 @@ async function createTab(
   } satisfies CreateResponse, ae);
 }
 
-// Create a new workspace ("space") with a fresh shell pane. `cwd` defaults to the user's home dir
-// when the client doesn't specify one (typing a path on a phone is painful) — it's a shell, so you
+// Create a new workspace ("space") with a fresh shell pane. `cwd` defaults to the session's folder
+// from `spaces.toml` `[folders]`, else the user's home dir, when the client doesn't specify one (typing a path on a phone is painful), it's a shell, so you
 // can cd from there. Same structural-only threat model as createTab.
 //
 // A create that WORKED, and that named a folder, puts the folder the multiplexer REPORTED for the new
@@ -5941,6 +6182,8 @@ export async function createWorkspace(
   device: string | null,
   session: string,
   folders?: Pick<FolderSurface, "recordRecent">,
+  // The operator's folder for this session (`spaces.toml` `[folders]`), already checked to exist.
+  sessionFolder?: string,
 ): Promise<Response> {
   let body: JsonValue;
   try {
@@ -5954,7 +6197,7 @@ export async function createWorkspace(
   const fields = asJsonRecord(body) ?? {};
   // Checked, not declared — see createTab.
   const typed = typeof fields.cwd === "string" ? fields.cwd.trim() : "";
-  const cwd = typed || homedir();
+  const cwd = typed || sessionFolder || homedir();
   const label = typeof fields.label === "string" ? fields.label : undefined;
   const ae = req.headers.get("accept-encoding");
   const outcome = await herdr.createSpace({ cwd, label });
@@ -6961,7 +7204,7 @@ export async function launch(
     }
   }
   const row = picked.row;
-  const resolvedCwd = row?.cwd ?? asked ?? besidePane?.cwd ?? homedir();
+  const resolvedCwd = row?.cwd ?? asked ?? besidePane?.cwd ?? deps.sessionFolder ?? homedir();
 
   // Checked again with no await between it and `track`, so two requests with one id that both got
   // past the check above cannot both start a launch.
@@ -6980,6 +7223,8 @@ export async function launch(
     session,
     receipts,
     wait,
+    harness: picked.harness,
+    launchWindow: deps.launchWindow,
   });
   if (requestId !== undefined) receipts.track(requestId, work);
   const answer = await work;
@@ -7031,6 +7276,10 @@ export interface LaunchDeps {
   recentRuns?: Pick<RecentRunSurface, "record">;
   /** Sent, where the same run is kept as kind `run` (ADR 0107). Absent: nothing is kept. */
   sent?: Pick<SentSurface, "record">;
+  /** The launch window (bridge/launch-window.ts): a `harness` launch marks its pane. Absent: nothing is marked. */
+  launchWindow?: Pick<LaunchWindow, "mark"> | undefined;
+  /** The operator's folder for this session (`spaces.toml` `[folders]`), checked to exist. Absent: home. */
+  sessionFolder?: string;
 }
 
 /**
@@ -7047,7 +7296,13 @@ function earlierLaunch(receipts: LaunchReceiptSurface, requestId: string): Promi
 }
 
 /** Which of the four kinds a launch body names, and the line it types. */
-type PickedLaunch = { kind: "row" | "harness" | "shell" | "run"; row: Launcher | undefined; noPrompts?: boolean };
+type PickedLaunch = {
+  kind: "row" | "harness" | "shell" | "run";
+  row: Launcher | undefined;
+  noPrompts?: boolean;
+  /** The harness id a `harness` launch named: the launch window's mark ({@link LaunchWindow}). */
+  harness?: string;
+};
 
 /** What a one-off `run` is checked against: who asks, and the operator's switch (ADR 0095). */
 interface RunGate {
@@ -7082,7 +7337,9 @@ async function pickLaunch(
     if (known === undefined) {
       return json({ ok: false, ...apiError("launch.unknown_harness", { harness }) } satisfies CreateResponse, null, 400);
     }
-    return { kind: "harness", row: { command: known.binary, label: known.label } };
+    // OMP otherwise silently leaves home for /tmp; preserve the folder the New page chose.
+    const shellCommand = known.id === "omp" ? `${known.binary} --cwd=.` : known.binary;
+    return { kind: "harness", row: { command: shellCommand, label: known.label }, harness };
   }
   // Live read, behind the same mtime cache the other operator files use — a new row in
   // `launchers.toml` is live on the bridge without a restart (an already-open tab needs a reload to
@@ -7153,6 +7410,9 @@ async function runLaunch(
     session: string;
     receipts: LaunchReceiptSurface;
     wait: PaneReadyOptions;
+    /** The harness id of a `harness` launch, and where its pane is marked once the line is typed. */
+    harness: string | undefined;
+    launchWindow: Pick<LaunchWindow, "mark"> | undefined;
   },
 ): Promise<CreateResponse> {
   const { row, besidePane, cwd } = job;
@@ -7193,6 +7453,9 @@ async function runLaunch(
       }
       return { ok: false, error: sent.error, code: sent.code, detail: sent.detail };
     }
+    // The line is typed and the agent is booting: until its input box is on screen, a send to this pane
+    // waits for the agent's input box instead of going into the shell (the Send Protocol, `starting`).
+    if (job.harness !== undefined) job.launchWindow?.mark(job.session, created.paneId, job.harness);
   }
   // `command` is deliberately NOT added to `METADATA_KEYS` in audit.ts. Under
   // `COLLIE_AUDIT_CONTENT=none` it therefore redacts like every other content-bearing detail, and
@@ -7208,7 +7471,7 @@ async function runLaunch(
   let detail: AuditDetail;
   if (row === undefined) detail = { cwd, requestId: job.requestId };
   else if (job.kind === "run") detail = { program: row.label, length: [...row.command].length, cwd, requestId: job.requestId };
-  else detail = { command: row.command, label: row.label, cwd, requestId: job.requestId, harness: job.kind === "harness" ? row.command : undefined };
+  else detail = { command: row.command, label: row.label, cwd, requestId: job.requestId, harness: job.kind === "harness" ? row.command.split(" ", 1)[0] : undefined };
   if (besidePane) detail.besidePaneId = besidePane.paneId;
   job.audit.record({
     action: row === undefined ? `${where}.create` : job.kind === "run" ? `${where}.run` : `${where}.launch`,
@@ -7866,7 +8129,7 @@ export const SEND_MAX_TEXT = 64 * 1024;
 export function parseSendRequest(body: JsonValue | undefined): ({ pane: string; resendOf?: string } & SendRequest) | null {
   const fields = asJsonRecord(body);
   if (fields === null) return null;
-  const { id, pane, text: words, mode, rowsHash, revision, capAck, resendOf } = fields;
+  const { id, pane, text: words, mode, rowsHash, revision, capAck, resendOf, when } = fields;
   if (typeof id !== "string" || !REQUEST_ID.test(id)) return null;
   if (typeof pane !== "string" || pane.length === 0 || pane.length > 256) return null;
   if (typeof words !== "string" || words.length > SEND_MAX_TEXT) return null;
@@ -7890,6 +8153,13 @@ export function parseSendRequest(body: JsonValue | undefined): ({ pane: string; 
     if (typeof capAck !== "boolean") return null;
     Object.assign(request, { capAck });
   }
+  // M69: `steer` asks for a steer into the running turn; any other word is a bad request. Whether the
+  // caller may steer is the route's to say (`fromPhone`), never the body's.
+  if (when !== undefined && when !== null) {
+    const chosenWhen = SEND_WHENS.find((w) => w === when);
+    if (chosenWhen === undefined) return null;
+    Object.assign(request, { when: chosenWhen });
+  }
   return request;
 }
 
@@ -7899,6 +8169,15 @@ export function parseSendRequest(body: JsonValue | undefined): ({ pane: string; 
  * profile. A screenless pane refuses it the way it refuses the raw reply. Every outcome is a 200 with
  * the answer; a malformed body is a 400. One audit line per request, with the outcome and never the text.
  */
+/**
+ * Whether a pane's view says `canSteer` (M69): a screen session that runs the Send Protocol, whose
+ * Surface shadow reads the pane's harness as one it may steer ({@link SurfaceShadow.canSteer}). A
+ * program session (a durable pane, its own `driver`) never steers. Exported for its test.
+ */
+export function paneCanSteer(from: { readonly send?: unknown; readonly driver?: unknown; readonly surface?: Pick<SurfaceShadow, "canSteer"> }, paneId: string): boolean {
+  return from.driver === undefined && from.send !== undefined && from.surface?.canSteer(paneId) === true;
+}
+
 /** What `sendRoute` reads of a session runtime: a {@link SessionRuntime} is one. */
 export interface SendRouteRuntime {
   readonly send?: SendProtocol;
@@ -7928,17 +8207,37 @@ export async function sendRoute(
   const harness = replySendOf(rt).harnessOf(request.pane);
   if (harness === null) return text("no such terminal pane", 404);
   const { pane: paneId, resendOf, ...asked } = request;
-  let sendRequest: SendRequest = asked;
-  if (resendOf !== undefined) {
+  // `POST /api/send` is the phone's route: a person's send, the one caller that may steer (M69).
+  let sendRequest: SendRequest = { ...asked, fromPhone: true };
+  // A Send or Discard on a queued message that came back to the box (ADR 0122): `resendOf` names the
+  // queued request, the mode is `submit` or `discard`, and the text is the bridge's own, unmasked.
+  const returned = resendOf !== undefined && (asked.mode === "submit" || asked.mode === "discard") ? rt.send.returnedSource(rt.name, paneId, resendOf) : null;
+  if (resendOf !== undefined && returned !== null) {
+    const { when: _steer, ...plain } = asked;
+    sendRequest = { ...plain, text: returned, returnedCard: true, fromPhone: true };
+  } else if (resendOf !== undefined) {
     // The stored text, unmasked: never the row the phone shows, which the redact setting may mask.
     const source = rt.send.resendSource(rt.name, paneId, resendOf);
     if (source === null) return text("no such ended held send on this pane", 404);
-    sendRequest = { ...asked, text: source.text, mode: source.mode };
+    // A Resend goes on the queued path, as the held send it repeats: never a steer (M69), so `when`
+    // goes with `fromPhone`.
+    const { when: _steer, ...plain } = asked;
+    sendRequest = { ...plain, text: source.text, mode: source.mode };
   }
-  const answer = await rt.send.handle(sendRequest, { session: rt.name, paneId, harness });
-  const receipt = answer.receipt;
+  let answer = await rt.send.handle(sendRequest, { session: rt.name, paneId, harness });
+  let receipt = answer.receipt;
   // The old row goes once the new request was taken; a refusal keeps it, text and all.
-  if (resendOf !== undefined && receipt !== undefined && receipt.outcome !== "refused") rt.send.dismissHeld(rt.name, paneId, resendOf);
+  if (resendOf !== undefined && receipt !== undefined && receipt.outcome !== "refused") {
+    if (returned !== null) rt.send.dismissReturned(resendOf);
+    else rt.send.dismissHeld(rt.name, paneId, resendOf);
+  }
+  // Discard on a returned card whose box changed since (the fresh read under the pane lock no longer
+  // shows exactly that text): nothing was pressed, and only the card goes. The answer says so.
+  if (returned !== null && sendRequest.mode === "discard" && receipt?.outcome === "refused" && receipt.detail === BOX_CHANGED) {
+    rt.send.dismissReturned(resendOf!);
+    receipt = { ...receipt, detail: RETURNED_CARD_DROPPED };
+    answer = { ...answer, receipt };
+  }
   if (receipt !== undefined) {
     const detail: AuditDetail = { mode: sendRequest.mode, outcome: receipt.outcome, textLength: receipt.textLength, probed: receipt.keys.includes("probe") };
     if (resendOf !== undefined) detail.resend = true;
@@ -7951,6 +8250,88 @@ export async function sendRoute(
   }
   const out = context.redact && answer.surface !== undefined ? { ...answer, surface: maskSurface(answer.surface) } : answer;
   return json(out, context.acceptEncoding);
+}
+
+/** What `stopRoute` reads of a session runtime: a {@link SessionRuntime} is one. */
+export interface StopRouteRuntime extends Pick<SendRouteRuntime, "send" | "engine"> {
+  readonly stop?: StopService;
+}
+
+/**
+ * `POST /api/pane/:id/abort` on a pane with a screen (M68 spec 01): `{ requestId }` in, one receipt out
+ * (`stopped`, `pressed` or `refused` with a reason), always a 200; a body that is no request id is a 400.
+ * The same request id answers the same receipt and presses once. One audit line per tap: request id,
+ * keys by name, outcome, and never a message text.
+ */
+export async function stopRoute(
+  rt: StopRouteRuntime,
+  paneId: string,
+  body: JsonValue | undefined,
+  context: { readonly audit: AuditLog; readonly device: string | null; readonly session: string; readonly acceptEncoding: string | null },
+): Promise<Response> {
+  if (rt.stop === undefined) return text("stop is not available on this session", 404);
+  const requestId = asJsonRecord(body)?.requestId;
+  if (typeof requestId !== "string" || !REQUEST_ID.test(requestId)) return text("bad body", 400);
+  const harness = replySendOf(rt).harnessOf(paneId);
+  // A missing pane answers the Stop's own receipt, so the phone can tell it from the bare 404 of a
+  // build with no Stop for a screen pane (an older crew member: `unsupported_build` on the phone).
+  if (harness === null) return json({ requestId, outcome: "refused", reason: "pane_gone" }, context.acceptEncoding, 404);
+  const answer = await rt.stop.handle(requestId, paneId, harness);
+  if (answer.kind === "id_reused") return json({ requestId, outcome: "refused", reason: "request-id-reused" }, context.acceptEncoding, 409);
+  const { receipt } = answer;
+  const detail: AuditDetail = { requestId, outcome: receipt.outcome, replayed: answer.replayed };
+  if (receipt.reason !== undefined) detail.reason = receipt.reason;
+  if (receipt.keys !== undefined) detail.keys = [...receipt.keys];
+  context.audit.record({ action: "abort", paneId, session: context.session, device: context.device, detail });
+  // A replay pressed nothing this time; a first tap that pressed makes the engine look again soon.
+  if (receipt.keys !== undefined && !answer.replayed) {
+    rt.engine.noteInput();
+    rt.engine.pokeNow();
+  }
+  return json(receipt, context.acceptEncoding);
+}
+
+/** What `clearRoute` reads of a session runtime: a {@link SessionRuntime} is one. */
+export interface ClearRouteRuntime extends Pick<SendRouteRuntime, "send" | "engine"> {
+  readonly clear?: ClearService;
+}
+
+/**
+ * `POST /api/pane/:id/clear` on a pane with a screen (ADR 0116, the Clear paragraph): `{ requestId }` in, one
+ * receipt out (`cleared`, or `refused` with a reason), always a 200; a body that is no request id is a 400.
+ * The same request id answers the same receipt and presses once. One audit line per tap: request id,
+ * outcome and reason, and never the box's text. A `cleared` receipt carries the cleared text (`draft`)
+ * for the phone's Restore; where this bridge masks secret shapes (`redact`) and the text holds one, the
+ * receipt goes without it, since a Restore would type the mask.
+ */
+export async function clearRoute(
+  rt: ClearRouteRuntime,
+  paneId: string,
+  body: JsonValue | undefined,
+  context: { readonly audit: AuditLog; readonly device: string | null; readonly session: string; readonly acceptEncoding: string | null; readonly redact?: boolean },
+): Promise<Response> {
+  if (rt.clear === undefined) return text("clear is not available on this session", 404);
+  const requestId = asJsonRecord(body)?.requestId;
+  if (typeof requestId !== "string" || !REQUEST_ID.test(requestId)) return text("bad body", 400);
+  const harness = replySendOf(rt).harnessOf(paneId);
+  // A missing pane answers the Clear's own receipt, so the phone can tell it from the bare 404 of a
+  // build with no Clear (an older crew member: `unsupported_build` on the phone).
+  if (harness === null) return json({ requestId, outcome: "refused", reason: "pane_gone" }, context.acceptEncoding, 404);
+  const answer = await rt.clear.handle(requestId, paneId, harness);
+  if (answer.kind === "id_reused") return json({ requestId, outcome: "refused", reason: "request-id-reused" }, context.acceptEncoding, 409);
+  const { receipt: full } = answer;
+  const { draft, ...bare } = full;
+  const receipt = draft === undefined || (context.redact === true && redactText(draft) !== draft) ? bare : full;
+  // Named fields only: the draft never reaches the audit line.
+  const detail: AuditDetail = { requestId, outcome: receipt.outcome, replayed: answer.replayed, pressed: answer.pressed };
+  if (receipt.reason !== undefined) detail.reason = receipt.reason;
+  context.audit.record({ action: "clear", paneId, session: context.session, device: context.device, detail });
+  // A replay pressed nothing this time; a first tap that pressed makes the engine look again soon.
+  if (answer.pressed && !answer.replayed) {
+    rt.engine.noteInput();
+    rt.engine.pokeNow();
+  }
+  return json(receipt, context.acceptEncoding);
 }
 
 /**
@@ -8038,6 +8419,51 @@ export function walkyWhoRoute(walky: WalkyService | undefined, acceptEncoding: s
 export const WALKY_LIST_MAX = 200;
 const WALKY_LIST_DEFAULT = 50;
 
+/** What the drop route answers on a crew member: the lead's phone forwards no take-back. */
+export const WALKY_DROP_LOCAL_TEXT = "a message held on a crew member is dropped on that machine";
+
+/** A take-back's answer as the phone reads it: `{ results }` (200), or the reason in a 404 or 403. */
+function walkyTakeBackResponse(answer: TakeBackAnswer, acceptEncoding: string | null): Response {
+  if (!answer.ok) return text(answer.error, answer.error === NOT_THE_SENDER ? 403 : 404);
+  return json({ results: answer.results }, acceptEncoding);
+}
+
+/**
+ * `POST /api/walky/<id>/cancel` (M62 spec 03): the sender takes a held message back. From the phone the
+ * sender is the operator, so only an operator message is the device's to cancel; an agent's message is
+ * cancelled from its own pane (`collie walky cancel`), and the route answers 403 for it. One audit
+ * line per request, with the id and each target's result, never the body.
+ */
+export function walkyCancelRoute(walky: WalkyService | undefined, id: string, context: { readonly audit: AuditLog; readonly device: string | null; readonly acceptEncoding: string | null }): Response {
+  if (walky === undefined) return text(WALKY_OFF_TEXT, 404);
+  if (!isWalkyId(id)) return text("bad message id", 400);
+  const answer = walky.cancel(id, { kind: "operator" });
+  context.audit.record({ action: "walky.cancel", device: context.device, detail: { id, results: answer.ok ? answer.results.map((result) => `${result.target}: ${result.result}`) : answer.error } });
+  return walkyTakeBackResponse(answer, context.acceptEncoding);
+}
+
+/**
+ * `POST /api/pane/<pane>/walky/<id>/drop` (M62 spec 03): the pane's owner drops a message held for the
+ * pane's current instance. A pane this bridge does not have is a 404; a message not held for it is a
+ * 404 that says so. One audit line, never the body.
+ */
+export function walkyDropRoute(
+  walky: WalkyService | undefined,
+  session: string,
+  paneId: string,
+  id: string,
+  context: { readonly audit: AuditLog; readonly device: string | null; readonly acceptEncoding: string | null },
+): Response {
+  if (walky === undefined) return text(WALKY_OFF_TEXT, 404);
+  if (!isPaneId(paneId)) return text("bad pane", 400);
+  if (!isWalkyId(id)) return text("bad message id", 400);
+  const instance = walky.instanceOf(session, paneId);
+  if (instance === null) return text("no such pane", 404);
+  const answer = walky.drop(id, { session, paneId, instance });
+  context.audit.record({ action: "walky.drop", paneId, session, device: context.device, detail: { id, results: answer.ok ? answer.results.map((result) => `${result.target}: ${result.result}`) : answer.error } });
+  return walkyTakeBackResponse(answer, context.acceptEncoding);
+}
+
 /**
  * `GET /api/pane/:id/walky?limit=50`: the messages that reached the pane's current instance and the
  * ones it sent, newest first. A pane id no pane holds now lists nothing: a new session that takes the
@@ -8058,6 +8484,66 @@ export function sendReceiptsRoute(rt: Pick<SendRouteRuntime, "send" | "driver"> 
   const receipts = rt.driver !== undefined ? rt.driver.recent(pane, 10, rt.name) : (rt.send?.recent(pane, 10) ?? []);
   const answer: SendReceiptsAnswer = { receipts };
   return json(answer, acceptEncoding);
+}
+
+/** What `reportContextRoute` reads of a session runtime: a {@link SessionRuntime} is one. */
+export interface ReportRouteRuntime extends Pick<SendRouteRuntime, "send" | "engine"> {
+  readonly herdr: Pick<MuxAdapter, "controlTurn" | "readGrid" | "mux">;
+}
+
+/** What `reportContextRoute` takes of this machine: its version, its release line and its send rows. */
+export interface ReportMachine {
+  readonly collie: string;
+  readonly line: ReleaseLine | null;
+  /** `HOST.platform` and `process.arch`, read at the edge. */
+  readonly os: string;
+  readonly arch: string;
+  /**
+   * The doctor's sends section over this bridge's state dir (M71 spec 05), read when the route is
+   * called, never on a poll. index.ts wires it to `sendsReportRows` (cli/send-findings.ts); undefined
+   * with the Send Protocol off, and the answer then carries no `doctor` field.
+   */
+  readonly sendHealth?: () => readonly DoctorRowSource[];
+}
+
+/** The report's doctor rows, or undefined when there is no reader or it threw: the route never fails for them. */
+function reportDoctor(machine: ReportMachine, harness: string | null): readonly ReportDoctorRow[] | undefined {
+  if (machine.sendHealth === undefined) return undefined;
+  try {
+    return reportDoctorRows(machine.sendHealth(), harness);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `GET /api/report/context?pane=<id>[&screen=1]` once the paired-device read gate passed and the
+ * session resolved (ADR 0123): the setup block of a Report a problem sheet, and with `screen=1` the
+ * pane's last rows, always masked (bridge/report.ts). A read: it changes nothing, writes no audit line
+ * and stores nothing. A pane this session does not show is a 404; a screen asked of a pane with none
+ * (a program session) is a 400. With no pane it answers the machine's half alone.
+ */
+export async function reportContextRoute(
+  rt: ReportRouteRuntime,
+  pane: string | null,
+  wantScreen: boolean,
+  machine: ReportMachine,
+  acceptEncoding: string | null,
+): Promise<Response> {
+  if (pane !== null && (pane.length === 0 || pane.length > 256)) return text("bad pane", 400);
+  const harness = pane === null ? null : replySendOf(rt).harnessOf(pane);
+  if (pane !== null && harness === null) return text("no such pane", 404);
+  const screenable = pane !== null && rawInputRefusal(rt.herdr) === null;
+  const doctor = reportDoctor(machine, harness);
+  const facts: ReportContext = { collie: machine.collie, line: machine.line, os: machine.os, arch: machine.arch, mux: rt.herdr.mux, harness, screenable };
+  const context: ReportContext = doctor === undefined ? facts : { ...facts, doctor };
+  if (!wantScreen) return json(context, acceptEncoding);
+  if (pane === null || !screenable) return text("this pane has no screen to include", 400);
+  // The mirror's own read shape (`readPane`): `recent` with styling kept, which leaves the operator's
+  // screen where it is. The escapes are stripped here and the rows masked in `reportScreen`.
+  const read = await rt.herdr.readGrid(pane, { scope: "recent", lines: REPORT_SCREEN_ROWS, styling: "preserve" });
+  if (!read.ok) return text(`${rt.herdr.mux} read failed: ${read.detail}`, 502);
+  return json({ ...context, screen: reportScreen(stripSgr(read.value.text)) } satisfies ReportContext, acceptEncoding);
 }
 
 /**

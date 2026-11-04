@@ -62,6 +62,7 @@ describe("the Chat tail", () => {
     expect((await loadChatTail(undefined, "w1:p2", undefined))?.entries[0]?.uuid).toBe("b");
   });
 
+
   it("stores the entries only: no cursor, no queue, no mirror text", async () => {
     await saveChatTail(undefined, "w1:p1", undefined, [entry("a", 1, "hi")], "1d", clock);
     const record = await getRecord("chat-tail", paneScopeKey(undefined, "w1:p1"));

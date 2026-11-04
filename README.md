@@ -13,7 +13,8 @@
 </p>
 
 ColliePWA is an open-source (MIT) mobile client for [Herdr](https://herdr.dev), with experimental
-support for [tmux](https://github.com/tmux/tmux) and [zellij](https://zellij.dev). It is a
+support for the new Herdr core (`herdr-core`, behind herdr-app), [tmux](https://github.com/tmux/tmux)
+and [zellij](https://zellij.dev). It is a
 self-hosted web app (PWA) for driving terminal AI agents such as Claude Code, Codex and OpenCode
 from your phone. Each instance connects to one terminal multiplexer, and can show your own agent
 durable agents beside it. It is served over Tailscale by default.
@@ -26,6 +27,35 @@ Using Herdr? Read about the
 The input box uses a standard text field compatible with system voice dictation. Collie also
 includes built-in [voice input](./docs/voice-and-push.md#voice-input-optional) that remains disabled
 until explicitly configured.
+
+## Get it on your phone in 3 steps
+
+You need [Tailscale](https://tailscale.com) on your computer and your phone, and
+[Herdr](https://herdr.dev) (or the Herdr core, tmux or zellij, experimental) running on your computer. New to
+either? **[Install in five minutes](./docs/five-minute-install.md)** has one path per system. On
+Windows, follow [Install in five minutes → Windows](./docs/five-minute-install.md#windows).
+
+**1. Install** on your computer (no `sudo`, checksum-verified):
+
+```bash
+curl -fsSL https://colliepwa.dev/install.sh | sh
+```
+
+**2. Start** it on your tailnet:
+
+```bash
+COLLIE_MUX=herdr collie start          # or: herdr-core, tmux, zellij
+```
+
+**3. Pair your phone.** Run `collie qr` and scan it. Add Collie to your home screen and open it from
+the icon. Then run `collie pair` and type the code under **Settings → System → Paired devices**.
+
+That's it: agents waiting on you show up first. Tap one to reply.
+
+> Collie is remote shell access to your machine. Keep it on your tailnet (`tailscale serve`, never
+> `funnel`) and read [Security](#security--read-this-first) before you run it.
+
+Prefer to have your agent do it? Ask it to run `collie skill` and follow the brief.
 
 **Features**
 
@@ -122,10 +152,11 @@ curl -fsSL https://colliepwa.dev/install.sh | sh
 ```
 
 The script downloads the latest release for your platform, verifies the sha256 checksum, installs
-the files, and puts `collie` on your PATH. It then prints the remaining manual steps: seed a config,
-then run `collie start`. You do not need to specify a multiplexer ahead of time. On its first run,
-`collie start` detects Herdr, tmux, and zellij, then prompts for your choice. If you prefer to build
-from source, **[`docs/install.md`](./docs/install.md)** covers manual builds, each system and
+the files, and puts `collie` on your PATH. It then prints the remaining steps, the same as
+[Get it on your phone in 3 steps](#get-it-on-your-phone-in-3-steps). Without `COLLIE_MUX`,
+`collie start` in a terminal detects Herdr, tmux, and zellij, then prompts for your choice. It
+offers the Herdr core only on a machine without the Herdr TUI. If you
+prefer to build from source, **[`docs/install.md`](./docs/install.md)** covers manual builds, each system and
 package, Herdr routes, and adding Collie to the home screen of an iPhone or Android phone.
 
 ColliePWA is not in the App Store or Google Play. You add it to your home screen from the browser,
@@ -145,7 +176,7 @@ and that is the only way to install it on a phone.
 | | |
 | --- | --- |
 | [**Sessions**](./docs/sessions.md) | What a session is, where sessions come from, a terminal or a durable agent, and what the phone shows for each |
-| [**Terminals**](./docs/multiplexers.md) | Pointing Collie at Herdr, tmux, zellij, tuios or Tern, what each can answer, and agent beacons. Experimental for tmux, zellij, tuios and Tern; bug reports wanted |
+| [**Terminals**](./docs/multiplexers.md) | Pointing Collie at Herdr, the Herdr core (`herdr-core`), tmux, zellij, tuios or Tern, what each can answer, two Collies on one machine, and agent beacons. Experimental for the Herdr core, tmux, zellij, tuios and Tern; bug reports wanted |
 
 ### Durable agents
 
@@ -169,8 +200,8 @@ and that is the only way to install it on a phone.
 | [**Themes**](./docs/themes.md) | The four looks Collie ships, picking one in Settings, importing a theme file after a preview, exporting one to edit, and writing your own: the 43 colour tokens, the shape and look words, the terminal palette, and what a theme cannot change |
 | [**Changes**](./docs/changes.md) | The Files screen: a workspace's folder with its changes marked, the changed files and their diffs, and the last commit, from the pane or the dashboard's Files tab. Read-only git, nested repos, and the two settings that decide how far it looks |
 | [**Deployment**](./docs/deployment.md) | Front doors other than the default: an identity-aware proxy, a reverse proxy with no Tailscale, an off-host ingress, several Collies on one host (one per user, or several instances for one user), and a crew's standby door |
-| [**Commands**](./docs/commands.md) | Every `collie` verb, putting `collie` on your PATH, and the Herdr actions that mirror the verbs on a Herdr-managed install |
-| [**Crews**](./docs/crew.md) | Several machines' Collies behind one URL: invite, join, deputy, failover |
+| [**Commands**](./docs/commands.md) | Every `collie` verb, the census verbs that show what a Collie knows (`status`, `mux list`, `sessions`, `crew status`), putting `collie` on your PATH, and the Herdr actions that mirror the verbs on a Herdr-managed install |
+| [**Crews**](./docs/crew.md) | Several machines' Collies behind one URL: invite, join, deputy, failover, and a machine that runs several Collies |
 | [**Walky talky**](./docs/walky-talky.md) | Messages between agent sessions: `collie walky who`, `send`, `reply`, `inbox` and `status`, pane tokens, receipts, how a message crosses a crew and how its outcome comes back, the phone's cards and composer, installing the skill into your agents, and the limits |
 | [**Voice input and Web Push**](./docs/voice-and-push.md) | The microphone in the composer, and notifications when an agent is waiting on you |
 | [**Manage & update**](./docs/upgrading.md) | Update from the phone or the terminal, roll back, update a crew, cross a major, stop, uninstall, and upgrading a 0.x install to 1.0 |

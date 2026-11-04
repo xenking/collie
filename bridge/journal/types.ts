@@ -8,7 +8,7 @@
 // make "read that log" a per-harness decision behind one interface, so a new harness is an adapter
 // rather than a fork of the reader.
 
-import type { CacheProbe } from "../cache/engine.ts";
+import type { CacheProbe, ChoiceOnly } from "../cache/engine.ts";
 import type { Cursor, ReadSince } from "./cursor.ts";
 import type { RowReducer } from "./reduce.ts";
 import type { ToolCall } from "./tool-call.ts";
@@ -209,7 +209,8 @@ export interface ForegroundProcess {
   readonly argv: readonly string[];
   /**
    * The process id, when the multiplexer reports it (Herdr does). The hook edges (M56 spec 11) use it
-   * to check that the pid an edge names is in the pane's foreground. Absent means "not reported".
+   * to check that the pid an edge names is in the pane's foreground, and `discover` may match it to
+   * the harness's own record of which process owns a session. Absent means "not reported".
    */
   readonly pid?: number;
 }
@@ -269,9 +270,10 @@ export interface JournalAdapter {
    * OPTIONAL, and absent everywhere but the harnesses whose panes carry no `agentSession`:
    * custom-source session reports never surface in the pane record (Herdr keeps a session only
    * from its own integrations), Muse has no integration of its own (journal/muse.ts), and OpenClaw
-   * reports through a source Herdr drops (journal/openclaw.ts). The history and chat routes call
-   * this when the pane names no session, and `toPaneWire` offers the History affordance on its
-   * presence, so a discoverable pane reads exactly like a reporting one.
+   * reports through a source Herdr drops (journal/openclaw.ts), and Herdr names none for a Kiro
+   * pane (journal/kiro-discovery.ts). The history and chat routes call this when the pane names no session, and
+   * `toPaneWire` offers the History affordance on its presence, so a discoverable pane reads
+   * exactly like a reporting one.
    *
    * Two clues, and an adapter takes the one its harness gives. `cwd` is the pane's folder, which is
    * enough where a folder holds one session (Muse). `screen` is the pane's visible text, for a
@@ -329,6 +331,13 @@ export interface JournalAdapter {
    */
   cacheProbe?(ref: AgentSessionRef): Promise<CacheProbe | null>;
   /**
+   * The choices in a log whose window holds no turn, or null: Claude's `/model` or `/effort` before the
+   * first message, which Claude Code writes to the log at once (seen on 2.1.310). The tracker asks it
+   * only when {@link cacheProbe} found no turn, so the pane's label names the chosen model before the
+   * first message. It says nothing about the cache. Never throws; the same tail read as `cacheProbe`.
+   */
+  choiceProbe?(ref: AgentSessionRef): Promise<ChoiceOnly | null>;
+  /**
    * The keys that make this harness take its queued messages NOW instead of at its next turn
    * boundary, in the neutral spelling (`bridge/mux/keys.ts`) — or absent when it has no such key.
    *
@@ -343,4 +352,13 @@ export interface JournalAdapter {
    * mux/capabilities.ts), because tmux and zellij deliver `ctrl+Enter` as a plain Enter.
    */
   readonly sendQueuedNow?: readonly string[];
+  /**
+   * This harness's journal records its message queue (its reducer's `queued()` reads real queue rows),
+   * so the live window takes its queued cards from the journal and never from Collie's own receipts
+   * (ADR 0122, journal/receipt-queue.ts). OPTIONAL and set only where it is true: Claude Code
+   * (`queue-operation` rows) and Muse (`run/inbox_item_queued`). Every other harness writes nothing
+   * about a queued message until the turn yields, and its window lists the sends Collie's receipts
+   * say are queued. Data, so the shared code names no harness.
+   */
+  readonly recordsQueue?: true;
 }

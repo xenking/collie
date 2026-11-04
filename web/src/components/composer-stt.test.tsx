@@ -27,6 +27,26 @@ vi.mock("@/lib/liveness", async (importOriginal) => ({
   useLive: () => true,
 }));
 
+const seenImages = vi.hoisted(() => new WeakSet<File>());
+const canvasGate = vi.hoisted(() => ({ available: true }));
+
+vi.mock("@/lib/image-edit", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/image-edit")>();
+  return { ...actual, canvasAvailable: () => canvasGate.available };
+});
+
+vi.mock("@/components/image-editor", () => ({
+  ImageEditor: (props: { file: File; onConfirm: (file: File) => void }) => {
+    if (!seenImages.has(props.file)) {
+      seenImages.add(props.file);
+      queueMicrotask(() => {
+        props.onConfirm(new File(["edited"], props.file.name, { type: props.file.type === "" ? "image/png" : props.file.type }));
+      });
+    }
+    return null;
+  },
+}));
+
 // The composer's microphone (ADR 0029). Two gates decide whether it is drawn at all — the bridge
 // publishing a provider, and this browser being able to record — and jsdom fails the second one by
 // default, so every case that wants a button installs the fake recorder first.
@@ -244,8 +264,12 @@ describe("Composer — the microphone IS the primary button, until you type", ()
     await screen.findByRole("button", { name: /record a voice message/i });
 
     await user.type(box, "x");
+    // The round slot is Send now; the one microphone left is the small one beside Attach (issue 573).
     await waitFor(() =>
-      expect(screen.queryByRole("button", { name: /record a voice message/i })).toBeNull(),
+      expect(screen.getByRole("button", { name: /record a voice message/i })).toHaveAttribute(
+        "data-slot",
+        "composer-mic-draft",
+      ),
     );
     expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
 
@@ -254,7 +278,7 @@ describe("Composer — the microphone IS the primary button, until you type", ()
   });
 
   // ADR 0060: a chip is something to send, so a box holding only chips shows Send.
-  it("a box holding only chips shows Send, not the microphone", async () => {
+  it("a box holding only chips shows Send, with the microphone beside Attach", async () => {
     server.use(
       configHandler(CONFIG_WITH_STT),
       http.post(/\/api\/pane\/[^/]+\/upload$/, () => HttpResponse.json({ ok: true, path: "/a.png" })),
@@ -269,7 +293,11 @@ describe("Composer — the microphone IS the primary button, until you type", ()
     await waitFor(() => expect(box).toHaveValue("[Image #1] "));
     fireEvent.change(box, { target: { value: "" } });
 
-    expect(screen.queryByRole("button", { name: /record a voice message/i })).toBeNull();
+    // The round slot is Send; the microphone is the small one beside Attach (issue 573).
+    expect(screen.getByRole("button", { name: /record a voice message/i })).toHaveAttribute(
+      "data-slot",
+      "composer-mic-draft",
+    );
     expect(screen.getByRole("button", { name: /^send$/i })).toBeEnabled();
   });
 
@@ -351,6 +379,20 @@ describe("Composer — a finished clip", () => {
 });
 
 describe("Composer — hands-free", () => {
+  it("during a known launch keeps the transcript as a draft and never sends it", async () => {
+    const user = userEvent.setup();
+    setHandsFreeEnabled(true);
+    const sent = vi.fn();
+    server.use(configHandler(CONFIG_WITH_STT), sttHandler("wait for the first screen"), ...replyHandler(sent));
+    renderComposer({ starting: true });
+    const recorder = await startRecording(user);
+    expect(screen.queryByRole("button", { name: /transcribe and send/i })).toBeNull();
+    act(() => recorder.finish());
+    await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue("wait for the first screen"));
+    expect(sent).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /^Send$/ })).toBeDisabled();
+  });
+
   it("routes the transcript through the Send Protocol when the draft is empty", async () => {
     const user = userEvent.setup();
     setHandsFreeEnabled(true);

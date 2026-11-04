@@ -9,10 +9,10 @@ import { StretchTextContext } from "@/components/markdown-text";
 import { TranscriptView } from "@/components/transcript-view";
 import { fetchHistory } from "@/lib/api";
 import { HISTORY_PAGE_SIZE, type HistoryData } from "@/lib/loaders";
-import { useMuxCapability } from "@/lib/mux-capability";
+import { paneSessionLog, useMuxCapability } from "@/lib/mux-capability";
 import { panePath } from "@/lib/nav";
 import { setStatus } from "@/lib/status";
-import { matchingEntries, step, userTurnIndices } from "@/lib/transcript-search";
+import { matchingIndexed, searchIndex, step, userTurnIndices } from "@/lib/transcript-search";
 import type { TranscriptEntry } from "@/lib/types";
 import { useRootData } from "@/lib/route-data";
 import { t } from "@/lib/i18n";
@@ -62,9 +62,6 @@ export function HistoryRoute() {
   const { paneId = "" } = useParams();
   const nav = useNav();
   const scope = data.scope;
-  // Whether an agent session log can exist here at all — a property of the multiplexer THIS PANE's
-  // machine runs (M22/03), not of the pane. See the empty-state branch below for what it changes.
-  const sessionLog = useMuxCapability("agentSessionRef", scope);
   // The chosen terminal font (Settings → Terminal font) — same source and same idiom as the live
   // pane mirror (components/agent-chat.tsx). This route renders the same agent transcript, just
   // scrolled back further, so it must not fall back to the app's own face while the live view
@@ -75,6 +72,10 @@ export function HistoryRoute() {
   const agent =
     root.agents.find((a) => a.paneId === paneId) ??
     root.shellPanes.find((p) => p.paneId === paneId);
+  // Whether an agent session log can exist here at all — a property of the multiplexer THIS PANE's
+  // machine runs (M22/03), unless the pane already has a session its harness found by folder (M79).
+  // See the empty-state branch below for what it changes.
+  const sessionLog = paneSessionLog(useMuxCapability("agentSessionRef", scope), agent?.hasSession);
 
   // Pages walked back beyond the first request (only reachable on a log longer than HISTORY_PAGE_SIZE).
   const [older, setOlder] = useState<TranscriptEntry[]>([]);
@@ -86,7 +87,7 @@ export function HistoryRoute() {
     // this view, this find or this jump either. Only pi can say so (`abandoned`, set by its reader
     // when a row's parent is not the row before it), and the journal KEEPS the turn rather than
     // dropping it, because a `?before=` cursor still has to resolve its uuid on the bridge. So hiding
-    // is the reader's job, and it belongs here: this is the one array the view, `matchingEntries`,
+    // is the reader's job, and it belongs here: this is the one array the view, `searchIndex`,
     // `userTurnIndices`, the render window and the paging cursor all read.
     //
     // The `some` guard keeps the array IDENTITY for every session that never forked, which is almost
@@ -107,7 +108,10 @@ export function HistoryRoute() {
   // Index into `entries` (not `shown`) of the turn a find/jump landed on; -1 = nowhere yet.
   const [cursor, setCursor] = useState(-1);
 
-  const matches = useMemo(() => matchingEntries(entries, query), [entries, query]);
+  // Tool output is searched too: TranscriptView unfolds a call whose output matches, so the turn a
+  // jump lands on shows the hit (#618). Lowercased once per change of entries, not per keystroke.
+  const searchable = useMemo(() => searchIndex(entries, { includeToolResults: true }), [entries]);
+  const matches = useMemo(() => matchingIndexed(searchable, query), [searchable, query]);
   const userTurns = useMemo(() => userTurnIndices(entries), [entries]);
   const focusedUuid = cursor >= 0 ? entries[cursor]?.uuid : undefined;
 

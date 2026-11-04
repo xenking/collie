@@ -125,7 +125,7 @@ Without this setting, the UI will load as an empty page. See
 ## Your own slash commands
 
 Put machine-specific commands, such as a Herdr plugin `/fork-in-herdr` or a custom `/deploy`, in
-`commands.toml`. This is one of six config files that share the same reader and load pattern:
+`commands.toml`. This is one of seven config files that share the same reader and load pattern:
 
 | file | scope | confirm/danger flag | live reload |
 | --- | --- | --- | --- |
@@ -135,6 +135,7 @@ Put machine-specific commands, such as a Herdr plugin `/fork-in-herdr` or a cust
 | `theme.toml` | none, the faces are a device setting | none | yes, on the next page reload |
 | `launchers.toml` | none, matched by exact command instead; `[phone]` switches the rows a phone adds | none | yes, but an already-open tab re-reads the rows only on its next load |
 | `cache-rules.toml` | none, matched by exact rule id instead | none | yes, no restart needed |
+| `spaces.toml` | none, matched by exact registry name instead | none | yes, within a few seconds |
 
 These files are unchanged by the config file. They share the instance `config.toml`'s
 directory, they keep their own formats and their own live reload, and nothing merges them into it.
@@ -185,10 +186,19 @@ Each harness ships its own buttons, in this order:
 | Codex | Model, Compact, Resume |
 | pi | Model, Compact, Tree, Resume |
 | omp | Model, Compact, Tree, Resume |
+| opencode | Model, Compact, Resume |
+| Grok Build | Model, Compact, Resume |
+| Muse Code | Model, Effort, Compact, Resume |
+| Antigravity (agy) | Model, Compact, Resume |
 
-Codex and pi have no Effort button. Codex's `/model` picker sets the model and the reasoning effort
-on one screen, so one button already reaches both. pi has no effort or thinking command at all;
-that dial lives inside `/settings`, a modal the keys pad cannot usefully drive.
+Codex, Grok and Antigravity have no Effort button, because their `/model` picker also sets the
+reasoning effort. A bare `/effort` in Grok opens no picker at all.
+
+pi and opencode have no effort command. pi keeps that dial inside `/settings`, a modal the keys pad
+cannot usefully drive, and opencode cycles its variants on a key.
+
+opencode spells two buttons its own way: Model sends `/models` and Resume sends `/sessions`. Its
+Compact works once the session holds a turn, because opencode offers `/compact` only then.
 
 omp's Tree button sits between Compact and Resume. It opens omp's own session tree in the mirror, a
 picker that jumps to any earlier point in the session. The same command, `/tree`, is also in omp's
@@ -212,20 +222,113 @@ A Switch button sits at the belt's right end and opens the pane switcher. It dra
 alone, behind a hairline, and carries no word. A drag up, anywhere on the belt, opens the same
 switcher. A sideways drag scrolls the belt instead.
 
+The agents mark left of the Files button counts the pane's running subagents. For omp and Gentle
+Shell it counts their background jobs only while the pane's Chat is open on a phone; the Screen view
+does not count them.
+
 While the text box holds text or an attachment, an X sits at the belt's right end too, left of the
 Switch button. One tap empties the box and its saved draft, and sends nothing to the pane. The X then
 becomes Undo, which puts the text and the attachments back. Undo stays until your next act: a
 keystroke, an attachment, a send, a tap on another belt button, or leaving the pane. Scrolling the
 belt keeps it.
 
-Left-handed? Set **Settings → Appearance → Hand** to **Left**. The belt turns round: the Switch button
-and the X move to its left end, still above Send, and Keys becomes the rightmost button, with the rest
+A Zoom button, a magnifier with a plus, sits just left of the Switch button. It opens the pane's
+output alone, over the whole screen. The text keeps updating while the view is open.
+
+Pinch with two fingers to make the text bigger, up to six times. Drag with one finger to move around
+it. Double-tap a line to zoom in on it, and double-tap again to return to the normal size. The minus
+and plus buttons at the top do the same in steps, and the number between them resets the zoom.
+
+The zoomed output never wraps, whatever **Wrap** says. Each terminal line stays one line, so a pinch
+only makes the text bigger and never reflows it. Drag sideways to read past the edge of the screen.
+The pane view keeps your Wrap setting.
+
+The X at the top, the Back button at the bottom on a phone, and the phone's own back gesture all
+close the zoomed output. Zooming changes nothing on the computer. The pane keeps its size in the
+terminal.
+
+Left-handed? Set **Settings → Appearance → Hand** to **Left**. The belt turns round: the Switch, Zoom
+and X buttons move to its left end, still above Send, and Keys becomes the rightmost button, with the rest
 scrolling off toward the left. Send and Attach move to the left of the reply box. The setting is per
 device and applies the next time you open a pane.
 
 To verify, open a pane running Claude Code, Codex, pi or omp; the tinted segment sits at the right
 of the row above the keyboard. Turn that segment off per device in **Settings → Appearance → Harness shortcuts**;
 Collie's own controls stay.
+
+### Stop a turn
+
+A **Stop** button sits at the start of the belt, before Collie's other buttons, so it is in view
+without a scroll. It stands there for every agent whose harness profile names a stop key, and it is
+dimmed while nothing runs. It keeps its place and its size, so the other buttons never move when a
+turn starts or ends. A tap on the dimmed button does nothing and sends nothing. An agent with no
+stop key has no button. Stop does not type anything and does not send a message. It presses the
+agent's own stop key, once, and tells you what happened.
+
+A Stop needs two taps. The first tap arms the button: the word changes to **Stop?** and the button
+keeps its size. Tap it again within four seconds to stop the turn. A second tap that lands at once,
+within 0.4 seconds, counts as the same touch and is ignored. If you wait, the arm lapses and nothing
+is pressed. The arm also lapses when you open another pane, and the button goes dim when the turn
+ends. While the second tap is in flight the button takes no more taps, so a quick third tap cannot
+press a second Stop.
+
+Which key stops a turn is the harness's own choice, and the harness profile holds it. Most agents
+stop on Escape, some on Ctrl+C, and some need Escape twice. The profile decides, not this page.
+
+After the key goes in, Collie reads the screen again for up to three seconds and tells you one of
+three things under the box:
+
+| Receipt | What it means |
+| --- | --- |
+| **Stopped.** | The key went in, and two reads in a row show the turn over. The box is free. |
+| **Stop sent. The agent still looks busy.** | The key went in, but Collie did not see the turn over on two reads in a row. Give it a moment, then tap Stop again if you need to. |
+| A refusal | Nothing was pressed. The sentence says why. |
+
+If the stop key opened a dialog instead, Collie says so and points you to its card.
+
+Some agents, OMP among them, put a queued message back into their input box when you stop the turn.
+When Collie sees it there right after the key, the receipt says so, for example "Stopped. 1 queued
+message is back in the agent as a draft." In Chat the message moves to a **Back in the box** card.
+Messages that came back together share one card.
+
+The card has two buttons, and both read the box again first. **Send** sends the draft only when the
+turn is idle and the box holds exactly that text. **Discard** empties the box only when it still
+holds that text; if you changed it, Discard removes the card and presses nothing. While the draft
+stands, a new message is refused, and the refusal points you to the card.
+
+Collie refuses before it presses when pressing could do harm:
+
+- **A dialog is open.** Escape would answer that dialog. Answer it on its card instead.
+- **The box holds your text, and this harness's stop key would clear it.** Clear the box, or use the
+  Clear button on the Keys board, then tap Stop again.
+- **Collie cannot read this pane.** It does not press a key into a screen it cannot read. This also
+  covers a screen where Collie cannot tell whether a turn runs.
+- **The turn had already ended.** There was nothing to stop, so nothing was pressed.
+- **This machine cannot stop from the phone yet.** Over a crew, the machine that runs the pane has an
+  older Collie. Update it, then stop.
+
+If no answer comes back from a crew machine in time, Collie says so. The Stop may have gone in, so
+check the pane before you tap Stop again.
+
+A Stop is always your tap. A walky talky message, a hook, the command line and a queued action never
+press one. Over a crew, the machine that runs the pane presses the key, reads the screen and sends
+the receipt back through the lead.
+
+A program that runs as a durable agent keeps the Stop it already had. It stops the turn it names,
+with its own receipt, and it does not use the arm.
+
+### Clear the box
+
+The **Clear** button at the end of the chip row on the Keys board empties the harness's input box
+in one tap, with no arm. Collie presses the harness's own delete key as often as the text needs,
+reads the box again, and tells you in a notice above the belt whether the box is clear or why it was
+not. The button is greyed when the box is empty, a dialog is open or the link is down, and if the box
+does not empty Collie leaves what remains alone and does not press again.
+
+After a Clear, the notice offers **Restore** for two minutes. One tap types the text back into the
+box, as one line and without Enter, so nothing is sent. Restore goes away once you type in the box
+again or open another pane. The bridge keeps the cleared text in memory with the Clear's receipt,
+and never writes it to a log or to disk.
 
 ## Your own key presets
 
@@ -408,9 +511,10 @@ On a crew (several machines, one phone-facing lead), each machine reads its own 
 a row launches on whichever machine's dashboard or pane you tapped it from, not on the lead.
 
 The **Agent** select on the New page is Collie's own list: Claude Code, Codex, opencode, pi, omp,
-Grok, Hermes, Muse and Antigravity. One that is not on the machine's login `PATH` stays in the list,
-disabled, marked "not installed". For another terminal agent, declare a row for it as above: it shows
-in the **Command** select under **Shell**, starts in a pane like any command, and Collie shows no status for it.
+Grok, Hermes, Kiro, Muse, Antigravity and dsh-TUI. Kiro starts with its tool permissions left as you set
+them. An agent that is not on the machine's login `PATH` stays in the list, disabled, marked "not
+installed". For another terminal agent, declare a row for it as above: it shows in the **Command**
+select under **Shell**, starts in a pane like any command, and Collie shows no status for it.
 
 To verify, reload the dashboard and look under the herd. If a row fails to load,
 `journalctl --user -u collie -n 20` prints the error.
@@ -694,6 +798,11 @@ Collie saves the file under `<state-dir>/uploads` with owner-only permissions an
 absolute path to your draft. The agent reads it from that path, because a terminal cannot take a
 pasted file. Uploads are swept 48 hours after they are written.
 
+A picked or pasted photo opens a sheet with a preview first. **Attach** sends the original file,
+untouched. **Edit** opens the tools Crop, Draw, Circle and Arrow, and a photo you changed goes up as
+a PNG. A tap on a photo's thumbnail in the composer opens the same tools, and the edited photo takes
+its place. A photo the browser cannot show attaches as it is, with no error.
+
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `COLLIE_MAX_UPLOAD_MB` | `10` | Largest file accepted, in whole megabytes. Out of range or not a whole number falls back to the default and logs a warning. |
@@ -792,6 +901,17 @@ mirror's layout holds. It catches high-confidence shapes only; the limits are in
 In a crew, the lead also masks the text its members send, by its own setting. A member's text
 reaches your phone unmasked only when the lead and that member both set `COLLIE_REDACT=off`.
 
+## Report a problem
+
+When three sends in a row on one pane fail for a reason that points at Collie, a card above the
+reply box offers to report it. **Settings → System → Offer a report when sending fails** turns the
+card off for that device (stored in the browser, on by default). The pane menu's **Report a problem**
+and the **Report a problem** button on the same card in Settings still open the sheet.
+
+Nothing leaves the phone until you tap **Open on GitHub** or **Copy report**, and Collie holds no
+GitHub token. What the report holds, and how to read it before you send it, is in
+[Troubleshooting](troubleshooting.md).
+
 ## Multi-session
 
 By default, one Collie instance serves every Herdr session it finds.
@@ -800,6 +920,101 @@ By default, one Collie instance serves every Herdr session it finds.
 config root, switchable from the header. Setting `COLLIE_MULTI_SESSION=off` serves only the primary
 Herdr session. Every discovered Herdr session is accessible through the same URL, including private or sandbox
 sessions. [Security](security.md) lists this behavior as a sharp edge.
+
+### Your own space labels
+
+Give a space a label of your own in `spaces.toml`, next to `keys.toml`:
+
+```bash
+cp spaces.toml.example ~/.config/collie/spaces.toml
+```
+
+The phone calls a terminal grouping a space. Herdr calls the same thing a session, and its registry
+names one by the folder its socket lives in, so `<config root>/sessions/project-yt/` shows as
+`project-yt`. In Collie's own words a session is one agent conversation, which is why the file is
+called `spaces.toml`. A label replaces the registry name in the space
+switcher, on its trigger, on the space tag of a row in **All sessions**, and on a durable agent's
+row. The switcher keeps the registry name under the label.
+
+```toml
+[labels]
+"project-yt" = "Video"
+default = "Home"
+```
+
+The key is the Herdr session name the switcher shows today, and `default` is the primary space. Quote
+a name that holds anything but letters, digits, `-` and `_`.
+
+> **Note.** A label is display-only. Links (`?s=`), notifications, the crew and the terminal keep
+> using the registry name, so a label can change at any time without breaking a bookmark.
+
+Collie applies a few rules to every row:
+
+| rule | what happens |
+| --- | --- |
+| a name no space has | the row is kept and never shown |
+| a value that is not a string, or is blank | the row is dropped and logged |
+| a control or invisible format character, tab or line break | replaced by a space |
+| more than 48 characters | cut to 48 and logged |
+
+A dropped row never costs you the rest of the file. Edits show within a few seconds, with no
+restart. In a crew, each machine labels its own spaces in its own `spaces.toml`.
+
+### A folder for each space
+
+When each space is one project, a launch from the dashboard should start in that project, not in
+your home folder. Name the folder in the same file, under the same registry name:
+
+```toml
+[folders]
+"project-yt" = "~/projects/yt"
+```
+
+A launcher row with no `cwd`, or a new space with an empty Where field, opens in the space's
+folder. A row's own `cwd`, a folder typed in Where, and a pane's own folder all still win. The folder
+is absolute or starts with `~/`; a row with a `..` segment or a control character is dropped and
+logged. A folder that is not on disk at launch time falls back to home.
+
+## Usage windows
+
+The dots beside the model show your 5-hour and 7-day limits for Claude and Codex, with no setup.
+
+```bash
+# turn every source off
+COLLIE_ACCOUNT_WINDOWS=0
+# turn on opencode and grok too, or name the ones you want
+COLLIE_ACCOUNT_WINDOWS=all
+COLLIE_ACCOUNT_WINDOWS=claude,codex
+```
+
+Collie reads your Claude login file on this machine and asks Anthropic's usage endpoint, the same
+call Claude Code's /usage makes; nothing of the login is stored or sent elsewhere. Collie asks only
+while a pane of that harness is open, and it skips a login file that others may read (anything
+looser than `0600`) and a login that has expired. Codex sends no token: it reads its own files.
+
+| form | what it turns on |
+| --- | --- |
+| unset, `1`, `on`, `true`, `yes` | the default set: `claude` and `codex` |
+| `0`, `off`, `false`, `no` | nothing: no login or session file is read and nothing is asked |
+| `all` | every source: `claude`, `codex`, `opencode` and `grok` |
+| `claude,codex` | the harnesses you name, in any case and with spaces |
+
+An id Collie does not know is dropped with a warning, and only the ids it knows are on, so a typo
+never turns on a source you did not name. In the config file, `[bridge] account_windows` takes
+`true` or `false`, a string with the same forms, or an array such as `["claude", "codex"]`.
+
+Each source reads a different thing.
+
+- **Claude, on by default.** Collie reads `~/.claude/.credentials.json`, or `$CLAUDE_CONFIG_DIR/.credentials.json`, and asks `api.anthropic.com`.
+- **Codex, on by default.** Collie reads no login and asks nobody. On a ChatGPT login Codex writes the windows into its own session files (`$CODEX_HOME/sessions`, or `~/.codex/sessions`), and Collie reads the end of the newest files from the last two hours. A Codex on an API key has no windows to show.
+- **OpenCode Go, off by default.** When you turn it on, Collie reads the `opencode-go` entry of OpenCode's login store (`~/.local/share/opencode/auth.json`, or under `$XDG_DATA_HOME`) and asks `opencode.ai`. With no Go entry it asks nothing.
+- **Grok, off by default.** When you turn it on, Collie reads the login `grok login` keeps (`~/.grok/auth.json`, or under `$GROK_HOME`) and asks `cli-chat-proxy.grok.com` for your credits.
+
+> **Note.** OpenCode Go and Grok follow the shape other tools use for these endpoints, and no live account has checked them yet. That is why they are off until you name them. pi and OMP show no windows here yet.
+
+`collie doctor` shows every source in its `account-windows` row: on or off, the file it reads and the host it asks. [Terminals](multiplexers.md#collie-writes-hooks-into-claudes-own-settings) has the statusLine road.
+
+The context dot needs no setting. For pi, OMP, Codex and OpenCode, Collie reads the tokens of the last turn from the session log. It reads the model's window from Codex's log, or from the harness's own model list on disk (pi's `models-store.json`, OMP's `models.db`, OpenCode's `~/.cache/opencode/models.json`). A model that list does not name gets no context dot; the model name still shows. The tag also shows the session's cost in dollars after the dots when the harness reports one: Claude Code through the wrapped status line, pi, OMP and OpenCode from their logs. Codex has none, so its tag shows no cost.
 
 ## Dark mode / light mode
 
@@ -851,6 +1066,80 @@ The terminal mirror continues polling in Zen mode, and interactive buffer elemen
 functional. Prompt buttons, "Load older", and "Show entire history" controls stay available because
 they are part of the content stream rather than chrome.
 
+## Large screens
+
+> **Note.** On a tablet or an open Fold the pane screen shows several panes side by side. A phone held upright and flat is not changed.
+
+The layout turns on for the pane screen when the screen is at least 600 CSS pixels wide and at least
+480 pixels tall. A phone held sideways is under 480 pixels tall, so it keeps the phone layout.
+To switch it off, open **Settings → Appearance → Large-screen layout** and pick **Off**. **Auto**,
+the default, turns it on where the screen is big enough. The choice is stored per device.
+
+The layout has three parts.
+
+- **The sidebar.** It lists your panes, the same list the pane switcher shows. The button in its top
+  row folds it to a narrow rail of icons, and the choice is kept on this device. The ColliePWA mark
+  in the top row goes home. **New space** and **Settings** sit at its foot.
+- **The row of panes.** Each space keeps its own row, and the row scrolls sideways. Tap a pane in
+  the sidebar to show it. Hold it (right-click with a mouse) for **Open here**, which replaces the
+  pane you are in, or **Open beside**, which adds it next to that pane. You can also drag a pane
+  into the row. **Remove from view** takes a pane out of the row. The agent keeps running.
+- **The space header.** It holds the space's name, its tabs and a **+** for a new tab. Hold a tab
+  (right-click with a mouse) to **Rename** it or **Close tab**, as on the phone. Closing the tab you
+  work in moves you to a pane of the tab beside it. Its two buttons, or a vertical swipe, move to the space
+  above or below.
+
+Each pane has a width: **1/2**, **4/5** or **Full** of the row. A pane is never narrower than 360
+pixels, so a width that would make it narrower is not offered. When the row cannot hold two panes at
+that size, every pane is **Full** width and the control is hidden. The row snaps to the start of a
+pane when you stop scrolling, and a scroll to the side never goes back a page in the browser. The row
+always ends with **Add a pane**. It lists the panes of this space that the row does not show, each
+with **Open here** (the pane becomes the last one in the row). It also offers **New agent in this
+space**, which opens the New page on that pane's machine and folder and adds the agent as a new tab
+of this space, next to the pane you are in, and **New agent in a new space**.
+
+Every pane has its own belt, except when you hold a foldable like a laptop (see below). The pane you
+work in has a frame and the reply box. A tap on another pane's belt acts on that pane and moves you
+there. Tap the pane to move without acting.
+
+The layout is kept on this device only, and Back and shared links work as before.
+
+**Foldables.** On a foldable held half open, Chrome and Samsung Internet split the screen at the fold.
+Held like a laptop, the conversation stays above the fold, and the belt and a taller reply box sit
+below it. Only the pane you work in keeps its belt, below the fold. The other panes show Chat only.
+This split applies at any width, so it also changes a half-open flip phone. The layout goes back to
+flat while the keyboard is up. Held like a book, the split applies from 600 pixels wide. With two
+panes, each half shows one pane and the sidebar becomes the rail. With one pane, the sidebar stays
+open in one half and the pane fills the other. Other browsers show the flat layout only.
+
+### Pane navigation
+
+A gesture moves you between panes and spaces, on a phone and in the large-screen layout. Left and
+right go to the previous and next pane of the space, in the switcher's order. Up and down go to the
+previous and next space. At the first or last pane or space, a move stays put. Choose the method in
+**Settings → Appearance → Pane navigation**. A change shows the next time a pane opens.
+
+| Method          | How it works                                                                                                                                                                                                                                                                        |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Two fingers** | The default. Hold one finger still on the chat or the terminal, then put a second finger down. The phone buzzes and a box shows where you are. Swipe with the second finger: a short swipe is one step, a long one takes more. Lift the second finger, then the first, to go there. |
+| **Joystick**    | Hold the handle just above the belt, then drag the same finger. Let go on another pane to go there, or back where you started to stay. On a phone, a quick drag up opens the pane switcher.                                                                                         |
+| **Off**         | No gesture. The pane switcher still moves you, and on a large screen so do the sidebar and the space header.                                                                                                                                                                        |
+
+The box names the pane you are moving to, with its status, its space and its place in the space,
+above a map of the spaces. You stay where you are when you lift the first finger with no swipe, lift
+it while the second finger is still down, or put a third finger down. Nothing under your fingers is
+tapped when they lift. The first time the gesture starts on a device, a short notice above the belt
+says how it works and where to turn it off.
+
+The gesture keeps the page's own touches. One finger held alone does nothing new: a long press still
+selects text and opens its menu. A pinch still zooms, because a second finger that lands within the
+first 300 ms counts as a pinch. A finger that was scrolling, or that starts at the left or right
+edge of the screen where the phone's own back gesture lives, never starts the gesture. From the
+moment the second finger lands until you lift the first, the page holds off selection and scrolling,
+and a selection you made earlier is cleared. Pane navigation is touch only, and a mouse does nothing
+here. With TalkBack on, the gesture should do nothing, because TalkBack takes two-finger swipes for
+itself; the pane switcher still moves you.
+
 ## Chat view
 
 > **Note.** Chat is the default view of an agent pane since 1.17.0. Terminal is one tap away.
@@ -866,6 +1155,15 @@ When you queue a message while Claude Code works, Chat shows it on a **Waiting t
 the card's **Send now** button sends the whole queue to the running turn at once. Only Claude Code
 offers it, because the button presses Ctrl+Enter, the key that agent defines for this. The button is
 hidden on a read-only device and on a saved copy.
+
+Most other agents, OMP and pi among them, write nothing about a queued message into their log until
+the turn ends. For them Chat draws the messages Collie itself queued on the same **Waiting to send**
+card, until the agent's log shows each as a prompt. That card has no button. Collie cannot take a
+message out of the agent's queue, so there is no Cancel: to take it back, stop the turn.
+
+When Collie can no longer tell where a queued message went, the card says **Not confirmed** instead
+of disappearing. That happens when the agent sits idle with an empty box twice in a row, or after 30
+minutes without a running turn. Its **Discard** button removes the card and sends nothing.
 
 The display gear has a **Stretchtext replies** switch, off by default. With it on, Chat, the full reply card and History show a reply written with the cc-stretch plugin as its short form, and a tap on a phrase opens it. A `{{name}}` without a bar shows as `name`.
 
@@ -889,6 +1187,26 @@ opens that agent's session database under `$OPENCLAW_STATE_DIR`, or `~/.openclaw
 `openclaw_root` when the state folder is somewhere else. The pane must report itself to Herdr as
 agent `openclaw`. Collie never reads OpenClaw's config file or its gateway token.
 
+Kiro needs no Herdr integration either: Herdr names a `kiro-cli` pane agent `kiro`, and Collie finds
+the pane's session by the lock the running Kiro holds in it. Collie reads Kiro V3 sessions, started
+with `--v3` or `--agent-engine v3`, or with V3 set as the engine in Kiro's own settings. A V1 or V2
+session has no Chat or History. Set `kiro_root` when Kiro keeps its sessions somewhere else.
+
+dsh-tui needs no Herdr integration for Chat. It reports its state to Herdr itself, but Herdr does
+not pass its session on, so Collie asks the kernel which session lock (`session.lock`, held with
+`flock`) the pane's foreground dsh process holds, and reads that session's log under
+`$DSH_HOME/sessions`, or `~/.dsh/sessions`, compressed or plain. This works on Linux only, where
+`/proc/locks` lists every lock and who holds it; elsewhere a dsh-tui pane keeps its terminal view.
+Set `dsh_root` when dsh keeps its sessions somewhere else.
+
+Antigravity CLI (`agy`, which Herdr may also call `antigravity`) needs no Herdr integration for Chat
+either. Collie asks `lsof` which `presence/<uuid>.lock` file the pane's foreground agy process holds,
+and reads that conversation from `conversations/<uuid>.db` under `~/.gemini/antigravity-cli`,
+read-only, or from its `transcript.jsonl` when the database is empty. It never guesses the newest
+conversation in a folder. This needs `lsof` on the machine, so it works on Linux and macOS, not on
+Windows; without it an agy pane keeps its terminal view. Set `agy_root`, or `COLLIE_AGY_ROOT`, when
+Antigravity keeps its home somewhere else.
+
 `herdr integration status` shows which integrations are installed. A hook is read when the agent
 starts, so an agent that was already running when you installed it needs a restart. Oh My Pi is the
 `omp` integration, not the `pi` one: they are two agents with two hooks, and they share one log
@@ -902,7 +1220,11 @@ A pane falls back to the terminal when something happens that Chat cannot show: 
 question before there is anything to read, or its first turn ends and it still has no session, or no
 log file to read. The terminal then shows a line that names what is missing, and the **⋮** row says
 why. A first turn that runs for a minute with nothing to read and no other sign also falls back. A pane that was already busy when you first opened it, with no session, shows the terminal at
-once. When the session or the log arrives later, the pane goes back to Chat. Chat never hides the
+once. When the session or the log arrives later, the pane goes back to Chat.
+
+An agent that Collie has no screen reader for, such as OpenClaw, asks its questions in dialogs that
+Chat cannot draw as cards. While such a pane asks, it shows the terminal, so the dialog is on screen
+and you answer it there; when it stops asking, the pane goes back to Chat. Chat never hides the
 row, so you can tell a missing hook from a missing feature. `collie doctor` lists those
 panes under `agent-sessions` and names the integration line (`integration-<agent>`) that fixes each.
 The [troubleshooting page](troubleshooting.md) has the steps, under **a pane has no Chat or History**.

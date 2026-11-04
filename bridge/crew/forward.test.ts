@@ -12,6 +12,7 @@ import {
   forwardPaneId,
   forwardParams,
   forwardToPeer,
+  MemberPaneReads,
   REPLY_OLD_MEMBER_TEXT,
   SEND_OLD_MEMBER_DETAIL,
   crewRouteFor,
@@ -22,8 +23,10 @@ import {
   type ForwardTransport,
 } from "./forward.ts";
 import { crewDeviceOf } from "./peer-gate.ts";
-import { crewTimeoutBudget, WRITE_BUDGET_MS, type CrewLink, type PeerOutcome } from "./peer-client.ts";
-import type { PeerState } from "./registry.ts";
+import { HISTORY_READ_BUDGET_MS } from "../mux/herdr-core/adapter.ts";
+import { crewTimeoutBudget, PANE_READ_BUDGET_MS, PANE_WRITE_BUDGET_MS, WRITE_BUDGET_MS, type CrewLink, type PeerOutcome } from "./peer-client.ts";
+import { member } from "./fixtures.ts";
+import { CrewRegistry, type PeerState } from "./registry.ts";
 import { readSend, readSendReply } from "../../web/src/lib/send-protocol.ts";
 
 // The lead's forwarding path (CREW_PROTOCOL.md §5, §9.1, §10.3, §12, §13).
@@ -251,7 +254,7 @@ describe("which routes cross a link", () => {
     // The list IS the inventory of what crosses a link; `chat` joined it with the live window, and
     // `files` with the Files view (ADR 0083).
     expect(paneActions).toEqual([
-      "abort", "action", "answer", "changes", "chat", "close", "commands", "files", "focus", "history", "keys", "rename", "reply", "send", "upload",
+      "abort", "action", "answer", "changes", "chat", "clear", "close", "commands", "files", "focus", "history", "keys", "rename", "reply", "send", "upload",
     ]);
     for (const action of paneActions) expect(crewRouteFor(`/api/pane/x/${action}`)).toBe(`pane/x/${action}`);
     const tabActions = tab.match(alternation)![1]!.split("|").toSorted();
@@ -334,7 +337,7 @@ describe("which routes cross a link", () => {
     // must be attempted against a stale member rather than refused before it is tried (§10.3).
     expect(forwardKind("pane/w1:p1/chat")).toBe("read");
     expect(forwardKind("pane/w1:p1/changes")).toBe("read");
-    for (const action of ["reply", "keys", "upload", "close", "rename", "answer", "send", "abort"]) {
+    for (const action of ["reply", "keys", "upload", "close", "rename", "answer", "send", "abort", "clear"]) {
       expect(forwardKind(`pane/w1:p1/${action}`)).toBe("write");
     }
     expect(forwardKind("tab")).toBe("write");
@@ -357,6 +360,7 @@ describe("which routes cross a link", () => {
     expect(forwardAuditAction("pane/w1:p1/answer")).toBe("answer");
     expect(forwardAuditAction("pane/w1:p1/close")).toBe("pane.close");
     expect(forwardAuditAction("pane/w1:p1/rename")).toBe("pane.rename");
+    expect(forwardAuditAction("pane/w1:p1/focus")).toBe("pane.focus");
     expect(forwardAuditAction("tab")).toBe("tab.create");
     expect(forwardAuditAction("tab/w1:t1/rename")).toBe("tab.rename");
     expect(forwardAuditAction("space/w1/rename")).toBe("space.rename");
@@ -496,6 +500,52 @@ describe("a proxied read is the peer's response, unmodified (§9.1)", () => {
 });
 
 // ── §9.1 Compression is hop-local: the LEAD gzips the phone hop (.adr/0023) ──
+
+// M78 spec 03, crew case 21: a member pane read through the lead answered 503 and the lead's log
+// had no line for it.
+describe("a member pane read that fails leaves one line on the lead", () => {
+  function logged() {
+    const lines: string[] = [];
+    return { lines, paneReads: new MemberPaneReads((line) => lines.push(line)) };
+  }
+
+  test("an unreachable member: the phone gets 503, the log names the member, the pane and the status", async () => {
+    const { lines, paneReads } = logged();
+    const { transport } = transportOf(() => ({ ok: false, state: "unreachable", reason: "timed out after 1200ms", receivedAt: 2 }));
+    const [req, url] = get("/api/pane/t4?host=laptop&lines=60");
+    const res = await forward(req, url, { transport, paneReads });
+    expect(res.status).toBe(503);
+    expect(lines).toEqual(["[crew] laptop: a read of pane t4 through the lead failed, status 503 (unreachable: timed out after 1200ms)"]);
+  });
+
+  test("the member's own error answer is logged too; a poll that keeps failing adds no line; an answered read clears it", async () => {
+    const { lines, paneReads } = logged();
+    let status = 503;
+    const { transport } = transportOf(() => ok(new Response("{}", { status })));
+    const read = async (): Promise<number> => {
+      const [req, url] = get("/api/pane/w1%3Ap1?host=laptop");
+      return (await forward(req, url, { transport, paneReads })).status;
+    };
+    expect(await read()).toBe(503);
+    expect(await read()).toBe(503);
+    expect(lines).toEqual(["[crew] laptop: a read of pane w1:p1 through the lead failed, status 503 (the member answered it)"]);
+    status = 200;
+    expect(await read()).toBe(200);
+    status = 503;
+    expect(await read()).toBe(503);
+    expect(lines).toHaveLength(2);
+  });
+
+  test("a write that fails and a read of no pane leave no such line", async () => {
+    const { lines, paneReads } = logged();
+    const { transport } = transportOf(() => ({ ok: false, state: "unreachable", reason: "connection refused", receivedAt: 2 }));
+    const [req, url] = post("/api/pane/t4/keys?host=laptop", JSON.stringify({ keys: ["Enter"] }));
+    await forward(req, url, { transport, paneReads });
+    const [list, listUrl] = get("/api/launchers?host=laptop");
+    await forward(list, listUrl, { transport, paneReads });
+    expect(lines).toEqual([]);
+  });
+});
 
 describe("the lead compresses the phone hop itself (.adr/0023)", () => {
   // The whole decision rests on this primitive existing in the runtime the bridge ships on. Asserted
@@ -758,6 +808,28 @@ describe("a write to a member that is not reachable (§10.3)", () => {
     expect(calls).toHaveLength(0);
   });
 
+  test("a member on its FIRST missed sweep is not refused — the write is attempted (UNREACHABLE_AFTER_SWEEPS)", async () => {
+    // One blip under host load must not answer the phone's write with a 503. The registry holds the
+    // verdict on the first miss, and the forward's own failure handling covers a real outage.
+    const registry = new CrewRegistry({ sessions: { get: () => undefined }, self: "desk", members: () => [member({ memberId: "laptop" })] });
+    registry.record("laptop", { ok: true, value: {}, status: 200, member: "laptop", receivedAt: 1, date: null });
+    const missed: PeerOutcome<unknown> = { ok: false, state: "unreachable", reason: "snapshot: timed out after 1200ms", timedOut: true, receivedAt: 2 };
+    const firstMiss = registry.record("laptop", missed);
+    expect(firstMiss.failedRuns).toBe(1);
+
+    const { transport, calls } = transportOf(() => ok(new Response(`{"ok":true}`)));
+    const [req, url] = post("/api/pane/w1:p1/reply?host=laptop", `{"text":"hi"}`);
+    const res = await forward(req, url, { transport, state: firstMiss });
+    expect(await res.json()).toEqual({ ok: true });
+    expect(calls).toHaveLength(1);
+
+    // The second miss in a row is the verdict, and that one IS refused before it is attempted.
+    const [again, againUrl] = post("/api/pane/w1:p1/reply?host=laptop", `{"text":"hi"}`);
+    const refused = await forward(again, againUrl, { transport, state: registry.record("laptop", missed) });
+    expect((await failureBody(refused)).code).toBe("host_unreachable");
+    expect(calls).toHaveLength(1);
+  });
+
   test("an incompatible member is refused with the protocol-mismatch reason", async () => {
     const { transport, calls } = transportOf(() => ok(new Response("{}")));
     const [req, url] = post("/api/pane/w1:p1/keys?host=laptop", `{"keys":["Enter"]}`);
@@ -883,10 +955,35 @@ describe("an attempted write whose outcome is unknown (§10.3, .adr/0010 over a 
   });
 });
 
+// ── A Stop and a steer cross once (counsel on the Edge 5 candidate) ───────────
+//
+// Both are a key into a running turn on the member. A Stop on a member reads twice, presses, and reads
+// back up to 2.4 s; a Codex steer pauses 1 s before the key and reads up to 2 s after it. Both fit the
+// WRITE_BUDGET_MS of a forwarded write, and when the member does not answer inside it the lead says
+// `write_outcome_unknown` and never dials again: a second dial would be a second key.
+describe("a Stop and a steer over a crew link", () => {
+  test("the Stop (`abort`) and the steer (a `reply` with `when: steer`) dial once, on PANE_WRITE_BUDGET_MS, and a timeout is unknown", async () => {
+    for (const [path, body] of [
+      ["/api/pane/w1:p1/abort?host=laptop", `{"requestId":"stop-req-0001"}`],
+      // A Clear (ADR 0116) is the same kind of write: the key may have gone in, so it never dials twice.
+      ["/api/pane/w1:p1/clear?host=laptop", `{"requestId":"clear-req-0001"}`],
+      ["/api/pane/w1:p1/reply?host=laptop", `{"text":"use the other table","submit":true,"id":"steer-req-0001","when":"steer"}`],
+    ] as const) {
+      const { transport, calls } = transportOf(() => ({ ok: false, state: "unreachable", reason: "timed out after 5000ms", receivedAt: 2 }));
+      const [req, url] = post(path, body);
+      const res = await forward(req, url, { transport });
+      expect(res.status).toBe(504);
+      expect((await failureBody(res)).code).toBe("write_outcome_unknown");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.budgetMs).toBe(PANE_WRITE_BUDGET_MS);
+    }
+  });
+});
+
 // ── A forwarded write is not a poll (§10.1, amended 2026-09-08) ──────────────
 
 describe("a forwarded write carries its own budget (§10.1)", () => {
-  test("every write route dials on WRITE_BUDGET_MS", async () => {
+  test("every write route dials on its budget: a pane's on PANE_WRITE_BUDGET_MS, the rest on WRITE_BUDGET_MS", async () => {
     // §5's write routes, one of each shape `forwardKind` decides on.
     const writes = [
       "/api/pane/w1:p1/reply",
@@ -907,14 +1004,43 @@ describe("a forwarded write carries its own budget (§10.1)", () => {
       const [req, url] = post(`${path}?host=laptop`, "{}");
       await forward(req, url, { transport });
       expect(calls).toHaveLength(1);
-      expect(calls[0]!.budgetMs).toBe(WRITE_BUDGET_MS);
+      expect(calls[0]!.budgetMs).toBe(path.startsWith("/api/pane/") ? PANE_WRITE_BUDGET_MS : WRITE_BUDGET_MS);
     }
   });
 
-  test("a read passes NO budget, so it keeps the poll budget and its bootstrap credit", async () => {
+  test("a reply that the member answers after 7 s (a send on a herdr-core member) is delivered, not a 504", async () => {
+    // M79 spec 04, crew case 19: a send on the core costs about 6.4 s, past the old 5 s write budget.
+    const dial = budgeted(7000);
+    const [req, url] = post("/api/pane/t2/reply?host=laptop", `{"text":"hello","submit":true,"id":"reply-req-0001"}`);
+    const res = await forward(req, url, { transport: dial.transport });
+    expect(res.status).toBe(200);
+    expect(dial.calls).toEqual([PANE_WRITE_BUDGET_MS]);
+    expect(PANE_WRITE_BUDGET_MS).toBeGreaterThan(7000);
+  });
+
+  test("a pane's screen read dials on PANE_READ_BUDGET_MS, longer than the member's 2 s history budget", async () => {
+    // M79 spec 04: a herdr-core member answers its first history read of a changed pi pane screen-only after
+    // HISTORY_READ_BUDGET_MS (2 s); the 1200 ms poll budget refused it with a 503 first.
+    const { transport, calls } = transportOf(() => ok(new Response("{}")));
+    const [req, url] = get("/api/pane/t2?lines=60&host=laptop");
+    await forward(req, url, { transport });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.budgetMs).toBe(PANE_READ_BUDGET_MS);
+    expect(PANE_READ_BUDGET_MS).toBeGreaterThan(HISTORY_READ_BUDGET_MS + crewTimeoutBudget(1500, {}));
+  });
+
+  test("a member that answers a pane read after 2.1 s is read, not called unreachable", async () => {
+    const dial = budgeted(2100);
+    const [req, url] = get("/api/pane/t2?lines=60&host=laptop");
+    const res = await forward(req, url, { transport: dial.transport });
+    expect(res.status).toBe(200);
+    expect(dial.calls).toEqual([PANE_READ_BUDGET_MS]);
+  });
+
+  test("every other read passes NO budget, so it keeps the poll budget and its bootstrap credit", async () => {
     // The transport's own default is `PeerClient.proxy`'s: the strict per-poll budget plus the one
     // patient attempt a cold link is owed. Passing anything here would take that credit away.
-    for (const path of ["/api/pane/w1:p1", "/api/pane/w1:p1/history", "/api/launchers", "/api/folders"]) {
+    for (const path of ["/api/pane/w1:p1/history", "/api/launchers", "/api/folders"]) {
       const { transport, calls } = transportOf(() => ok(new Response("{}")));
       const [req, url] = get(`${path}?host=laptop`);
       await forward(req, url, { transport });
@@ -926,6 +1052,7 @@ describe("a forwarded write carries its own budget (§10.1)", () => {
   test("the write budget outlasts the poll budget it replaced", () => {
     // The arithmetic the fix rests on. 1200 ms under a 1500 ms poll is §10.1's default pair.
     expect(WRITE_BUDGET_MS).toBeGreaterThan(crewTimeoutBudget(1500, {}));
+    expect(PANE_WRITE_BUDGET_MS).toBeGreaterThan(WRITE_BUDGET_MS);
   });
 
   /**

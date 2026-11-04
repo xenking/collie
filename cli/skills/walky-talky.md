@@ -79,6 +79,10 @@ minibuch/w11:p4#8h9h        minibuch  claude   walky-live             idle
   not the machine. Pick the row by MACHINE and LABEL.
 - Labels can repeat: `walky-live` is on two machines above. MACHINE tells them apart. If two rows
   still match, ask your operator.
+- A word with no `/` reaches a whole folder. `<repo>` is every agent pane in a folder of that name
+  on every machine of the crew, on any branch. `<repo>#<branch>` is the same on one branch. `here`
+  is your own folder on every machine, without your own pane. `<repo>` is the first part of LABEL,
+  such as `collie-workspace` in `collie-workspace#main`.
 - `(you)` marks your own pane. A message to it is refused.
 - STATE is `idle`, `working`, `blocked`, `done` or `unknown`, or `unreachable` for a crew member out
   of reach. A message to a `working` or `blocked` pane is not lost: Collie queues or holds it.
@@ -97,14 +101,29 @@ printf '%s' "$BODY" | {{COLLIE_BIN}} walky send collie-04rj6a/w54:p1J#anx6
 
 `send` waits up to 15 seconds for the receipt. If the message is not typed by then, it prints
 `check later: collie walky status <id>`. If the receipt says `not sent` or `waiting in the inbox`,
-tell your operator the reason and stop. Do not send it again.
-
-A send to a pane that closed, whose id another pane took, is refused `pane replaced`. Run `who` again.
+tell your operator the reason and stop. Do not send it again. A send to a pane that closed, whose id
+another pane took, is refused `pane replaced`. Run `who` again.
 
 After `send`, end your turn. Do not poll and do not sleep. The answer is typed into your pane as
 your next prompt, with `reply to <your id>` in its header. If your pane is busy, Collie queues or holds it
 until your turn ends. `{{COLLIE_BIN}} walky inbox` shows it too. `status` says only that your message was
 typed. It does not say the other agent read or answered it.
+
+Pick the address by who should get the message. For one agent, use its pane address and copy it from `who`.
+
+Use `here` when every agent on your project should get it, on every machine of the crew: your
+siblings in your own folder. Collie never sends it to your own pane. Use `<repo>` when you mean
+another folder by name. Use `here` or `<repo>` only when the message is for all of them. If one
+agent has what you need, ask that agent. Each pane it reaches gets its own copy and can answer.
+
+```bash
+{{COLLIE_BIN}} walky who --here
+{{COLLIE_BIN}} walky send here "I changed the Send Protocol. Rebase before you push."
+```
+
+`who --here` lists the panes `here` would reach. Look before you send. `send` prints one line per
+pane, then `status` adds a totals line such as `2 deliveries: delivered 2`. A machine out of reach
+prints `unreachable` and Collie does not retry it. Do not send it again.
 
 Answer a message by its id. The reply goes back to the sender.
 
@@ -112,24 +131,25 @@ Answer a message by its id. The reply goes back to the sender.
 {{COLLIE_BIN}} walky reply wt_k3f9x2m8q1a0 "Merged. Thanks."
 ```
 
-Read one message by its id. This is how you read the body of a message from another agent.
+Read one message by its id. This is how you read the body of a message from another agent. With no id,
+`inbox` prints every unread message for your pane and marks them read, one your screen refused too.
 
 ```bash
 {{COLLIE_BIN}} walky inbox wt_k3f9x2m8q1a0
 ```
 
-`{{COLLIE_BIN}} walky inbox` with no id prints every unread message for your pane and marks them
-read. This is also how you read one your screen refused.
+`{{COLLIE_BIN}} walky status wt_...` shows what became of a message you sent: "queued", "held", "typed into
+the pane", "waiting in the inbox, not typed", "not sent" or "may have arrived, will not be sent again".
+"held: draft present" or "held: turn running" means Collie types it when the box clears or the turn ends,
+up to 60 minutes. Wait. Do not send it again. If a send says "waiting in the inbox", do not send it again:
+it waits there. If it says "may have arrived", do not send it again either: it may already be there. For a
+pane on another machine, "queued (outcome known on the lead)" also means wait.
 
-`{{COLLIE_BIN}} walky status wt_...` shows what became of a message you sent: "queued", "typed
-into the pane", "waiting in the inbox, not typed", "not sent" with the reason, or "may have
-arrived, will not be sent again". If a send says "waiting in the inbox", the other session stayed
-busy, or its box held a draft. Do not send it again. The message waits in its inbox. If it says "may have
-arrived", do not send it again either: it may already be there. For a pane on another machine, "queued
-(outcome known on the lead)" means the outcome has not come back yet. Check later.
-
-An id Collie does not know exits 3 (`status` prints `no record of <id> on this machine`). A refused
-send exits 4.
+`{{COLLIE_BIN}} walky cancel wt_...` takes back a message you sent while it is still held. It stays in the
+receiver's inbox, not typed ("cancelled by sender"). Run it in the pane that sent it; you can cancel only
+your own. One already typed prints "already typed, nothing to take back". Do not send a cancelled message
+again unless your operator asks. An id Collie does not know exits 3 (`status` prints `no record of <id> on
+this machine`). A refused send exits 4.
 
 ## When to send
 
