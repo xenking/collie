@@ -761,6 +761,7 @@ function toMuxPane(
     spaceLabel,
     spaceNumber: space?.number ?? 0,
     tabId: raw.tab_id,
+    // The program in front, else the launch folder: any non-empty string wins, as in herdr-core (layout.ts).
     cwd: raw.foreground_cwd || raw.cwd,
     focused: raw.focused,
     // Herdr drops a pane from `pane.list` when it goes away — a listed pane is a live one, and an

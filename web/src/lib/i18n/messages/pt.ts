@@ -2648,6 +2648,8 @@ export const pt: Dictionary = {
   "report.sheet.cutSends.one": "{count} envio mais antigo ficou de fora para caber no link. O relato copiado tem tudo.",
   "report.sheet.cutSends.other": "{count} envios mais antigos ficaram de fora para caber no link. O relato copiado tem tudo.",
   "report.sheet.cutNote": "Suas palavras foram cortadas para caber no link. O relato copiado tem tudo.",
+  "report.sheet.tooLong": "Este relato é longo demais para o link. “Abrir no GitHub” copia o relato inteiro primeiro e, em seguida, abre uma issue com uma linha. Cole o relato nela.",
+  "report.sheet.tooLongNoCopy": "Este relato é longo demais para o link, e este navegador não consegue copiá-lo. Nada foi aberto.",
   "paneActions.report.label": "Relatar um problema",
   "settings.report.title": "Oferecer um relato quando o envio falha",
   "settings.report.description": "Após 3 envios com falha seguidos em um painel, um cartão oferece abrir uma issue no GitHub. Nada sai deste celular sem um toque seu.",

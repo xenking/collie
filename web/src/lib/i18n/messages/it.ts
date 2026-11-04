@@ -2650,6 +2650,8 @@ export const it: Dictionary = {
   "report.sheet.cutSends.one": "{count} invio più vecchio è stato omesso per stare nel link. La segnalazione copiata contiene tutto.",
   "report.sheet.cutSends.other": "{count} invii più vecchi sono stati omessi per stare nel link. La segnalazione copiata contiene tutto.",
   "report.sheet.cutNote": "Le tue parole sono state tagliate per stare nel link. La segnalazione copiata contiene tutto.",
+  "report.sheet.tooLong": "Questa segnalazione è troppo lunga per il link. Apri su GitHub copia prima l'intera segnalazione, poi apre una issue con una sola riga. Incolla la segnalazione al suo interno.",
+  "report.sheet.tooLongNoCopy": "Questa segnalazione è troppo lunga per il link e questo browser non può copiarla. Non è stato aperto nulla.",
   "paneActions.report.label": "Segnala un problema",
   "settings.report.title": "Proponi una segnalazione quando l'invio fallisce",
   "settings.report.description": "Dopo 3 invii falliti di fila in un riquadro, una scheda propone di aprire una issue su GitHub. Nulla lascia questo telefono senza un tuo tocco.",

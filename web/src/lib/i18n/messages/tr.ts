@@ -2648,6 +2648,8 @@ export const tr: Dictionary = {
   "report.sheet.cutSends.one": "Bağlantıya sığması için {count} eski gönderim çıkarıldı. Kopyalanan raporda hepsi var.",
   "report.sheet.cutSends.other": "Bağlantıya sığması için {count} eski gönderim çıkarıldı. Kopyalanan raporda hepsi var.",
   "report.sheet.cutNote": "Yazdıklarınız bağlantıya sığması için kısaltıldı. Kopyalanan raporda hepsi var.",
+  "report.sheet.tooLong": "Bu rapor bağlantı için çok uzun. GitHub'da aç önce raporun tamamını kopyalar, ardından tek satırlık bir kayıt açar. Raporu içine yapıştırın.",
+  "report.sheet.tooLongNoCopy": "Bu rapor bağlantı için çok uzun ve bu tarayıcı raporu kopyalayamıyor. Hiçbir şey açılmadı.",
   "paneActions.report.label": "Sorun bildir",
   "settings.report.title": "Gönderim başarısız olunca rapor öner",
   "settings.report.description": "Bir bölmede art arda 3 başarısız gönderimden sonra bir kart GitHub kaydı açmayı önerir. Siz dokunmadan bu telefondan hiçbir şey çıkmaz.",

@@ -2810,6 +2810,8 @@ export const ko: Dictionary = {
   "report.sheet.cutSends.one": "링크에 맞추려고 오래된 전송 {count}개를 뺐습니다. 복사한 보고서에는 모두 들어 있습니다.",
   "report.sheet.cutSends.other": "링크에 맞추려고 오래된 전송 {count}개를 뺐습니다. 복사한 보고서에는 모두 들어 있습니다.",
   "report.sheet.cutNote": "링크에 맞추려고 입력한 글을 잘랐습니다. 복사한 보고서에는 모두 들어 있습니다.",
+  "report.sheet.tooLong": "이 보고서는 링크로 전달하기에 너무 깁니다. “GitHub에서 열기”는 먼저 전체 보고서를 복사한 다음, 한 줄짜리 이슈를 엽니다. 보고서를 여기에 붙여 넣으세요.",
+  "report.sheet.tooLongNoCopy": "이 보고서는 링크로 전달하기에 너무 길며, 이 브라우저는 보고서를 복사할 수 없습니다. 아무것도 열리지 않았습니다.",
   "paneActions.report.label": "문제 신고",
   "settings.report.title": "전송이 실패하면 신고 제안",
   "settings.report.description": "한 창에서 전송이 3번 연속 실패하면 GitHub 이슈를 여는 카드가 나타납니다. 직접 누르지 않으면 이 휴대폰에서 아무것도 나가지 않습니다.",

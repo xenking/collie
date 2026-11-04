@@ -2836,6 +2836,8 @@ export const de: Dictionary = {
   "report.sheet.cutSends.one": "{count} ältere Sendung wurde für den Link weggelassen. Der kopierte Bericht enthält alles.",
   "report.sheet.cutSends.other": "{count} ältere Sendungen wurden für den Link weggelassen. Der kopierte Bericht enthält alles.",
   "report.sheet.cutNote": "Deine Worte wurden für den Link gekürzt. Der kopierte Bericht enthält alles.",
+  "report.sheet.tooLong": "Dieser Bericht ist zu lang für den Link. „Auf GitHub öffnen“ kopiert zuerst den gesamten Bericht und öffnet dann ein Issue mit einer Zeile. Füge den Bericht dort ein.",
+  "report.sheet.tooLongNoCopy": "Dieser Bericht ist zu lang für den Link, und dieser Browser kann ihn nicht kopieren. Es wurde nichts geöffnet.",
   "paneActions.report.label": "Problem melden",
   "settings.report.title": "Bericht anbieten, wenn Senden fehlschlägt",
   "settings.report.description": "Nach 3 fehlgeschlagenen Sendungen in Folge auf einer Pane bietet eine Karte an, ein GitHub-Issue zu öffnen. Ohne deinen Tipp verlässt nichts dieses Telefon.",

@@ -86,10 +86,12 @@ describe("a pane reports where its foreground agent is working", () => {
           const snapshot = await super.sessionSnapshot();
           return {
             ...snapshot,
-            panes: snapshot.panes.map((pane) => Object.assign({}, pane, {
-              cwd: "/home/operator",
-              foreground_cwd: foreground,
-            })),
+            panes: snapshot.panes.map((pane) =>
+              Object.assign({}, pane, {
+                cwd: "/home/operator",
+                foreground_cwd: foreground,
+              }),
+            ),
           };
         }
       }
@@ -98,6 +100,26 @@ describe("a pane reports where its foreground agent is working", () => {
       for (const pane of panes) expect(pane.cwd).toBe(foreground);
     },
   );
+
+  test("falls back to cwd when foreground_cwd is empty or absent", async () => {
+    class EmptyForegroundHerdr extends FakeHerdr {
+      override async sessionSnapshot(): Promise<WireSnapshot> {
+        const snapshot = await super.sessionSnapshot();
+        return {
+          ...snapshot,
+          panes: snapshot.panes.map((pane) =>
+            Object.assign({}, pane, {
+              cwd: "/home/operator",
+              foreground_cwd: "",
+            }),
+          ),
+        };
+      }
+    }
+    const { panes } = await new HerdrMux(new EmptyForegroundHerdr(), () => []).snapshot();
+    expect(panes.length).toBeGreaterThan(0);
+    for (const pane of panes) expect(pane.cwd).toBe("/home/operator");
+  });
 });
 
 describe("herdr 0.9.3: the repo comes from worktree.list", () => {

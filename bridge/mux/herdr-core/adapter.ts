@@ -67,7 +67,7 @@ import { DEFAULT_HC_TIMEOUT_MS, defaultHcSocket, HC_GENERATION, HcClient, HcErro
 import { routeEvent } from "./events.ts";
 import { herdrCoreBeaconMatcher } from "./markers.ts";
 import { HERDR_CORE_LOGO_SVG } from "./logo.ts";
-import { HC_UNSENDABLE_KEYS, toHcKey, type HcKey } from "./keys.ts";
+import { HC_UNSENDABLE_KEYS, isRawKeyText, toHcKey, type HcKey } from "./keys.ts";
 import { IMPLICIT_SPACE_ID, isLocalAddress, SPACE_LABEL, TAB_LABEL, toSnapshot } from "./layout.ts";
 
 type MutableGrid = { -readonly [K in keyof MuxGrid]: MuxGrid[K] };
@@ -162,10 +162,40 @@ export const OLDER_NOTE_BLOCKED = "On the Herdr core, Load older waits until the
 /** What an `older` read answers beside the screen's rows while the core still runs this pane's history read. */
 export const OLDER_NOTE_READING = "The Herdr core is still reading the older rows of this pane. Try Load older again in a moment.";
 
-/** What a test may change about the adapter: the history read's budget, and where its log lines go. */
+/**
+ * The least time between a text write to a pane and a raw Enter, Backspace or Tab right after it.
+ *
+ * Since PR 637 these three keys go to the core as raw bytes (`\r`, `\x7f`, `\t`), so the core's key
+ * hold no longer spaces them. Codex reads text and `\r` that arrive together as a paste and inserts a
+ * newline instead of submitting; the same `\r` written 300 ms after the text submits (lab,
+ * 2026-11-01). Collie's Send Protocol reads the screen between its writes, but a read can pass at once
+ * when the app has not drained its input, and a stalled receiver drains the pty in one chunk. This
+ * floor keeps the gap in the adapter, whatever the caller does. It applies to every raw key on the
+ * core, for every harness, and to no other adapter.
+ *
+ * Only a key whose pane's last write was TEXT waits: the paste-burst is text and a key in one chunk
+ * (text and `\r`, a probe character and `\x7f`). Two raw keys in a row need no gap. A clear of a
+ * draft is a run of raw Backspaces after the probe's Backspace; paced one by one, 25 of them took
+ * 3.75 s and ran past the clear's 3 s bound (browser leg on the core, case 22, 2026-11-01).
+ */
+export const RAW_KEY_GAP_MS = 150;
+
+/** The time the raw key gap runs on. A test hands in one that waits for nothing. */
+export interface RawKeyClock {
+  now(): number;
+  wait(ms: number): Promise<void>;
+}
+
+const REAL_CLOCK: RawKeyClock = {
+  now: () => Date.now(),
+  wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/** What a test may change about the adapter: the history read's budget, where its log lines go, and the clock of the raw key gap. */
 export interface HerdrCoreOptions {
   readonly historyBudgetMs?: number;
   readonly log?: (line: string) => void;
+  readonly clock?: RawKeyClock;
 }
 
 export class HerdrCoreMux implements MuxAdapter {
@@ -184,6 +214,9 @@ export class HerdrCoreMux implements MuxAdapter {
   private readonly blockedPanes = new Set<string>();
   private readonly historyBudgetMs: number;
   private readonly log: (line: string) => void;
+  private readonly clock: RawKeyClock;
+  /** Per pane, the last raw write to it: when it finished, on {@link clock}, and whether it was text (not a raw key). */
+  private readonly lastRawWrite = new Map<string, { readonly at: number; readonly text: boolean }>();
 
   constructor(
     private readonly rpc: HcRpc,
@@ -192,6 +225,7 @@ export class HerdrCoreMux implements MuxAdapter {
   ) {
     this.historyBudgetMs = options.historyBudgetMs ?? HISTORY_READ_BUDGET_MS;
     this.log = options.log ?? ((line) => console.log(line));
+    this.clock = options.clock ?? REAL_CLOCK;
   }
 
   /** Is a core answering, at generation 1? A core at another generation reads as unreachable. */
@@ -335,7 +369,27 @@ export class HerdrCoreMux implements MuxAdapter {
     const remote = remoteRefusal(paneId);
     if (remote !== null) return remote;
     if (text.length === 0) return muxAck();
-    return this.attempt(() => this.rpc.typeRaw(paneId, text));
+    return this.attempt(() => this.writeRaw(paneId, text));
+  }
+
+  /**
+   * One raw write to a pane. A raw Enter, Backspace or Tab right after a text write to the same pane
+   * first waits until {@link RAW_KEY_GAP_MS} have passed since that write; a key after another key goes
+   * at once. Text is never paced and never shares a write with a key (every call here carries either
+   * the text or the one key).
+   */
+  private async writeRaw(paneId: string, text: string): Promise<void> {
+    const key = isRawKeyText(text);
+    const last = this.lastRawWrite.get(paneId);
+    if (key && last?.text === true) {
+      const remaining = last.at + RAW_KEY_GAP_MS - this.clock.now();
+      if (remaining > 0) await this.clock.wait(remaining);
+    }
+    try {
+      await this.rpc.typeRaw(paneId, text);
+    } finally {
+      this.lastRawWrite.set(paneId, { at: this.clock.now(), text: !key });
+    }
   }
 
   /**
@@ -376,7 +430,7 @@ export class HerdrCoreMux implements MuxAdapter {
           continue;
         }
         await flush();
-        await this.rpc.typeRaw(paneId, key.text);
+        await this.writeRaw(paneId, key.text);
       }
       await flush();
     });
@@ -393,6 +447,7 @@ export class HerdrCoreMux implements MuxAdapter {
       const terminal = await this.rpc.getTerminal(paneId);
       if (terminal.state !== "live") return muxGone(`${paneId} has already ended`);
       await this.rpc.killTerminal(paneId);
+      this.lastRawWrite.delete(paneId);
       return muxAck();
     } catch (err) {
       return refusalFor(err);

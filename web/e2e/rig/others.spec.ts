@@ -45,6 +45,7 @@ import {
   type TapRecorder,
   type Trail,
 } from "./leg";
+import { probeRefused, sendRefusal } from "./picker-open";
 import { muxOf, sleep } from "./rig-lib";
 
 const PHONE = devices[PHONE_DEVICE];
@@ -329,13 +330,33 @@ for (const harness of ["pi", "omp"] as const) {
  * Scenario 1 for pi and omp: open /model with the Model shortcut (and the phone's own Submit when the
  * shortcut's text was typed but not submitted), then move and commit through the Keys board, the
  * phone's way into a selector Collie shows raw.
+ *
+ * A shortcut the bridge refused typed nothing, so the case never presses Enter after it (M80 spec 08):
+ * on 2026-10-31 omp drew a refused probe late, Enter submitted it, and the row read as a cassette
+ * mismatch. After `probe_failed` the case waits for the box to read free and taps the shortcut once
+ * more; a second `probe_failed` is its own red, named so.
  */
 async function pickerByKeys(harness: HarnessId, plan: Plan, rig: Rig, page: Page, recorder: TapRecorder, pane: string, trail: Trail) {
   const log = trail.log;
   const notes = trail.notes;
-  const open = await tap(recorder, page.getByRole("group", { name: "Harness shortcuts" }).getByRole("button", { name: "Model", exact: true }), "Model shortcut");
+  const shortcut = page.getByRole("group", { name: "Harness shortcuts" }).getByRole("button", { name: "Model", exact: true });
+  let open = await tap(recorder, shortcut, "Model shortcut");
   log.push(open);
   let opened = (await rig.until(() => rig.tail(pane, 40), (text) => plan.selectorOpen.test(text), 4000)) !== null;
+  if (!opened && probeRefused(open)) {
+    const free = await waitIdle(rig, pane, 10_000);
+    notes.push(`the Model shortcut was refused probe_failed, nothing was typed and Enter was not pressed; the box ${free ? "read free" : "did not read free in 10 s"}, the shortcut went again`);
+    open = await tap(recorder, shortcut, "Model shortcut (again)");
+    log.push(open);
+    opened = (await rig.until(() => rig.tail(pane, 40), (text) => plan.selectorOpen.test(text), 4000)) !== null;
+  }
+  const refusal = opened ? null : sendRefusal(open);
+  if (refusal !== null) {
+    trail.captures.push(await capture(page, `${harness}-1-picker`), await captureScreen(rig, pane, `${harness}-1-picker`));
+    const what = refusal === "probe_failed" ? "probe_failed: the probe character did not show in the box" : `refused (${refusal})`;
+    notes.push(`opening took ${String(log.length)} tap(s): ${log.map(tapWords).join(", ")}`);
+    return { verdict: "fail" as const, taps: log.length, minTaps: 1, note: `${harness}: the Model shortcut ${what}, so nothing was typed and Enter was not pressed; ${notes.join("; ")}`, taps_log: log, captures: trail.captures };
+  }
   if (!opened) {
     // The phone offers Submit after "typed, not submitted"; a person taps it.
     const submit = page.getByRole("button", { name: message("composer.protocol.submit"), exact: true });

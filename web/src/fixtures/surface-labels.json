@@ -206,6 +206,16 @@
    "version": "unversioned",
    "state": "running"
   },
+  "agy--v1412-subagent-band-idle.txt": {
+   "harness": "agy",
+   "version": "1.4.12",
+   "state": "idle"
+  },
+  "agy--v1412-subagent-band-permission.txt": {
+   "harness": "agy",
+   "version": "1.4.12",
+   "state": "dialog"
+  },
   "claude--autocomplete-slash-clipped.txt": {
    "harness": "claude",
    "version": "unversioned",
@@ -2349,7 +2359,7 @@
   "cursor--after-skip.txt": {
    "harness": "cursor",
    "version": "2026.10.14",
-   "state": "other"
+   "state": "idle"
   },
   "cursor--ask-question.txt": {
    "harness": "cursor",
@@ -2382,6 +2392,11 @@
    "state": "idle"
   },
   "cursor--idle-after-turn.txt": {
+   "harness": "cursor",
+   "version": "2026.10.14",
+   "state": "idle"
+  },
+  "cursor--idle-bottom-docked.txt": {
    "harness": "cursor",
    "version": "2026.10.14",
    "state": "idle"
@@ -2805,6 +2820,11 @@
    "harness": "hermes",
    "version": "0.22.2",
    "state": "popup"
+  },
+  "hermes--v0225-title-idle.txt": {
+   "harness": "hermes",
+   "version": "0.22.5",
+   "state": "idle"
   },
   "kiro--v2-idle-w119.txt": {
    "harness": "kiro",
@@ -5764,7 +5784,7 @@
   "pi--v110-slash-palette.txt": {
    "harness": "pi",
    "version": "1.1.0",
-   "state": "dialog"
+   "state": "popup"
   },
   "pi--v110-stock-draft.txt": {
    "harness": "pi",
@@ -5854,7 +5874,7 @@
   "pi--v120-slash-palette-padded.txt": {
    "harness": "pi",
    "version": "1.2.0",
-   "state": "dialog"
+   "state": "popup"
   },
   "pi--v130-gentle-choice-moved.txt": {
    "harness": "pi",
@@ -5984,7 +6004,7 @@
   "pi--v130-slash-mod-partial--w120.txt": {
    "harness": "pi",
    "version": "1.3.0",
-   "state": "dialog"
+   "state": "popup"
   },
   "pi--v130-model-selector-empty--w120.txt": {
    "harness": "pi",
@@ -6020,6 +6040,21 @@
    "harness": "pi",
    "version": "1.3.0",
    "state": "running"
+  },
+  "pi--v140-slash-model-list--w120.txt": {
+   "harness": "pi",
+   "version": "1.4.0",
+   "state": "popup"
+  },
+  "pi--v140-slash-s-fuzzy--w120.txt": {
+   "harness": "pi",
+   "version": "1.4.0",
+   "state": "popup"
+  },
+  "pi--v140-slash-model-arg-list--w120.txt": {
+   "harness": "pi",
+   "version": "1.4.0",
+   "state": "popup"
   },
   "shell--box-table-vs16-emoji.txt": {
    "harness": "shell",

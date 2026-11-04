@@ -119,6 +119,14 @@ describe("readSend", () => {
     expect(readSend(reply("refused", "probe_failed", ["keys"])).note).toBe("probeFailed");
   });
 
+  it("a probe_failed with the late-keys cause keeps its sentence and the bridge's line: wait, not redraw (#623)", () => {
+    const detail =
+      "The box holds only Collie's earlier probe characters: the agent took those keys but showed them late, so it may be busy. Wait a moment, then send again. Collie takes them out first. A probe character (⌁) may remain in the box. Check the pane before you type.";
+    const body: JsonObject = { receipt: { outcome: "refused", reason: "probe_failed" }, offers: ["keys"], cause: "late_keys", detail };
+    expect(readSendReply(body)!.cause).toBe("late_keys");
+    expect(readSend(readSendReply(body)!)).toMatchObject({ clear: false, note: "probeFailed", offers: [], detail });
+  });
+
   it("a Surface carries staleFrame only as true", () => {
     expect(readSurface({ revision: 3, turn: "idle", modal: "none", composer: "draft", staleFrame: true })).toEqual({ revision: 3, turn: "idle", modal: "none", composer: "draft", staleFrame: true });
     expect(readSurface({ revision: 3, turn: "idle", modal: "none", composer: "draft", staleFrame: "yes" })).toEqual({ revision: 3, turn: "idle", modal: "none", composer: "draft" });

@@ -42,6 +42,17 @@ describe("WalkySheet", () => {
     expect(screen.getByText("waiting in the inbox, not typed: dialog open")).toBeInTheDocument();
   });
 
+  it("draws a long body in full: no line clamp on the sheet row, which is where the card's clamped body is read (#641)", () => {
+    const long = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n");
+    sheet([{ ...fixtureWalkyAgent, body: long }]);
+    const body = document.querySelector('[data-slot="walky-sheet-body"]');
+    if (!(body instanceof HTMLElement)) throw new Error("no sheet body");
+    expect(body.className).not.toMatch(/line-clamp-/);
+    expect(body).toHaveClass("whitespace-pre-wrap");
+    expect(body.textContent).toBe(long);
+    // The card keeps its three-line clamp (pinned in walky-card.test.tsx), so the sheet is the way to the rest.
+  });
+
   it("draws a message whose `to` and sender address carry a session token without splitting them", async () => {
     const user = userEvent.setup();
     const row: WalkyRow = {

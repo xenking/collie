@@ -429,9 +429,12 @@ export interface SendAnswer {
  * second S0 read showed the same rows, so the screen is a stale image (2026-10-25). `short_pane`: the
  * read holds fewer rows than the profile's input box takes, so the pane is too short to draw it (a
  * Herdr tab full of splits squeezed a Claude Code pane to two rows, 2026-10-30); the bridge's detail
- * names the rows and the fix, and the phone shows it under its sentence.
+ * names the rows and the fix, and the phone shows it under its sentence. `late_keys`: the box held only
+ * Collie's earlier probe characters, which the agent drew after the probe had stopped looking, and its
+ * proof did not show in time either (Claude Code 2.1.314 busy under its agents footer, #623); the
+ * bridge's detail says to wait and send again, and the phone shows it under its sentence.
  */
-export const SEND_CAUSES = ["notice_key", "stale_screen", "short_pane"] as const;
+export const SEND_CAUSES = ["notice_key", "stale_screen", "short_pane", "late_keys"] as const;
 export type SendCause = (typeof SEND_CAUSES)[number];
 
 /**

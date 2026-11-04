@@ -482,7 +482,9 @@ export function readSend(reply: SendReply): SendReading {
  * `pane_gone`, `draft_present`, `wake_timeout`, and `not_free` when the line is the plain one. Every other reason,
  * and every outcome that is no refusal, keeps the line: it says what the phone's sentence does not
  * (a `not_free` that names what is open, a dialog that Enter may have answered). An `unconfirmed`
- * with the `short_pane` cause keeps it too: the line names the rows read and what to resize.
+ * with the `short_pane` cause keeps it too: the line names the rows read and what to resize. A
+ * `probe_failed` with the `late_keys` cause keeps it as every `probe_failed` does: the line says the
+ * agent showed Collie's keys late and to wait, which the phone's sentence does not (#623).
  */
 const REPEATS_THE_NOTE: ReadonlySet<SendReason> = new Set(["unconfirmed", "stale_surface", "busy", "pane_gone", "draft_present", "wake_timeout"]);
 const PLAIN_NOT_FREE = "The input box is not free.";

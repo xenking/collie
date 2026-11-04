@@ -2649,6 +2649,8 @@ export const fr: Dictionary = {
   "report.sheet.cutSends.one": "{count} envoi plus ancien a été omis pour tenir dans le lien. Le rapport copié contient tout.",
   "report.sheet.cutSends.other": "{count} envois plus anciens ont été omis pour tenir dans le lien. Le rapport copié contient tout.",
   "report.sheet.cutNote": "Vos mots ont été coupés pour tenir dans le lien. Le rapport copié contient tout.",
+  "report.sheet.tooLong": "Ce rapport est trop long pour le lien. « Ouvrir sur GitHub » copie d'abord l'intégralité du rapport, puis ouvre un ticket contenant une seule ligne. Collez le rapport dedans.",
+  "report.sheet.tooLongNoCopy": "Ce rapport est trop long pour le lien, et ce navigateur ne peut pas le copier. Rien n'a été ouvert.",
   "paneActions.report.label": "Signaler un problème",
   "settings.report.title": "Proposer un rapport quand l'envoi échoue",
   "settings.report.description": "Après 3 envois échoués d'affilée sur un volet, une carte propose d'ouvrir un ticket GitHub. Rien ne quitte ce téléphone sans votre appui.",

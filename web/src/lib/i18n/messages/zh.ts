@@ -2798,6 +2798,8 @@ export const zh: Dictionary = {
   "report.sheet.cutSends.one": "为适应链接长度，省略了 {count} 条较早的发送。复制的报告包含全部内容。",
   "report.sheet.cutSends.other": "为适应链接长度，省略了 {count} 条较早的发送。复制的报告包含全部内容。",
   "report.sheet.cutNote": "为适应链接长度，你的文字已截短。复制的报告包含全部内容。",
+  "report.sheet.tooLong": "此报告过长，无法放入链接。“在 GitHub 上打开”会先复制整份报告，然后打开一个仅包含单行的 Issue。请将报告粘贴进去。",
+  "report.sheet.tooLongNoCopy": "此报告过长，无法放入链接，且此浏览器无法复制它。未打开任何内容。",
   "paneActions.report.label": "报告问题",
   "settings.report.title": "发送失败时提议报告",
   "settings.report.description": "某个窗格连续 3 次发送失败后，会出现一张卡片，提议打开 GitHub Issue。除非你点按，否则不会有任何内容离开此手机。",

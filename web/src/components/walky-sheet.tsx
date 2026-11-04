@@ -192,7 +192,8 @@ function WalkyListRow({
         )}
         <span className="shrink-0 tabular-nums">{timeAgoShort(row.at)}</span>
       </div>
-      <p className="font-content line-clamp-6 whitespace-pre-wrap break-words text-sm">{row.body}</p>
+      {/* The sheet is where a long message is read in full: the chat card clamps its body to three lines (walky-card.tsx) and a tap on it opens this row, so the body here takes no clamp. */}
+      <p data-slot="walky-sheet-body" className="font-content whitespace-pre-wrap break-words text-sm">{row.body}</p>
       {row.replyTo !== null && (
         <p data-slot="walky-reply-to" className="mt-1 text-[11px] text-muted-foreground">
           {`${t("walky.sheet.inReplyTo")} `}

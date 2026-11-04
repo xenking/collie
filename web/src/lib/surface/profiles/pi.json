@@ -90,7 +90,8 @@
           "footer": {
             "pattern": "^(?:\\S| ↳ \\S)",
             "maxRows": 6
-          }
+          },
+          "leadOpens": true
         }
       }
     },

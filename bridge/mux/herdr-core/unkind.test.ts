@@ -36,11 +36,11 @@ describe("the key hold: a key press after a raw write is answered about 3 s late
     fake.holdKeysAfterRawWrite(clock);
     expect((await adapter.typeText("t2", "hello")).ok).toBe(true);
     const before = clock.now();
-    expect((await adapter.writeKeys("t2", ["Enter"])).ok).toBe(true);
+    expect((await adapter.writeKeys("t2", ["Up"])).ok).toBe(true);
     expect(clock.now() - before).toBe(KEY_HOLD_MS);
     expect(fake.writes().map((w) => [w.kind, w.payload])).toEqual([
       ["text", ["hello"]],
-      ["keys", ["enter"]],
+      ["keys", ["up"]],
     ]);
   });
 
@@ -54,8 +54,22 @@ describe("the key hold: a key press after a raw write is answered about 3 s late
     await adapter.typeText("t2", "hello");
     await clock.wait(gap);
     const before = clock.now();
-    await adapter.writeKeys("t2", ["Enter"]);
+    await adapter.writeKeys("t2", ["Up"]);
     expect(clock.now() - before).toBe(waited);
+  });
+
+  test("Enter, Backspace and Tab after typed text go in as raw input, so the hold never applies (herdr-core#52)", async () => {
+    const { fake, adapter, clock } = build();
+    fake.holdKeysAfterRawWrite(clock);
+    await adapter.typeText("t2", "hello");
+    expect((await adapter.writeKeys("t2", ["Backspace", "Tab", "Enter"])).ok).toBe(true);
+    expect(clock.now()).toBe(0);
+    expect(fake.writes().map((w) => [w.kind, w.payload])).toEqual([
+      ["text", ["hello"]],
+      ["text", ["\x7f"]],
+      ["text", ["\t"]],
+      ["text", ["\r"]],
+    ]);
   });
 
   test("a key with no raw write before it is not held", async () => {
@@ -73,7 +87,7 @@ describe("the key hold: a key press after a raw write is answered about 3 s late
     const { fake, adapter, clock } = build();
     fake.holdKeysAfterRawWrite(clock, { answer: "early" });
     await adapter.typeText("t2", "hello");
-    expect((await adapter.writeKeys("t2", ["Enter"])).ok).toBe(true);
+    expect((await adapter.writeKeys("t2", ["Up"])).ok).toBe(true);
     expect(clock.now()).toBe(0);
     expect(fake.writes().map((w) => w.kind)).toEqual(["text"]);
     await clock.wait(KEY_HOLD_MS);

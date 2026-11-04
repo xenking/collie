@@ -3026,6 +3026,8 @@ export const en = {
   "report.sheet.cutSends.one": "{count} older send was left out to fit the link. Copy report has all of it.",
   "report.sheet.cutSends.other": "{count} older sends were left out to fit the link. Copy report has all of it.",
   "report.sheet.cutNote": "Your words were cut to fit the link. Copy report has all of them.",
+  "report.sheet.tooLong": "This report is too long for the link. Open on GitHub copies the whole report first, then opens an issue with one line. Paste the report into it.",
+  "report.sheet.tooLongNoCopy": "This report is too long for the link, and this browser cannot copy it. Nothing was opened.",
   "paneActions.report.label": "Report a problem",
   "settings.report.title": "Offer a report when sending fails",
   "settings.report.description": "After 3 failed sends in a row on a pane, a card offers to open a GitHub issue. Nothing leaves this phone unless you tap.",

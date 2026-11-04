@@ -2792,6 +2792,8 @@ export const zhTW: Dictionary = {
   "report.sheet.cutSends.one": "為配合連結長度，省略了 {count} 筆較早的傳送。複製的回報包含全部內容。",
   "report.sheet.cutSends.other": "為配合連結長度，省略了 {count} 筆較早的傳送。複製的回報包含全部內容。",
   "report.sheet.cutNote": "為配合連結長度，你的文字已截短。複製的回報包含全部內容。",
+  "report.sheet.tooLong": "這份回報的內容長度超過連結上限。「在 GitHub 上開啟」會先複製整份回報，然後開啟只有一行的 Issue。請將回報內容貼入其中。",
+  "report.sheet.tooLongNoCopy": "這份回報的內容長度超過連結上限，且此瀏覽器無法複製。未開啟任何內容。",
   "paneActions.report.label": "回報問題",
   "settings.report.title": "傳送失敗時提議回報",
   "settings.report.description": "某個窗格連續 3 次傳送失敗後，會出現一張卡片，提議開啟 GitHub Issue。除非你點按，否則不會有任何內容離開此手機。",

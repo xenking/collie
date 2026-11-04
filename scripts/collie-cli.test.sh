@@ -2577,7 +2577,7 @@ assert_eq "$rc" "0"
 assert_eq "$(cat "${TMP_ROOT}/emit.out")" ""
 [ ! -d "${BEACON_STATE}/beacons" ] || fail "garbage on stdin still wrote a beacon"
 
-# A real payload: one owner-only beacon file on hosts with the required /proc pid start time.
+# A real payload: one owner-only beacon file on hosts with a supported pid start-time probe.
 set +e
 printf '{"session_id":"ff2dd3c2-e3d5-40db-9474-eea02e606c6c","hook_event_name":"UserPromptSubmit","cwd":"/tmp"}' \
   | env -i HOME="$BEACON_HOME" HERDR_PLUGIN_CONFIG_DIR="$CONFIG_DIR" COLLIE_PLUGIN_ROOT="$BEACON_ROOT" \
@@ -2587,10 +2587,8 @@ rc=$?
 set -e
 assert_eq "$rc" "0"
 assert_eq "$(cat "${TMP_ROOT}/emit.out")" ""
-# beacon.ts deliberately writes no beacon without /proc/<pid>/stat: a fabricated start time would
-# make every record expire. Keep the real-emitter record assertions on Linux, and check that honest
-# no-record result elsewhere; hook/skill installation and silent emitter checks above run everywhere.
-if [ -r "/proc/$$/stat" ]; then
+# Linux reads /proc and macOS uses the native ps probe. Unsupported hosts write no record.
+if [ -r "/proc/$$/stat" ] || [ "$(uname -s)" = Darwin ]; then
 BEACON_FILE="$(ls "${BEACON_STATE}/beacons")"
 assert_eq "$(printf '%s\n' "$BEACON_FILE" | wc -l | tr -d ' ')" "1"
 case "$BEACON_FILE" in
@@ -2621,7 +2619,7 @@ assert_eq "$rc" "0"
 assert_eq "$(cat "${BEACON_STATE}/beacons/${BEACON_FILE}")" "$(cat "${TMP_ROOT}/beacon.before")"
 else
   [ ! -d "${BEACON_STATE}/beacons" ] || fail "the emitter wrote a beacon without a readable pid start time"
-  echo "SKIP: real beacon record/subagent assertions require Linux /proc pid start times"
+  echo "SKIP: real beacon record/subagent assertions require a supported pid start-time probe"
 fi
 
 # Neither verb shelled out to anything: both are one filesystem edit and nothing else.

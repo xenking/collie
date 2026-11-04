@@ -2817,6 +2817,8 @@ export const ja: Dictionary = {
   "report.sheet.cutSends.one": "リンクに収めるため古い送信を{count}件省きました。コピーした報告にはすべて含まれます。",
   "report.sheet.cutSends.other": "リンクに収めるため古い送信を{count}件省きました。コピーした報告にはすべて含まれます。",
   "report.sheet.cutNote": "リンクに収めるため文章を短くしました。コピーした報告にはすべて含まれます。",
+  "report.sheet.tooLong": "この報告はリンクに対して長すぎます。「GitHub で開く」は、まず報告全体をコピーしてから、1行のみの Issue を開きます。そこに報告を貼り付けてください。",
+  "report.sheet.tooLongNoCopy": "この報告はリンクに対して長すぎるため、このブラウザではコピーできません。何も開きませんでした。",
   "paneActions.report.label": "問題を報告",
   "settings.report.title": "送信に失敗したら報告を提案する",
   "settings.report.description": "ペインで3回続けて送信に失敗すると、GitHub の Issue を開くカードが出ます。タップしない限り、この電話から何も送られません。",

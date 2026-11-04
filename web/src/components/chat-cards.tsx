@@ -428,10 +428,10 @@ export const ItemView = memo(function ItemView({ item }: { item: ChatItem }) {
     case "image":
       return <ChatImage url={item.url} alt={t("transcript.attachmentAlt")} />;
     case "tool":
-      if (item.image === undefined) return <ToolCard tool={item.tool} status={item.status} waiting={waiting} />;
+      if (item.image === undefined) return <ToolCard tool={item.tool} status={item.status} waiting={waiting} callId={item.id} />;
       return (
         <div className="flex flex-col gap-1.5">
-          <ToolCard tool={item.tool} status={item.status} waiting={waiting} />
+          <ToolCard tool={item.tool} status={item.status} waiting={waiting} callId={item.id} />
           <ChatImage url={item.image} alt={t("transcript.toolImageAlt")} />
         </div>
       );
@@ -835,6 +835,8 @@ function WaitingArea({ waiting, line }: { waiting?: CardWaiting; line?: boolean 
 interface ToolCardProps {
   tool: ChatToolCall;
   status: ChatToolStatus;
+  /** The chat item's id. It is the card's identity: the subagent sheet keys its state by it. */
+  callId: string;
   waiting?: CardWaiting;
   preview?: boolean;
 }
@@ -915,6 +917,7 @@ export function ToolCard(props: ToolCardProps) {
 function ToolCardBody({
   tool,
   status,
+  callId,
   waiting,
   preview,
   walky,
@@ -924,7 +927,8 @@ function ToolCardBody({
   // `data-waiting` lets a host find the card of the thing it is waiting on (scroll to it, see if it
   // is on screen).
   const anchor = waiting?.id;
-  const subagentCardKey = anchor ?? (tool.kind === "task" ? `${tool.agent ?? ""}:${tool.summary}` : "");
+  // Two calls can share an agent and a summary, so the sheet keys by the item id, never by that text.
+  const subagentCardKey = callId;
   const taskAgent = tool.kind === "task" ? tool.agent : undefined;
   const taskSummary = tool.kind === "task" ? tool.summary : "";
   const taskAgentId = tool.kind === "task" ? tool.agentId : undefined;

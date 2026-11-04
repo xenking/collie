@@ -2833,6 +2833,8 @@ export const es: Dictionary = {
   "report.sheet.cutSends.one": "Se omitió {count} envío antiguo para que quepa en el enlace. El informe copiado lo tiene todo.",
   "report.sheet.cutSends.other": "Se omitieron {count} envíos antiguos para que quepan en el enlace. El informe copiado lo tiene todo.",
   "report.sheet.cutNote": "Sus palabras se recortaron para que quepan en el enlace. El informe copiado las tiene todas.",
+  "report.sheet.tooLong": "Este informe es demasiado largo para el enlace. “Abrir en GitHub” copia primero el informe completo y luego abre una incidencia con una sola línea. Pegue el informe en ella.",
+  "report.sheet.tooLongNoCopy": "Este informe es demasiado largo para el enlace y este navegador no puede copiarlo. No se abrió nada.",
   "paneActions.report.label": "Informar de un problema",
   "settings.report.title": "Ofrecer un informe cuando falla el envío",
   "settings.report.description": "Tras 3 envíos fallidos seguidos en un pane, una tarjeta ofrece abrir una incidencia en GitHub. Nada sale de este teléfono si usted no toca.",

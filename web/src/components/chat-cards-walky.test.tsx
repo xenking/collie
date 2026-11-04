@@ -26,7 +26,7 @@ function draw(
   open: ((id: string) => void) | null = null,
   self: string | null = fixtureWalkySelf,
 ) {
-  const card = <ToolCard tool={tool} status="done" />;
+  const card = <ToolCard callId="call-1" tool={tool} status="done" />;
   // One card on the screen at a time: a case may draw several, and each check reads the latest.
   cleanup();
   return render(
