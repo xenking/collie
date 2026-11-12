@@ -5,7 +5,7 @@ import {
   CLAIM_MAX_AGE_MS,
   noteMemberSkipped,
   clearUpdateStarted,
-  dismissesLocally,
+  carriedByMark,
   dismissTarget,
   DONE_WINDOW_MS,
   getUpdateStarted,
@@ -25,7 +25,7 @@ import {
   truncateWords,
   type RibbonInput,
 } from "./update-ribbon";
-import type { UpdateInfo, UpdatePeerLeg, UpdatePeerLegState, UpdateRun, UpdateRunState } from "./types";
+import type { UpdateCrewMember, UpdateInfo, UpdatePeerLeg, UpdatePeerLegState, UpdateRun, UpdateRunState } from "./types";
 
 // The band's reading, as a pure function. The component test next door proves the row that comes out
 // of it; everything about WHICH state wins lives here, where it needs no DOM.
@@ -170,6 +170,65 @@ describe("run states belong to the screen", () => {
   it("keeps both download states, which are about the PWA and not about a run", () => {
     expect(read({ bundleStale: true, bundleInstalling: true })).toEqual({ kind: "bundle-installing" });
     expect(read({ bundleStale: true })).toEqual({ kind: "bundle" });
+  });
+});
+
+// ── THE LIVE DEV LANE, 2026-11-09 ───────────────────────────────────────────────────────────────
+// The lead answered the crew as `1.28.0-dev+047ee5bbd0` while its `current` was `package.json`'s plain
+// `1.28.0`. Its three members ran development builds of `1.28.0`, which read as behind `1.28.0`, so a
+// peers-only run was offered and taken; a development build states no release, so every leg ended
+// `unreachable` after the wall clock, and the failed row then never left.
+describe("a lead on a development build, over development members (2026-11-09)", () => {
+  const leg = (name: string): UpdatePeerLeg => ({
+    name,
+    state: "unreachable",
+    reason: "not started: the lead states no settled release, not 1.28.0",
+    updatedAt: NOW - 30 * 60_000,
+  });
+  const legs = [leg("minibuch"), leg("minibuch-hc"), leg("bluefin-hc")];
+  const member = (name: string, version: string): UpdateCrewMember => ({ name, version, verdict: "green", reasons: [], asOf: NOW });
+  const crewOn = (versions: readonly [string, string, string]): UpdateCrewMember[] => [
+    member("minibuch", versions[0]),
+    member("minibuch-hc", versions[1]),
+    member("bluefin-hc", versions[2]),
+  ];
+  const crew = crewOn(["1.28.0-dev+b178eb63f2", "1.28.0-dev+b178eb63f2", "1.28.0-dev+047ee5bbd0"]);
+  const live = (over: Partial<UpdateInfo> = {}): UpdateInfo =>
+    info({
+      current: "1.28.0",
+      latest: "1.28.0",
+      releaseAvailable: false,
+      newerVersions: [],
+      build: "1.28.0-dev+047ee5bbd0",
+      peers: legs,
+      settledAt: NOW - 10 * 60_000,
+      ...over,
+    });
+
+  it("names no failed leg, and the band says nothing", () => {
+    expect(readRun({ update: live(), crew, now: NOW }).failed).toBeNull();
+    expect(read({ update: live(), crew })).toEqual({ kind: "silent" });
+  });
+
+  it("stays silent before the census arrives, because the lead can hand nobody a turn", () => {
+    expect(read({ update: live() })).toEqual({ kind: "silent" });
+  });
+
+  it("stays silent over development members of an OLDER version too", () => {
+    const older = crewOn(["1.27.0-dev+b178eb63f2", "1.27.0-dev+b178eb63f2", "1.27.0-dev+b178eb63f2"]);
+    expect(read({ update: live(), crew: older })).toEqual({ kind: "silent" });
+  });
+
+  it("a release lead over the same members: they are level with it, so the row goes too", () => {
+    expect(read({ update: live({ build: "1.28.0+b178eb63f2" }), crew })).toEqual({ kind: "silent" });
+  });
+
+  it("a release lead over a member a release back still names the failed leg", () => {
+    const behind = crewOn(["1.27.4+ab12cd3", "1.27.4+ab12cd3", "1.27.4+ab12cd3"]);
+    expect(read({ update: live({ build: "1.28.0+b178eb63f2" }), crew: behind })).toMatchObject({
+      kind: "peer-failed",
+      name: "minibuch",
+    });
   });
 });
 
@@ -386,19 +445,21 @@ describe("what carries a close", () => {
     expect(dismissTarget({ kind: "silent" })).toBeNull();
   });
 
-  it("the DOWNLOAD row closes in this document and posts nothing (2026-09-12)", () => {
-    // It is closable for the reason the others are not: the wait has no end of its own. A worker
-    // stuck in `installing` on a dead link is waited on with no timer and no forced reload, so the
-    // close is the operator's only way back to the app they already have.
-    expect(dismissesLocally({ kind: "bundle-installing" })).toBe(true);
-    // And it is NOT a dismissal: nothing was declined, so no version goes to the bridge.
+  it("the DOWNLOAD row posts no version either: nothing was declined (2026-09-12)", () => {
     expect(dismissTarget({ kind: "bundle-installing" })).toBeNull();
   });
+});
 
-  it("every other state is put down on the bridge or not at all", () => {
-    expect(dismissesLocally({ kind: "bundle" })).toBe(false);
-    expect(dismissesLocally({ kind: "available", version: "1.5.0" })).toBe(false);
-    expect(dismissesLocally({ kind: "silent" })).toBe(false);
+// ── The bundle is the mark's (2026-11-06) ───────────────────────────────────
+
+describe("the two bundle states are carried by the header mark, not the band", () => {
+  it("names both bundle states, and only those", () => {
+    expect(carriedByMark({ kind: "bundle-installing" })).toBe(true);
+    expect(carriedByMark({ kind: "bundle" })).toBe(true);
+    expect(carriedByMark({ kind: "silent" })).toBe(false);
+    expect(carriedByMark({ kind: "available", version: "1.5.0" })).toBe(false);
+    expect(carriedByMark({ kind: "available-packaged", version: "1.5.0", manager: null })).toBe(false);
+    expect(carriedByMark({ kind: "peer-failed", name: "minibuch", reason: "gate", target: "1.5.0" })).toBe(false);
   });
 });
 

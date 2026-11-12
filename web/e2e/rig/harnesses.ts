@@ -299,7 +299,7 @@ export function prepareHarness(id: HarnessId, machine: Machine = "lead"): Prepar
       else for (const name of ["agent.db", "agent.db-wal", "agent.db-shm", "models.db"]) rmSync(join(d.agent, name), { force: true });
       // Skills off: omp would find the operator's skills up the folder tree (the project sits under the
       // home folder) and ask a second model to compress their descriptions at every start.
-      writeFileSync(join(d.agent, "config.yml"), `setupVersion: 2\nmodelRoles:\n  default: ${SETUPS.omp.model}\nskills:\n  enabled: false\n`);
+      writeFileSync(join(d.agent, "config.yml"), `setupVersion: 3\nmodelRoles:\n  default: ${SETUPS.omp.model}\nskills:\n  enabled: false\n`);
       // The stub: models.yml moves openrouter's base URL; omp then calls `<base>/v1/responses`.
       if (base !== null) writeFileSync(join(d.agent, "models.yml"), `# Written by the Collie browser leg (M67): omp's model calls go to the rig's stub.\nproviders:\n  openrouter:\n    baseUrl: ${base}/v1\n`);
       else rmSync(join(d.agent, "models.yml"), { force: true });
@@ -320,6 +320,8 @@ export function prepareHarness(id: HarnessId, machine: Machine = "lead"): Prepar
   // own HOME (P.bridgeHome), so without this the CLI never reaches it, and it would ask the
   // operator's live bridges instead. Its machine's state dir is the one bridge a rig agent may talk to.
   env.push(`COLLIE_STATE_DIR=${sq(stateDir)}`);
+  // The anonymous install ping (M86): nothing a rig starts pings.
+  env.push("COLLIE_TELEMETRY=0");
   // The worktree's own `collie` first on PATH, so an agent's `collie walky` runs the build under test.
   const unset = UNSET.map((name) => `-u ${name}`).join(" ");
   const path = `export PATH=${sq(bin)}:"$PATH"\n`;

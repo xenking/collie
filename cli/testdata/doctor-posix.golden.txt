@@ -53,6 +53,8 @@ local:
                                     (COLLIE_ACCOUNT_WINDOWS=all); grok: off by
                                     default, unverified
                                     (COLLIE_ACCOUNT_WINDOWS=all)
+  ✓        telemetry                on, decided by default (as this shell sees
+                                    it; the service reads its own .env)
   ✓        herdr-version            herdr 0.9.3
   ✓        integration-agy          no hook — the adapter finds the session log
                                     itself
@@ -81,7 +83,7 @@ local:
   ✓        hook-python3             /fake/python3
   skipped: agent-sessions           the bridge reports no agent panes → start an
                                     agent in a pane, then re-run `collie doctor`
-  ✓        journal-roots            1 of 12 roots present — claude:
+  ✓        journal-roots            1 of 13 roots present — claude:
                                     /home/pat/.claude/projects (resolved from
                                     /home/pat; the BRIDGE resolves them from ITS
                                     OWN user's home)
@@ -174,6 +176,8 @@ local:
                                     (COLLIE_ACCOUNT_WINDOWS=all); grok: off by
                                     default, unverified
                                     (COLLIE_ACCOUNT_WINDOWS=all)
+  ✓        telemetry                on, decided by default (as this shell sees
+                                    it; the service reads its own .env)
   ✓        herdr-version            herdr 0.9.3
   ✓        integration-agy          no hook — the adapter finds the session log
                                     itself
@@ -202,7 +206,7 @@ local:
   ✓        hook-python3             /fake/python3
   skipped: agent-sessions           the bridge reports no agent panes → start an
                                     agent in a pane, then re-run `collie doctor`
-  ✓        journal-roots            1 of 12 roots present — claude:
+  ✓        journal-roots            1 of 13 roots present — claude:
                                     /home/pat/.claude/projects (resolved from
                                     /home/pat; the BRIDGE resolves them from ITS
                                     OWN user's home)

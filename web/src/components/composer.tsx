@@ -1,8 +1,7 @@
-import { forwardRef, useContext, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { forwardRef, useContext, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
+import { createPortal, flushSync } from "react-dom";
 import type { ChangeEvent, ClipboardEvent, CSSProperties, MouseEvent, ReactNode } from "react";
 import { useRevalidator } from "react-router";
-import { Check, FileText, Image, Keyboard, ListEnd, ListTodo, Loader2, Mic, Monitor, Navigation, Paperclip, Pencil, Send, Settings2, Slash, Square, Terminal, TriangleAlert, X, Zap } from "lucide-react";
 
 import { StatusDot } from "@/components/status-badge";
 import { applyDraftFontSize, fontStack, inputFocusZoomsPage, reportOfferOf, sentSuggestionsOf } from "@/hooks/use-display-prefs";
@@ -49,6 +48,10 @@ import { ActionRow } from "@/components/action-sheet-rows";
 import { AnchoredMenu } from "@/components/ui/anchored-menu";
 import { WalkyAimStrip, WalkyHeldStrip, WalkyNoteStrip } from "@/components/walky-composer-strip";
 import { WalkyIcon } from "@/components/walky-icon";
+import { slideOut, useFlip } from "@/hooks/use-flip";
+import { ExpandedEditor } from "@/components/composer-expanded";
+import { useVisibleHeight } from "@/hooks/use-visible-height";
+import { DRAFT_LINE_HEIGHT, draftCapPx, pastDraftCap } from "@/lib/draft-cap";
 import { useLongPress } from "@/hooks/use-long-press";
 import { useWalkyComposer, type WalkyAim } from "@/hooks/use-walky-composer";
 import * as api from "@/lib/api";
@@ -100,8 +103,10 @@ import { textToKeySequence } from "@/lib/key-queue";
 import { isLead, paneScopeKey, scopeKey, type Scope } from "@/lib/scope";
 import { closeTrouble, noteSend, openReport, streakIds, useTroubleOffer } from "@/lib/report/store";
 import { takeBeltIntent } from "@/lib/belt-intent";
-import type { PaneSubagent, PaneTodo } from "@/lib/types";
+import type { PaneJob, PaneSubagent, PaneTodo, PinRow } from "@/lib/types";
 import { AgentsSheet, subagentName } from "@/components/agents-sheet";
+import { JobsSheet } from "@/components/jobs-sheet";
+import { PinsSheet } from "@/components/pins-sheet";
 import { SubagentSheetCtx, type SubagentTarget } from "@/components/chat-cards";
 import { DirectTypingStrip } from "@/components/direct-typing-strip";
 import { VoiceTakeover } from "@/components/voice-takeover";
@@ -114,6 +119,7 @@ import type { TranscriptEntry } from "@/lib/types";
 import { findUnknownSendMatch, type UnknownSend } from "@/lib/unknown-send";
 import { clearNotice, phoneRefusal, readingRefusal, refusalKey, SendRefusalNotice, stopNotice, type SendRefusal } from "@/components/send-notice";
 import { mintRequestId } from "@/lib/worktree-name";
+import { Icon } from "@/components/icons/icon";
 
 /** The status line a verified send leaves, by where the text went. */
 const STATUS_KEY = {
@@ -284,6 +290,13 @@ interface ComposerProps {
    */
   draftNoticeSlot?: HTMLElement | null;
 
+  /**
+   * The pane's reading area (the mirror or the Chat stream). The fullscreen editor takes its left edge
+   * and width, so a wide layout covers only this pane's column (components/composer-expanded.tsx).
+   * Absent, the open box shows no Expand button: a composer mounted alone has no pane to cover.
+   */
+  expandArea?: HTMLElement | null;
+
   /** EXPERIMENT (operator, 2026-09-23): the Changes pill on the belt's pinned block, beside the
    *  switcher mark (actions-row.tsx's `changes`). Absent when the pane reports no folder. */
   changesPill?: { onClick: () => void; label: string };
@@ -308,6 +321,16 @@ interface ComposerProps {
    * left of the field, Send on the outer edge, Attach beside the field.
    */
   hand?: Hand;
+
+  /**
+   * How the reply box is laid out. `"field"` (default) is the shipped box: one row, the field with
+   * Attach and the primary action beside it, always. `"box"` is the chat-box shape with two states:
+   * at rest ONE slim row (Attach, the field's single line, the microphone as the main button), and
+   * open (holding a draft, a chip or Type mode; focus alone does not open it) the field takes the full width on top and
+   * the buttons drop to a row of their own inside the box, so they never narrow the text. Layout
+   * only: the same buttons, the same send logic, the same placeholder, the same field element.
+   */
+  layout?: "field" | "box";
 
   /**
    * Drawn directly above the actions belt, under any open dock: the pane's joystick handle band when
@@ -335,6 +358,24 @@ interface ComposerProps {
    * on the belt's fixed block and an in-flow dock when non-empty. A finished one leaves the list and stays in Chat.
    */
   subagents?: readonly PaneSubagent[];
+  /**
+   * The pane's background jobs (bridge/jobs-journal.ts), running or ended in the last minutes, drawn as
+   * the jobs mark on the belt's fixed block and the Jobs sheet it opens, while the list is non-empty.
+   */
+  jobs?: readonly PaneJob[];
+  /**
+   * The session's pinned messages (M90): the pins mark on the belt's fixed block, with the count, and the Pins sheet
+   * it opens. The pane view passes it where pins are read at all; the mark shows while `count` is above zero.
+   */
+  pins?: {
+    count: number;
+    rows: readonly PinRow[];
+    onUnpin: (pinId: string) => void;
+    /** The list is read again each time the sheet opens. */
+    onOpened: () => void;
+    /** Show in Chat. False when the block is not loaded. */
+    onShow: (pin: PinRow) => boolean;
+  };
 }
 
 // The composer cluster at the bottom of the pane view — everything a phone keyboard can't do on its
@@ -399,7 +440,7 @@ function ComposerDock({
               onClick={onEdit}
               aria-label={translate("composer.dock.editKeys")}
             >
-              <Pencil className="size-3.5" />
+              <Icon name="edit" className="size-3.5" />
             </Button>
           )}
         </div>
@@ -410,7 +451,7 @@ function ComposerDock({
           onClick={onClose}
           aria-label={translate("composer.dock.closeAria", { title })}
         >
-          <X className="size-4" />
+          <Icon name="close" className="size-4" />
         </Button>
       </div>
       <div className="max-h-[45dvh] min-h-0 overflow-y-auto">{children}</div>
@@ -475,8 +516,17 @@ interface ClearedDraft {
 }
 
 
+/** Focus `to` with the caret (or the selection) `from` held, so a draft moved between fields keeps its place. */
+function moveCaret(from: HTMLTextAreaElement | null, to: HTMLTextAreaElement | null) {
+  if (to === null) return;
+  const start = from?.selectionStart ?? to.value.length;
+  const end = from?.selectionEnd ?? start;
+  to.focus();
+  to.setSelectionRange(start, end);
+}
+
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { paneId, instance, surface, starting = false, unreachableNote, scope, stopOffered = false, agent, canSteer, returnedDraft = false, isShell, cwd, replySpeechSupported = false, gone, readOnly, composing, onAnswerDialog, dialogCard = false, text, terminalDraft, rawTerminalDraft, prefs, display, onSent, onOpenMessages, held: heldRows, chatEntries, pullHandle, draftNoticeSlot, changesPill, zoomPill, stale, hand = "right", aboveBelt, floatingHint, screen, todos, subagents },
+  { paneId, instance, surface, starting = false, unreachableNote, scope, stopOffered = false, agent, canSteer, returnedDraft = false, isShell, cwd, replySpeechSupported = false, gone, readOnly, composing, onAnswerDialog, dialogCard = false, text, terminalDraft, rawTerminalDraft, prefs, display, onSent, onOpenMessages, held: heldRows, chatEntries, pullHandle, draftNoticeSlot, expandArea, changesPill, zoomPill, stale, hand = "right", layout = "field", aboveBelt, floatingHint, screen, todos, subagents, jobs, pins },
   ref,
 ) {
   const revalidator = useRevalidator();
@@ -493,7 +543,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // — the field has a size of its own now, so there is no "leave it alone" value — while
   // `fontFamily` is written ONLY for a non-default family, so an install that never opened the
   // setting renders from the stylesheet's own `--font-mono`, byte for byte as before.
-  const draftStyle: CSSProperties = { fontSize: `${draftFontPx}px` };
+  //
+  // `--draft-cap` is the field's max height (lib/draft-cap.ts): the smaller of five rows and a fifth
+  // of the visible height, measured with the keyboard up. A variable rather than `maxHeight`, so the
+  // tabletop fold's own `max-height: none` (index.css) still wins inside its bottom segment. The
+  // padding is the field's larger one, 12px (`py-1.5`); the open box's 10px leaves 2px more text.
+  const visiblePx = useVisibleHeight();
+  const draftCap = draftCapPx({ fontPx: draftFontPx, paddingPx: 12, visiblePx });
+  // SAFETY: `CSSProperties` has no index signature for custom properties, and React passes them to
+  // the DOM as written. Every value here is a string built on this line, so the assertion widens the
+  // key names only and asserts nothing about the values.
+  const draftStyle = { fontSize: `${draftFontPx}px`, "--draft-cap": `${draftCap}px` } as CSSProperties;
   if (terminalFace !== undefined) draftStyle.fontFamily = terminalFace;
   // THE SEND SLOT (M56 spec 06): one pure function of the pane's Surface and three facts (gone,
   // read-only, offline), in lib/send-slot.ts. The multiplexer underneath that cannot type into a pane
@@ -635,6 +695,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
    * The in-memory draft is untouched: a false positive costs one draft its ability to survive the OS
    * killing the PWA, which is a cheap price for never storing a real one.
    */
+  /** The draft field's change, for the box's field and the fullscreen editor's alike: one draft. */
+  function onDraftChange(e: ChangeEvent<HTMLTextAreaElement>) {
+    rememberCaret(e);
+    updateInput(e.target.value);
+    noteOfflineKeystroke(e.target.value);
+  }
+
   function updateInput(value: string) {
     // Anything written INTO the box ends the belt X's Undo window (M40 spec 04): a keystroke, a
     // chip's marker, a transcript, a Take over, a slash command. An Undo after that would overwrite
@@ -1050,6 +1117,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // M69: the Steer row of that menu. Only while the turn reads running, only where the bridge says the
   // profile has a steer key, and never for a reply in message mode (a walky message always queues).
   const steerRow = canSteer === true && shownSurface.turn === "running" && walky.aim === null;
+  // The Send button when it cannot act: it stays focusable and under the finger instead of `disabled`.
+  const sendInert = locked || sending || walky.sending || ((starting || offline) && !direct.active);
   const sendHold = useLongPress(canMessage ? () => setSendMenu(true) : undefined);
 
   // ── THE VOICE TAKEOVER (design 3.3) ───────────────────────────────────────────────────────────
@@ -1367,7 +1436,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         paneId={paneId}
         scope={scope}
         rows={heldRows}
-        canAct={isLead(scope) && !locked}
+        canAct={!locked}
+        canSend={isLead(scope)}
         sending={sending}
         onSend={resendHeld}
         onChanged={onSent}
@@ -1485,6 +1555,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (target.agentId !== undefined && runningIds.split(" ").includes(target.agentId)) return;
     syncSubagent({ ...target, status: "done" });
   }, [activeSheetKey, runningIds, syncSubagent]);
+  // The background jobs (issue 670, ADR 0128): the jobs mark beside the agents mark, and the Jobs sheet
+  // it opens, a sheet over the page for the same reason. The badge counts the running ones; the mark
+  // stays while a job that ended in the last minutes is listed, so its result can be read.
+  const jobList = jobs ?? [];
+  const runningJobs = jobList.filter((job) => job.endedAt === undefined).length;
+  const jobsLabel = jobList.length > 0 ? translate("belt.jobs.label", { count: runningJobs }) : "";
+  const [jobsOpen, setJobsOpen] = useState(false);
+  // The pinned messages (M90): the pins mark beside the jobs mark, and the Pins sheet it opens. The mark and the sheet
+  // go together when the last pin is unpinned, because both read the same count.
+  const pinCount = pins?.count ?? 0;
+  const pinsLabel = pinCount > 0 ? translate("pins.belt.label", { count: pinCount }) : "";
+  const [pinsOpen, setPinsOpen] = useState(false);
+  // The last Unpin shuts the sheet for good: a pin made later must not find it still "open" and pop it up.
+  // The sheet and the mark it was opened from both leave then, so focus goes to the belt instead of nowhere.
+  useEffect(() => {
+    if (pinCount > 0 || !pinsOpen) return;
+    setPinsOpen(false);
+    document.querySelector<HTMLElement>('[data-slot="composer-actions"] button')?.focus();
+  }, [pinCount, pinsOpen]);
   // The suggestions above the box read the agent's command list only (the shipped catalog, or the
   // operator's rows): never the skill and command files the palette finds on disk.
   const commandSuggestions = locked || direct.active || isShell ? [] : suggestCommands(input, commandsFor(agent, operatorCommands));
@@ -1691,7 +1780,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       // Report a problem (ADR 0123): the answer joins this pane's streak. Plain rules over the outcome and
       // reason (lib/report/trouble.ts); nothing is sent and nothing is retried. This machine's panes only.
       if (reportOn && reply.outcome !== null) {
-        noteSend(reportKey, paneId, { requestId: res.requestId, outcome: reply.outcome, reason: reply.reason, cap: reply.cap !== null, at: Date.now() });
+        const settledAt = Date.now();
+        noteSend(reportKey, paneId, { requestId: res.requestId, outcome: reply.outcome, reason: reply.reason, cap: reply.cap !== null, at: settledAt }, settledAt, scope);
       }
       if (reading.clear) {
         setProtocolOffer(null);
@@ -1811,11 +1901,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       : translate("composer.mic.recordAria");
   const micIcon =
     recorder.phase === "transcribing" ? (
-      <Loader2 className="size-4 animate-spin" />
+      <Icon name="busy" className="size-4 animate-spin" />
     ) : recorder.phase === "recording" ? (
-      <Square className="size-4 fill-current" />
+      <Icon name="stop" className="size-4 fill-current" />
     ) : (
-      <Mic className="size-4" />
+      <Icon name="mic" className="size-4" />
     );
   const micDisabled = !micAvailable || locked || offline || sending || recorder.phase === "transcribing";
   function onMicClick(e: MouseEvent, opener: "primary" | "draft") {
@@ -2390,8 +2480,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     beltPills.current = pills;
     return pills;
   };
-  const beltTap = useRef({ locked, send, stop: stopOffered ? stopTurn : null, changesPill, agents: subagentList.length > 0 });
-  beltTap.current = { locked, send, stop: stopOffered ? stopTurn : null, changesPill, agents: subagentList.length > 0 };
+  const beltTap = useRef({ locked, send, stop: stopOffered ? stopTurn : null, changesPill, agents: subagentList.length > 0, jobs: jobList.length > 0, pins: pinCount > 0 });
+  beltTap.current = { locked, send, stop: stopOffered ? stopTurn : null, changesPill, agents: subagentList.length > 0, jobs: jobList.length > 0, pins: pinCount > 0 };
   // The tap moved the focus here and left its act, which runs once, through the same handler and gates
   // as a tap on this belt. A pill this belt does not draw, or draws disabled, does nothing.
   useEffect(() => {
@@ -2407,10 +2497,217 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       tap.changesPill?.onClick();
     } else if (intent.kind === "agents") {
       if (tap.agents) setAgentsOpen(true);
+    } else if (intent.kind === "jobs") {
+      if (tap.jobs) setJobsOpen(true);
+    } else if (intent.kind === "pins") {
+      if (tap.pins) setPinsOpen(true);
     } else if (tap.stop !== null) {
       void tap.stop();
     }
   }, [scope, paneId]);
+
+  // ── THE BOX LAYOUT (`layout="box"`): TWO SHAPES OF ONE ELEMENT TREE ─────────────────────────────
+  // The same children in the same DOM order as the field layout, so the textarea is never remounted
+  // and keeps its caret and its draft when the box opens and closes. Only the grid cells they stand in
+  // change. AT REST the box is one row: Attach, the field's single line, the primary action. OPEN it is
+  // three rows on the same grid: the chips (when there are any), the field across the full width, and
+  // a row of buttons that never shares a line with the text. The box grows upward because the
+  // composer is anchored to the bottom edge.
+  //
+  // OPEN is: something sits in it (a draft, a chip, Type mode, which shows the line in the field).
+  // FOCUS ALONE DOES NOT OPEN IT: a focused empty box is a caret in one line, and three lines of
+  // empty space under a blinking caret is room taken from the mirror for nothing (Altan, 2026-11-05).
+  // It opens on the first character and closes when the draft is empty again, caret still in it. The
+  // change between the two shapes is played by `useFlip` below. A recording or a transcribing clip does NOT open it: the voice takeover
+  // covers this block and relies on the block keeping exactly the height it had (the note at the
+  // block's `invisible` below, and components/voice-takeover.tsx), so the shape is held for as long as
+  // the takeover stands, even if `inert` takes the focus away from the field underneath.
+  const box = layout === "box";
+  const boxOpenNow = input !== "" || attachments.length > 0 || direct.active;
+  const boxWasOpen = useRef(boxOpenNow);
+  if (!takeoverOpen) boxWasOpen.current = boxOpenNow;
+  const boxOpen = box && boxWasOpen.current;
+  const mirrored = hand === "left";
+  // Box layout only: a tap on the box's own padding, or on a gap between its controls, lands in the
+  // field. Plain listeners on the element rather than JSX handlers: the box is a layout surface, not a
+  // control, and the field is the control. The press is held back from the browser's focus move so a
+  // field that already has focus keeps it (a blur here would close an empty box for one frame).
+  const boxRef = useRef<HTMLDivElement>(null);
+  // When the cap shrinks under a caret at the end of the draft (the keyboard came up over a long
+  // draft), the field scrolls to keep that caret in view. A caret the person put elsewhere is left
+  // where they put it; the browser keeps a typing caret in view by itself.
+  useLayoutEffect(() => {
+    const field = inputRef.current;
+    if (field === null || document.activeElement !== field) return;
+    if (field.selectionEnd !== field.value.length) return;
+    field.scrollTop = field.scrollHeight;
+  }, [draftCap]);
+
+  // ── THE FULLSCREEN EDITOR (components/composer-expanded.tsx) ─────────────────────────────────────
+  // One draft: the layer's field is bound to `input` through `onDraftChange`, as the box's field is.
+  // The focus and the caret cross from one field to the other inside the tap that opens or closes it
+  // (`flushSync` mounts or unmounts the layer first), so the soft keyboard never drops. It closes on
+  // Collapse, Send, Escape, a pane switch and a pane nobody may write to any more; never on Back
+  // (ADR 0067: a layer with a history entry would be a level).
+  const [expanded, setExpanded] = useState(false);
+  const expandedRef = useRef<HTMLTextAreaElement>(null);
+  // EXPAND SHOWS ONLY PAST THE CAP (Altan, 2026-11-08: "only when we've passed the point where the
+  // input box stops growing"). The draft's content height is read after every change against the cap,
+  // with one row of hysteresis (lib/draft-cap.ts, `pastDraftCap`), so a draft on the boundary cannot
+  // make it blink. It leaves the way it came, sideways (`slideOut`), and stays drawn until that ends.
+  const [pastCap, setPastCap] = useState(false);
+  useLayoutEffect(() => {
+    const field = inputRef.current;
+    if (field === null) return;
+    setPastCap((was) => pastDraftCap({ was, contentPx: field.scrollHeight, capPx: draftCap, rowPx: draftFontPx * DRAFT_LINE_HEIGHT }));
+  }, [input, draftCap, draftFontPx, boxOpen]);
+  const expandWanted = box && boxOpen && pastCap && !direct.active && !locked && expandArea !== undefined && expandArea !== null;
+  const expandButtonRef = useRef<HTMLButtonElement>(null);
+  const [expandShown, setExpandShown] = useState(expandWanted);
+  if (expandWanted && !expandShown) setExpandShown(true);
+  useEffect(() => {
+    if (expandWanted || !expandShown) return;
+    const button = expandButtonRef.current;
+    const container = boxRef.current;
+    if (button === null || container === null) {
+      setExpandShown(false);
+      return;
+    }
+    const leaving = slideOut(button, container);
+    if (leaving === null) {
+      setExpandShown(false);
+      return;
+    }
+    leaving.onfinish = () => setExpandShown(false);
+    return () => {
+      leaving.onfinish = null;
+      leaving.cancel();
+    };
+  }, [expandWanted, expandShown]);
+  const expandedOpen = expanded && !direct.active && !locked && expandArea !== undefined && expandArea !== null;
+  useEffect(() => {
+    setExpanded(false);
+  }, [paneId]);
+  function openExpanded() {
+    const caret = inputRef.current;
+    flushSync(() => setExpanded(true));
+    moveCaret(caret, expandedRef.current);
+  }
+  function closeExpanded() {
+    const caret = expandedRef.current;
+    flushSync(() => setExpanded(false));
+    moveCaret(caret, inputRef.current);
+  }
+  function sendExpanded() {
+    closeExpanded();
+    // A dialog that owns the agent's keys is answered first: the box's Send slot says so once the
+    // layer is gone, and nothing is sent from here.
+    if (askOwnsKeys) return;
+    onSendClick();
+  }
+
+  // The change of shape is played (hooks/use-flip.ts): the box's height, with every row held still,
+  // and a button that appears slides in sideways from its own edge, never from above (Altan,
+  // 2026-11-07). The key changes with the shape and with the set of buttons, never per keystroke. The
+  // field layout has one shape, so there only the entrances play: Send taking the microphone's place
+  // and the small microphone beside it.
+  const flipKey = `${boxOpen ? "open" : "rest"}:${micIsPrimary ? "mic" : "send"}:${draftMicShown ? "draft-mic" : ""}:${expandShown ? "expand" : ""}`;
+  useFlip(boxRef, flipKey, { enabled: true, grows: box });
+
+  // Attach's tap and its picker's two rows, drawn by the box and by the fullscreen editor's row alike:
+  // one behaviour in two places, never two.
+  const onAttachClick = () => {
+    echoAttachPress();
+    if (asksWhich) setPicking(true);
+    else photoRef.current?.click();
+  };
+  const attachRows = (
+    <>
+      <ActionRow
+        icon={<Icon name="image" aria-hidden="true" className="size-4 shrink-0" />}
+        label={translate("composer.attach.photos")}
+        onClick={() => {
+          setPicking(false);
+          photoRef.current?.click();
+        }}
+      />
+      <ActionRow
+        icon={<Icon name="file-text" aria-hidden="true" className="size-4 shrink-0" />}
+        label={translate("composer.attach.files")}
+        onClick={() => {
+          setPicking(false);
+          fileRef.current?.click();
+        }}
+      />
+    </>
+  );
+  // The fullscreen editor's row (Altan, 2026-11-08: "we're not showing the attach + microphone icon,
+  // kinda looks like a wasted opportunity"): the box's own Attach, its picker opening above the row,
+  // and the small mic, with the same handlers. Send is the layer's.
+  const expandedLeading = (
+    <>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className={cn(
+          TOOLBAR_TAP_TARGET,
+          "size-9 shrink-0 rounded-full bg-secondary text-foreground",
+          (pressed || picking) && "scale-95 bg-primary text-primary-foreground duration-0",
+        )}
+        disabled={uploading || locked || direct.active}
+        onPointerDown={(e) => e.preventDefault()}
+        onClick={onAttachClick}
+        aria-label={translate("composer.attach.aria")}
+        aria-haspopup="dialog"
+        aria-expanded={asksWhich ? picking : undefined}
+      >
+        {uploading ? <Icon name="busy" className="size-4 animate-spin" /> : <Icon name="attach-open" className="size-4" />}
+      </Button>
+      <AnchoredMenu
+        open={picking}
+        onClose={() => setPicking(false)}
+        label={translate("composer.attach.title")}
+        // Attach is the row's first button, at the left; the left hand puts it at the right.
+        className={mirrored ? undefined : "right-auto left-0"}
+      >
+        {attachRows}
+      </AnchoredMenu>
+    </>
+  );
+  const expandedTrailing = micShown && !direct.active && !askOwnsKeys && (
+    <Button
+      data-slot="composer-mic-expanded"
+      type="button"
+      variant="ghost"
+      size="icon"
+      className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 rounded-full bg-secondary text-foreground")}
+      disabled={micDisabled}
+      aria-pressed={recorder.busy}
+      aria-label={micAriaLabel}
+      title={micAvailable ? undefined : stt?.reason}
+      onPointerDown={(e) => e.preventDefault()}
+      onClick={(e) => onMicClick(e, "draft")}
+    >
+      {micIcon}
+    </Button>
+  );
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!box || el === null) return;
+    const hold = (e: Event) => {
+      if (e.target === el) e.preventDefault();
+    };
+    const focusField = (e: Event) => {
+      if (e.target === el) inputRef.current?.focus();
+    };
+    el.addEventListener("pointerdown", hold);
+    el.addEventListener("click", focusField);
+    return () => {
+      el.removeEventListener("pointerdown", hold);
+      el.removeEventListener("click", focusField);
+    };
+  }, [box]);
 
   return (
     <>
@@ -2441,7 +2738,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             truncate to a line of chrome, which is the one thing this must not do. */}
         <Collapse open={lastSent !== null}>
           <div className="mb-2 flex items-center gap-1.5 rounded-md bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground">
-            <Loader2 className="size-3 shrink-0 animate-spin" />
+            <Icon name="busy" className="size-3 shrink-0 animate-spin" />
             <span className="truncate">
               <span className="font-medium">{translate("composer.sentPreview.label")}</span> {lastSent}
             </span>
@@ -2584,7 +2881,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // closes the other.
               {
                 id: "keys",
-                icon: Keyboard,
+                icon: "keys-drawer",
                 label: translate("composer.controls.keys"),
                 on: drawer === "keys",
                 expanded: drawer === "keys",
@@ -2600,14 +2897,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 : [
                     {
                       id: "screen",
-                      icon: Monitor,
+                      icon: "screen",
                       label: translate("composer.controls.screenAria"),
                       word: translate("composer.controls.screen"),
                       on: screen.on,
                       pressed: screen.on,
                       onSelect: screen.onToggle,
                     },
-                  ]),
+                  ] satisfies GeneralAction[]),
               // "Type into terminal" lives HERE, beside Keys, rather than on the Send button.
               // It is the same problem split in half: Keys exists because the phone keyboard
               // cannot send Esc/Tab/arrows/chords, this exists because it cannot send bare
@@ -2622,7 +2919,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // keyboard to a live terminal; see use-direct-typing.ts for the rest.
               {
                 id: "type",
-                icon: Terminal,
+                icon: "type-into-terminal",
                 // Announced in full, drawn short: the pill has one word of room beside its glyph,
                 // and "Type into terminal" is the name a reader must still hear.
                 label: translate("composer.controls.typeAria"),
@@ -2645,7 +2942,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               },
               {
                 id: "quick",
-                icon: Zap,
+                icon: "quick-actions",
                 label: translate("composer.controls.quick"),
                 on: drawer === "quick",
                 expanded: drawer === "quick",
@@ -2658,12 +2955,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 ? [
                     {
                       id: "sent",
-                      icon: ListEnd,
+                      icon: "sent-history",
                       label: translate("sent.button"),
                       disabled: locked,
                       onSelect: () => setSentOpen(true),
                     },
-                  ]
+                  ] satisfies GeneralAction[]
                 : []),
               // Withdrawn rather than greyed when this pane has no commands at all: there is no
               // palette to open, which is a different thing from one this device may not use.
@@ -2671,30 +2968,30 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 ? [
                     {
                       id: "agent",
-                      icon: Slash,
+                      icon: "agent-commands",
                       label: translate("composer.controls.agent"),
                       disabled: locked,
                       onSelect: () => requestDrawer("cmd"),
                     },
-                  ]
+                  ] satisfies GeneralAction[]
                 : []),
               ...(todoList.length > 0
                 ? [
                     {
                       id: "todos",
-                      icon: ListTodo,
+                      icon: "todos",
                       label: todoLabel,
                       on: drawer === "todos",
                       expanded: drawer === "todos",
                       onSelect: () => requestDrawer(drawer === "todos" ? null : "todos"),
                     },
-                  ]
+                  ] satisfies GeneralAction[]
                 : []),
               // Display prefs. Not gated on `locked`: wrap/font/raw-terminal are local view
               // state, so a read-only device or a gone pane can still make its mirror readable.
               {
                 id: "display",
-                icon: Settings2,
+                icon: "display-settings",
                 label: translate("composer.controls.displayAria"),
                 word: translate("composer.controls.display"),
                 on: display.open,
@@ -2728,6 +3025,30 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   label: agentsLabel,
                   expanded: agentsOpen,
                   onClick: () => setAgentsOpen(true),
+                }
+              : undefined
+          }
+          // The background jobs: the mark right of the agents mark, while any job is listed. Its badge
+          // counts the running ones. A tap opens the Jobs sheet.
+          jobs={
+            jobList.length > 0
+              ? {
+                  count: runningJobs,
+                  label: jobsLabel,
+                  expanded: jobsOpen,
+                  onClick: () => setJobsOpen(true),
+                }
+              : undefined
+          }
+          // The pinned messages: the mark right of the jobs mark, while the session holds any. Its badge is the
+          // count. A tap opens the Pins sheet.
+          pins={
+            pinCount > 0
+              ? {
+                  count: pinCount,
+                  label: pinsLabel,
+                  expanded: pinsOpen,
+                  onClick: () => setPinsOpen(true),
                 }
               : undefined
           }
@@ -2888,7 +3209,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             act on (M56 spec 07). */}
         <Collapse open={confirmingSend && destructiveNote !== null && !direct.active}>
           {destructiveNote !== null && (
-            <Notice tone="danger" variant="box" className="mb-2" icon={<TriangleAlert />}>
+            <Notice tone="danger" variant="box" className="mb-2" icon={<Icon name="error" />}>
               <span data-slot="composer-destructive">{destructiveNote}</span>
             </Notice>
           )}
@@ -2985,23 +3306,48 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         )}
         <div
           data-slot="composer-box"
+          data-layout={box ? "box" : undefined}
+          data-box={box ? (boxOpen ? "open" : "rest") : undefined}
+          ref={boxRef}
           className={cn(
-            "relative flex items-end gap-1 rounded-xl border border-input bg-background p-1 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
+            box
+              ? // A grid, because the same children change cells between the two shapes. `p-1.5` and
+                // `gap-x-1.5` are 6px of air between the circles and the border and between each
+                // other (the drawn circle stays 36px; its hit area reaches 4px, inside both). There
+                // is no row gap: the field's own padding takes the reach of the row under it. The
+                // frame is the theme's own: the component edge (`--border`), the card fill and the
+                // house corner. Focus no longer turns that edge bright (Altan, 2026-11-08, "Soft ring
+                // on focus"): the edge keeps its colour and a 1px ring of the primary at 30% stands
+                // outside it, a soft 2px line in all. It is a box-shadow, so no state moves the box
+                // (DESIGN.md §2), and armed Type mode keeps its own primary frame without it, below.
+                "relative grid items-center gap-x-1.5 rounded-xl border border-border bg-card p-1.5"
+              : "relative flex items-end gap-1 rounded-xl border border-input bg-background p-1 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
+            // Rest: [Attach][field][main]. Open, bottom row: [Attach][grow space][mic][Send]. Mirrored
+            // for `hand="left"`: [main][field][Attach], and open [Send][mic][grow space][Attach].
+            // Attach keeps its edge in both shapes, so it never moves when the box opens (Altan,
+            // 2026-11-07: the + belongs at the left, as first built).
+            box && !direct.active && "focus-within:shadow-[0_0_0_1px_color-mix(in_oklab,var(--primary)_30%,transparent)]",
+            box && !boxOpen && "grid-cols-[auto_1fr_auto]",
+            // Open, Expand stands between the space and the small mic: [Attach][space][Expand][mic][Send],
+            // mirrored [Send][mic][Expand][space][Attach]. A column with no button in it (no Expand in a
+            // composer mounted alone, no mic without speech) takes no width; the space gives way.
+            box && boxOpen && !mirrored && "grid-cols-[auto_1fr_auto_auto_auto]",
+            box && boxOpen && mirrored && "grid-cols-[auto_auto_auto_1fr_auto]",
             // `hand="left"`: the whole row runs mirrored, so Send stands on the box's left edge, then
             // Attach, then the field. The DOM order is untouched, so the tab and reading order are
             // too. With chips, `flex-wrap` still stacks the chip strip ABOVE the row.
-            hand === "left" && "flex-row-reverse",
+            !box && hand === "left" && "flex-row-reverse",
             // Chips take a line of their own ABOVE the row (ADR 0060). `flex-wrap` plus a
             // full-basis strip does that without re-parenting the field, so the textarea is never
             // remounted (and never loses its caret) when the first chip arrives. With no chips the
             // class is absent and the box is exactly the one row it was.
-            attachments.length > 0 && "flex-wrap",
+            !box && attachments.length > 0 && "flex-wrap",
             // A composer nobody may write to says so as a surface, not just as a placeholder:
             // the fill recedes and both buttons in the box are disabled anyway.
             locked && "bg-muted/40",
             // Armed "Type into terminal". The tint was on the field while the field wore the
             // frame; it follows the frame.
-            direct.active && "border-primary focus-within:border-primary focus-within:ring-primary",
+            direct.active && (box ? "border-primary focus-within:border-primary" : "border-primary focus-within:border-primary focus-within:ring-primary"),
           )}
         >
           {attachments.length > 0 && (
@@ -3009,7 +3355,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // the corner badge and the x, which stand 4px outside each chip.
             <ul
               aria-label={translate("composer.attach.listAria")}
-              className="flex w-full basis-full gap-2 overflow-x-auto px-1 pt-1 pb-0.5"
+              className={cn(
+                "flex w-full basis-full gap-2 overflow-x-auto px-1 pt-1 pb-0.5",
+                // Box layout: the strip is the first row of the open grid, across every column.
+                box && "col-span-full col-start-1 row-start-1",
+              )}
             >
               {attachments.map((attachment) => (
                 <AttachmentChip
@@ -3038,15 +3388,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <ChatInput
             ref={inputRef}
             value={direct.active ? direct.value : voicePreview ?? input}
-            onChange={
-              direct.active
-                ? direct.onChange
-                : (e) => {
-                    rememberCaret(e);
-                    updateInput(e.target.value);
-                    noteOfflineKeystroke(e.target.value);
-                  }
-            }
+            onChange={direct.active ? direct.onChange : onDraftChange}
             onSelect={direct.active ? undefined : rememberCaret}
             onFocus={() => setBoxFocused(true)}
             onBlur={(e) => {
@@ -3100,7 +3442,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // field now, so nothing inside the field needs a strip kept clear for either of them —
               // the field's right side takes no padding of its own, and the box's `gap-1` to attach
               // is what keeps the text off it.
-              "min-w-0 flex-1 min-h-9 pl-2 py-1.5",
+              box
+                ? boxOpen
+                  ? // OPEN: the full width and the height of its own text, no minimum (one line to
+                    // start), growing to the base cap and then scrolling. `pb-1` takes the 4px the
+                    // buttons' hit area reaches up into this field.
+                    "col-span-full col-start-1 row-start-2 min-w-0 px-2 pt-1.5 pb-1"
+                  : // AT REST: the one slim line between Attach and the primary action.
+                    "col-start-2 row-start-1 min-w-0 min-h-9 pl-2 pr-1 py-1.5"
+                : "min-w-0 flex-1 min-h-9 pl-2 py-1.5",
               // The Steer hint is longer than the reply words, so it is drawn smaller. The FIELD'S HEIGHT
               // does not change with it: `text-base` gives the field a unitless line-height, so the
               // placeholder's line box can only shrink (12px x 1.33 against 14-16px x 1.5), and the empty
@@ -3108,7 +3458,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               (staleWords || steerWords) && "placeholder:text-xs",
               // Mirrored, the field's right side stands against the box's border, so it takes the
               // inset the left used to take from Attach.
-              hand === "left" && "pr-2",
+              !box && hand === "left" && "pr-2",
               // Dots only for the handoff from a password prompt. Type mode keeps the line in the
               // field until Enter (issue 534), so there the field would hold the secret in clear.
               // A Type mode the operator armed by hand shows clear text, as every release before
@@ -3126,6 +3476,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // That fact is now handled where it belongs, as a floor inside `applyDraftFontSize`,
               // so every other browser gets the smaller default the operator asked for.
               "font-mono",
+              // The cap (lib/draft-cap.ts, `--draft-cap` in `draftStyle`), in both layouts. It
+              // replaces the primitive's `min(10rem,30dvh)`, which left the reader six lines of chat
+              // on a phone with the keyboard up (Altan, 2026-11-07).
+              "max-h-[var(--draft-cap)]",
             )}
             // Built above, where the two halves and their reasons sit together.
             style={draftStyle}
@@ -3151,10 +3505,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <div
             ref={buttonsRef}
             data-slot="composer-buttons"
+            data-flip-group=""
             data-stacked={stacked ? "true" : "false"}
             className={cn(
-              "flex shrink-0 gap-1 self-end",
-              stacked ? "flex-col items-center" : cn("items-end", hand === "left" && "flex-row-reverse"),
+              // The box layout places every control in its own grid cell, so there the group is no box.
+              box ? "contents" : "flex shrink-0 gap-1 self-end",
+              !box && (stacked ? "flex-col items-center" : cn("items-end", hand === "left" && "flex-row-reverse")),
             )}
           >
             <Button
@@ -3164,6 +3520,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               className={cn(
                 TOOLBAR_TAP_TARGET,
                 "size-9 rounded-full text-muted-foreground",
+                // Box layout: a filled circle, so the icon stands on something (Altan, 2026-11-05).
+                box && "bg-secondary text-foreground",
+                box && (boxOpen ? "row-start-3" : "row-start-1"),
+                // Attach stands at the box's outer edge: the left, or the right under `hand="left"`.
+                box && (mirrored ? (boxOpen ? "col-start-5" : "col-start-3") : "col-start-1"),
                 // The press echo, in the tone this app already uses for "your press landed" —
                 // `variant="default"`, which is what a tapped quick reply and a busy dialog option
                 // both flip to. It was `bg-accent` first, and that was a token chosen by name
@@ -3182,28 +3543,77 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               )}
               disabled={uploading || locked || direct.active}
               onPointerDown={(e) => e.preventDefault()}
-              onClick={() => {
-                echoAttachPress();
-                if (asksWhich) setPicking(true);
-                else photoRef.current?.click();
-              }}
+              onClick={onAttachClick}
               aria-label={translate("composer.attach.aria")}
               aria-haspopup="dialog"
               aria-expanded={asksWhich ? picking : undefined}
             >
               {uploading ? (
-                <Loader2 className="size-4 animate-spin" />
+                <Icon name="busy" className="size-4 animate-spin" />
               ) : (
-                <Paperclip className="size-4" />
+                box ? <Icon name="attach-open" className="size-4" /> : <Icon name="attach" className="size-4" />
               )}
             </Button>
+            {expandShown && (
+              // EXPAND (Altan, 2026-11-08): the same draft in a fullscreen editor over the pane view, for a
+              // long reply (components/composer-expanded.tsx). Only in the open row, between the space and
+              // the small mic, and only where there is a pane view to cover.
+              <Button
+                ref={expandButtonRef}
+                data-slot="composer-expand"
+                type="button"
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  TOOLBAR_TAP_TARGET,
+                  "size-9 rounded-full bg-secondary text-foreground",
+                  "col-start-3 row-start-3",
+                )}
+                disabled={locked}
+                onPointerDown={(e) => e.preventDefault()}
+                onClick={openExpanded}
+                aria-label={translate("composer.expand")}
+              >
+                <Icon name="editor-open" className="size-4" />
+              </Button>
+            )}
+            {expandedOpen && expandArea && boxRef.current && (
+              <ExpandedEditor
+                area={expandArea}
+                box={boxRef.current}
+                fieldRef={expandedRef}
+                value={input}
+                onChange={onDraftChange}
+                onSelect={rememberCaret}
+                placeholder={placeholderWords}
+                fieldStyle={{ fontSize: draftStyle.fontSize, fontFamily: draftStyle.fontFamily }}
+                hand={hand}
+                collapseLabel={translate("composer.collapse")}
+                sendLabel={offline ? translate("composer.send.reconnect") : translate("composer.send.sendAria")}
+                sendInert={sendInert || !hasDraft}
+                onCollapse={closeExpanded}
+                onSend={sendExpanded}
+                leading={expandedLeading}
+                trailing={expandedTrailing}
+                hidden={takeoverOpen}
+              />
+            )}
             {draftMicShown && (
+              // The second microphone (issue 573), beside Attach and so mirrored with it under
+              // `hand="left"`. It opens the same takeover, and the transcript lands at the caret
+              // through `insertTranscript`; a draft is never sent by voice (`acceptTranscript`).
               <Button
                 data-slot="composer-mic-draft"
                 type="button"
                 variant="ghost"
                 size="icon"
-                className={cn(TOOLBAR_TAP_TARGET, "size-9 rounded-full text-muted-foreground")}
+                className={cn(
+                  TOOLBAR_TAP_TARGET,
+                  "size-9 rounded-full text-muted-foreground",
+                  box && "bg-secondary text-foreground",
+                  // Box layout: the small mic stands in the open shape's button row, beside Send.
+                  box && (mirrored ? "col-start-2 row-start-3" : "col-start-4 row-start-3"),
+                )}
                 disabled={micDisabled}
                 aria-pressed={recorder.busy}
                 aria-label={micAriaLabel}
@@ -3229,28 +3639,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 system UI, and the click still counts as the user gesture the browser requires
                 because both happen in this one handler. */}
             <AnchoredMenu
-              open={picking}
+              // Under the fullscreen editor the picker opens from the editor's own row instead.
+              open={picking && !expandedOpen}
               onClose={() => setPicking(false)}
               label={translate("composer.attach.title")}
-              // Attach stands near the box's LEFT edge under `hand="left"`; the panel follows it.
-              className={hand === "left" ? "right-auto left-0" : undefined}
+              // Attach stands near the box's LEFT edge under `hand="left"`; the panel follows it. In the
+              // box layout Attach is the LEFT button and the mirrored hand puts it at the right.
+              className={mirrored !== box ? "right-auto left-0" : undefined}
             >
-              <ActionRow
-                icon={<Image aria-hidden="true" className="size-4 shrink-0" />}
-                label={translate("composer.attach.photos")}
-                onClick={() => {
-                  setPicking(false);
-                  photoRef.current?.click();
-                }}
-              />
-              <ActionRow
-                icon={<FileText aria-hidden="true" className="size-4 shrink-0" />}
-                label={translate("composer.attach.files")}
-                onClick={() => {
-                  setPicking(false);
-                  fileRef.current?.click();
-                }}
-              />
+              {attachRows}
             </AnchoredMenu>
             {/* The Send button's long-press menu, anchored the same way as the attach picker (see above).
                 One row, a named choice: the text goes to this pane as a walky talky message from the
@@ -3264,7 +3661,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             >
               {steerRow && agent !== "omp" && (
                 <ActionRow
-                  icon={<Navigation aria-hidden="true" className="size-4 shrink-0" />}
+                  icon={<Icon name="steer" aria-hidden="true" className="size-4 shrink-0" />}
                   label={translate("composer.steer.row")}
                   onClick={() => {
                     setSendMenu(false);
@@ -3304,7 +3701,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // because this is a state to read, not a deliberate override to arm.
               <Button
                 variant="secondary"
-                className={cn(TOOLBAR_TAP_TARGET, "h-9 shrink-0 rounded-md px-3 text-sm font-semibold")}
+                className={cn(
+                  TOOLBAR_TAP_TARGET,
+                  "h-9 shrink-0 rounded-md px-3 text-sm font-semibold",
+                  box && (mirrored ? "col-start-1" : boxOpen ? "col-start-5" : "col-start-3"),
+                  box && (boxOpen ? "row-start-3" : "row-start-1"),
+                )}
                 onClick={() => onAnswerDialog?.()}
                 aria-label={translate("composer.send.dialogFirst")}
               >
@@ -3313,7 +3715,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             ) : !direct.active && confirmingSend ? (
               <Button
                 variant="destructive"
-                className={cn(TOOLBAR_TAP_TARGET, "h-9 shrink-0 rounded-md px-3 text-sm font-semibold")}
+                className={cn(
+                  TOOLBAR_TAP_TARGET,
+                  "h-9 shrink-0 rounded-md px-3 text-sm font-semibold",
+                  box && (mirrored ? "col-start-1" : boxOpen ? "col-start-5" : "col-start-3"),
+                  box && (boxOpen ? "row-start-3" : "row-start-1"),
+                )}
                 onClick={() => onSendClick(armedWhen.current)}
                 disabled={starting || locked || offline || !hasDraft || sending}
                 title={offline ? translate("composer.send.reconnect") : undefined}
@@ -3326,15 +3733,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // moment there is anything to send. It used to be a second, permanent control tucked
               // inside the field beside the attach button — deliberately, to avoid a split primary
               // action. The v1 beta said that reads the workflow wrong: you either dictate a message
-              // or you type one, and nobody dictates into the middle of a draft. So the field paid
-              // 36px of its width, on every render, for a control that is only ever wanted on an empty
-              // box. An empty box has no Send either (`send` refuses a blank value), so this branch
-              // takes over a button that could do nothing anyway — it replaces no capability.
+              // or you type one. So the field paid 36px of its width, on every render, for a control
+              // that is mostly wanted on an empty box. An empty box has no Send either (`send` refuses
+              // a blank value), so this branch takes over a button that could do nothing anyway. It
+              // replaces no capability. A box that already holds a draft gets the small mic beside
+              // Attach instead (issue 573), because a second clip is how a person adds to it.
               <Button
                 data-slot="composer-primary"
                 size="icon"
                 variant={recorder.busy ? "destructive" : "default"}
-                className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 rounded-full")}
+                className={cn(
+                  TOOLBAR_TAP_TARGET,
+                  "size-9 shrink-0 rounded-full",
+                  box && (mirrored ? "col-start-1" : boxOpen ? "col-start-5" : "col-start-3"),
+                  box && (boxOpen ? "row-start-3" : "row-start-1"),
+                )}
                 disabled={micDisabled}
                 aria-pressed={recorder.busy}
                 // The bridge's own words when it cannot serve — the operator's next move is on the
@@ -3351,9 +3764,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 data-slot="composer-primary"
                 size="icon"
                 {...sendHold}
-                className={cn(TOOLBAR_TAP_TARGET, "size-9 shrink-0 select-none rounded-full [-webkit-touch-callout:none]")}
-                onClick={direct.active ? () => direct.deactivate() : () => onSendClick()}
-                disabled={locked || sending || walky.sending || ((starting || offline) && !direct.active)}
+                // Mouse down, not pointer down: cancelling `pointerdown` makes iPhone WebKit drop the click that
+                // follows (see the belt's clear control in actions-row.tsx), and the press must not move focus
+                // off the field or the first tap only lowers the keyboard.
+                onMouseDown={(e) => e.preventDefault()}
+                className={cn(
+                  TOOLBAR_TAP_TARGET,
+                  "size-9 shrink-0 select-none rounded-full [-webkit-touch-callout:none]",
+                  sendInert && "opacity-50",
+                  box && (mirrored ? "col-start-1" : boxOpen ? "col-start-5" : "col-start-3"),
+                  box && (boxOpen ? "row-start-3" : "row-start-1"),
+                )}
+                // INERT, NOT `disabled`. A disabled button has `pointer-events: none` (ui/button.tsx), so a tap on
+                // a busy Send fell through to the box and blurred the field. `aria-disabled` keeps the button under
+                // the finger, and the click is dropped here. `canMessage` (above) already holds the hold handlers
+                // off in every inert state, so a long press cannot open the menu either.
+                aria-disabled={sendInert ? true : undefined}
+                onClick={
+                  sendInert
+                    ? undefined
+                    : direct.active
+                      ? () => direct.deactivate()
+                      : () => onSendClick()
+                }
                 title={offline && !direct.active ? translate("composer.send.reconnect") : undefined}
                 aria-label={
                   direct.active
@@ -3365,13 +3798,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 aria-pressed={direct.active}
               >
                 {direct.active ? (
-                  <Keyboard className="size-4" />
+                  <Icon name="direct-typing" className="size-4" />
                 ) : sending ? (
-                  <Loader2 className="size-4 animate-spin" />
+                  <Icon name="busy" className="size-4 animate-spin" />
                 ) : justSent ? (
-                  <Check className="size-4" />
+                  <Icon name="sent-ok" className="size-4" />
+                ) : box ? (
+                  <Icon name="send-ready" className="size-4" />
                 ) : (
-                  <Send className="size-4" />
+                  <Icon name="send" className="size-4" />
                 )}
               </Button>
             )}
@@ -3389,6 +3824,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           elapsed={recorder.elapsedLabel}
           source={recorder.meter}
           hand={hand}
+          layout={layout}
           padClassName={blockPad}
           keyboardOpened={openedByKeyboard.current}
           sends={!starting && handsFree && !hasDraft && noEcho === null}
@@ -3408,6 +3844,23 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         subagents={subagentList}
         onOpen={openSubagent}
       />
+
+      {/* The background jobs, over the page: the jobs mark opens it, and nothing in flow moves. */}
+      <JobsSheet open={jobsOpen && jobList.length > 0} onClose={() => setJobsOpen(false)} title={jobsLabel} jobs={jobList} />
+
+      {/* The pinned messages, over the page: the pins mark opens it, and nothing in flow moves. */}
+      {pins !== undefined && (
+        <PinsSheet
+          open={pinsOpen && pinCount > 0}
+          onClose={() => setPinsOpen(false)}
+          scope={scope}
+          paneId={paneId}
+          rows={pins.rows}
+          onUnpin={pins.onUnpin}
+          onOpened={pins.onOpened}
+          onShow={pins.onShow}
+        />
+      )}
 
       {isShell && <SentSheet open={sentOpen} onClose={() => setSentOpen(false)} cwd={cwd} scope={scope} onPick={pickSent} />}
 

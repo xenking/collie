@@ -60,6 +60,7 @@ export const API_ERROR_CODES = [
   "launch.not_allowlisted",
   "launch.pane_unknown",
   "launch.unknown_harness",
+  "launch.row_not_from_lead",
   "launch.bad_folder",
   "launch.folder_missing",
   "launch.no_device",
@@ -85,8 +86,6 @@ export const API_ERROR_CODES = [
   // Worktrees — /api/worktree and its plan (ADR 0032, ADR 0093)
   "worktree.create_failed",
   "worktree.created_not_opened",
-  "worktree.busy",
-  "worktree.ambiguous_branch",
   "worktree.branch_required",
   "worktree.not_a_repo",
   "worktree.invalid_branch",
@@ -162,6 +161,8 @@ export const API_ERROR_CODES = [
   "update.none_available",
   "update.peers_packaged",
   "update.packaged",
+  "update.dev_lead",
+  "update.manager_unreachable",
   "update.start_failed",
   "update.request_id_required",
   "update.rollback_unavailable",
@@ -170,6 +171,10 @@ export const API_ERROR_CODES = [
 
   // Reopening a durable program's closed conversation, POST /api/durable/conversation/:id/reopen
   "durable.reopen_failed",
+
+  // The anonymous install count, POST /api/telemetry
+  "telemetry.setting_invalid",
+  "telemetry.request_id_required",
 ] as const;
 
 /** Every code the bridge can send. Derived from the list, so there is exactly one place to edit. */

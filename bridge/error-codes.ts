@@ -101,6 +101,12 @@ export const ERROR_CODES = {
    * the list `GET /api/launchers` answered, so nothing a phone was shown is refused (ADR 0091).
    */
   "launch.unknown_harness": "unknown agent: {harness}",
+  /**
+   * A launch named a `command` this host does not hold and carried a `row` for it, and the call did
+   * not come over the crew link from this machine's lead. Only the lead may carry a row (ADR 0127
+   * point 3), so a phone still names rows and never sends a line. Nothing ran.
+   */
+  "launch.row_not_from_lead": "a row can only come from this machine's lead",
   /** A launch's `cwd` carries a control character, a `..` segment, or `~name`. A path with no leading `/` or `~` is a folder under home. */
   "launch.bad_folder": "the folder cannot be used: no .. and no control characters",
   /** A launch's folder is not a directory on the machine that runs it. Nothing was created. */
@@ -152,18 +158,14 @@ export const ERROR_CODES = {
   "folders.favourites_full": "favourites are full ({max}); remove one first",
 
   // ── Worktrees: /api/worktree and its plan (ADR 0032, ADR 0093) ─────────────────────
-  /** Creation refused. `{reason}` is the multiplexer's own words, Git's sentence included. */
+  /** Creation refused. `{reason}` is Git's own sentence (`git worktree add`, bridge/worktree-add.ts). */
   "worktree.create_failed": "{reason}",
   /**
    * The checkout was made and could not be shown — the branch EXISTS and nothing displays it.
-   * Distinct from `create_failed` because the recovery is opposite: open it, never create it again
-   * (a second create answers `create_failed`, the path being taken). Probed on herdr 0.8.2.
+   * Distinct from `create_failed` because the recovery is opposite: the checkout stays, and the same
+   * create again finds it and only opens it (M81).
    */
   "worktree.created_not_opened": "the worktree was created but could not be opened: {reason}",
-  /** Another worktree operation is still running — herdr serialises them. Try again in a moment. */
-  "worktree.busy": "{reason}",
-  /** The branch name matched more than one thing, so the multiplexer would not guess. */
-  "worktree.ambiguous_branch": "{reason}",
   /** The request named no branch, or named one that is only whitespace. */
   "worktree.branch_required": "branch required",
   /** This space is not in a Git work tree, so it has no worktrees to show. */
@@ -321,6 +323,18 @@ export const ERROR_CODES = {
    * only in the client, whose disabled button this file's own contract calls a courtesy.
    */
   "update.packaged": "updates come from this machine's package manager — Collie does not replace its files",
+  /**
+   * The lead runs a development build (`<version>-dev+<sha>`). Such a build states no release, so no
+   * member would ever take a turn from it (`crew/follow.ts`); refused before a leg is queued.
+   */
+  "update.dev_lead": "this machine runs a development build, so it cannot lead an update; deploy it from its checkout",
+  /**
+   * The bridge runs as its systemd unit and the user manager did not answer, twice. The only way out
+   * of the unit's cgroup is a `systemd-run` handoff, and a runner left inside it would be stopped
+   * with the service by its own restart (`updateLaunchRefusal`). Nothing was started or written.
+   */
+  "update.manager_unreachable":
+    "the update could not start: the service manager did not answer; run `collie update` in a shell on this machine",
   /** The handoff itself failed — nothing was staged and nothing restarted. */
   "update.start_failed": "the update could not be started: {reason}",
   /**
@@ -341,6 +355,15 @@ export const ERROR_CODES = {
   // ── A durable program's history: POST /api/durable/conversation/:id/reopen (M53 spec 11) ───
   /** The program would not show the conversation again (unknown, refused, or it takes no reopen). */
   "durable.reopen_failed": "{reason}",
+
+  // ── The anonymous install count: POST /api/telemetry (M86 spec 02) ───
+  /** A telemetry switch whose body named no setting, or a word other than on or off. */
+  "telemetry.setting_invalid": "the telemetry setting must be on or off; nothing was changed",
+  /**
+   * A telemetry switch without a request id. The id is the receipt a retry is answered with, so a
+   * body without one could not be told from a second, different tap.
+   */
+  "telemetry.request_id_required": "this action needs a request id; nothing was changed",
 } as const;
 
 /** Every code the bridge can send. The client mirror restates this union verbatim. */

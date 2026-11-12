@@ -35,12 +35,13 @@
 // wrapped rows under it line up like a pointed list between two rules, and they are one paragraph.
 // The same rows with a row cut by an ellipsis read as neither: no cue, flagged `cutWrap`, unreadable.
 // A layout that names `frame.draftLines` reads a draft typed with newlines the same way, when its rows
-// hold no option, key hint or named command list: its dialogs never point with the prompt glyph.
+// hold no option, key hint or named command list: its dialogs never point with the prompt glyph. One that
+// names `frame.draftCaret` does so only while those rows also hold its editor's one reverse-video cursor cell.
 //
 // Pure: the same rows always give the same answer.
 
 import { displayWidth } from "../text-width";
-import { commandListNear, openedByText, pointsAt, type CommandListRead } from "./command-list";
+import { commandListNear, edgeRunListRow, openedByText, pointsAt, type CommandListRead } from "./command-list";
 import { popupUnder, type PopupRead } from "./popup";
 import { promptDraft, rowText, type Frame, type FrameRow, type IdleProfile } from "./frame";
 import { isSingleKeyRow } from "./key-row";
@@ -137,7 +138,7 @@ const KEY_ATOM =
 const KEY = `${KEY_ATOM}(?:\\s*/\\s*${KEY_ATOM})*`;
 /** What a dialog's footer says a key does. A composer's footer says send, newline, mode or cycle. */
 const VERB =
-  "(?:confirm|select|cancel|submit|continue|choose|proceed|approve|deny|reject|accept|go back|back|exit|close|dismiss|navigate|toggle|answer|adjust|amend|move|pick|view|stop|quit|filter|search|scroll|switch|apply|save|skip|next|previous|prev|open|allow|decline|change|clear|reset|focus|use)";
+  "(?:confirm|select|cancel|submit|continue|choose|proceed|approve|deny|reject|accept|go back|back|exit|close|dismiss|navigate|toggle|answer|adjust|amend|move|pick|view|stop|quit|filter|search|scroll|switch|apply|save|skip|next|previous|prev|open|allow|decline|change|clear|reset|focus|use|details)";
 const KEY_HINT_SOURCE = `(?:^|[^\\w+])(?:press\\s+)?${KEY}\\s*(?:to\\s+|:\\s*|=\\s*|\\s+)${VERB}s?\\b`;
 const KEY_HINT = new RegExp(KEY_HINT_SOURCE, "iu");
 const KEY_HINTS = new RegExp(KEY_HINT_SOURCE, "giu");
@@ -453,6 +454,17 @@ export function ownCommandList(texts: readonly string[], frame: Frame | null, id
   return list !== null && (pointsAt(list, frame.interior.text, rows) || openedByText(list, frame.interior.text, rows)) ? list : null;
 }
 
+/**
+ * Whether a command list drawn in the box's own edge run (`commandList.inEdgeRun`) stands right over the
+ * top edge and is not the box's own typeahead ({@link ownCommandList}): its pointer rests on another
+ * command, or was not read. Enter picks the list's entry there, so the list holds the keys the way a
+ * dialog over the box does. False on a profile whose list is not drawn in that run.
+ */
+export function edgeListHolds(texts: readonly string[], frame: Frame, idle: IdleProfile, styled?: readonly FrameRow[]): boolean {
+  if (frame.top === 0 || !edgeRunListRow(texts[frame.top - 1] ?? "", idle.volatile.below.commandList)) return false;
+  return ownCommandList(texts, frame, idle, styled) === null;
+}
+
 /** The rows with the rows `first` to `last` read as blank. */
 function withoutSpan(rows: readonly FrameRow[], span: { readonly first: number; readonly last: number } | null): readonly FrameRow[] {
   if (span === null) return rows;
@@ -518,35 +530,6 @@ export function withoutCommandList(rows: readonly FrameRow[], list: CommandListR
   return withoutSpan(rows, list);
 }
 
-/** A second column: text after a run of eight blanks or more, the way a list entry sets its description. */
-const SECOND_COLUMN = /\S {8,}\S/u;
-
-/**
- * The rows with the pointer glyph that leads row `at` read as a blank cell, the rest of the row kept.
- * A row whose first non-blank cell is no pointer glyph is kept as it is, and so is a row with a second
- * column: that is a list entry and its description (a palette a frame walk took for the box), not a
- * prompt and its draft.
- */
-function withoutLeadingPointer(rows: readonly FrameRow[], at: number): readonly FrameRow[] {
-  const row = rows[at];
-  const text = row === undefined ? "" : rowText(row);
-  // A box side in front of the glyph (`│ > ` in OMP's answer editor) reads as a blank cell, the length kept.
-  const lead = POINTER_ROW.exec(unboxed(text));
-  if (row === undefined || lead === null || SECOND_COLUMN.test(text)) return rows;
-  // The glyph's offset in the row's text: the blanks before it. Only the run that holds it is copied.
-  const segments = [...row.segments];
-  let offset = lead[1]!.length;
-  for (const [i, run] of segments.entries()) {
-    if (offset >= run.text.length) {
-      offset -= run.text.length;
-      continue;
-    }
-    segments[i] = { ...run, text: `${run.text.slice(0, offset)} ${run.text.slice(offset + lead[2]!.length)}` };
-    break;
-  }
-  return rows.map((candidate, i) => (i === at ? { segments } : candidate));
-}
-
 /**
  * The rows with the box's own prompt glyph read as blank ({@link Frame.ownPrompt}): the prompt row's
  * text in front of the draft hole turns into spaces, so the columns hold. Every other row, and the
@@ -581,24 +564,23 @@ export function noticeOver(texts: readonly string[], frame: Frame | null, idle: 
  * are no pointed list. The second also reads the box's
  * own prompt glyph ({@link withoutOwnPrompt}) as blank, and the prompt glyph over a soft-wrapped draft
  * ({@link draftWrap}); a draft-shaped box cut by an ellipsis reads as no cue at all, flagged `cutWrap`.
+ * Both read the box's own key hint row ({@link Frame.hint}) as blank.
  */
 export function readCuesFor(allRows: readonly FrameRow[], frame: Frame | null, idle: IdleProfile | null): CueRead {
   const texts = allRows.map(rowText);
-  const rows = withoutPromptEchoes(withoutPopup(withoutCommandList(allRows, frame === null ? null : ownCommandList(texts, frame, idle, allRows)), popupAt(texts, frame, idle)), frame, idle);
+  // The box's own key hint inside it (`frame.hint`, a layout's `trailer.hint`) is no dialog's footer.
+  const unhinted = withoutSpan(allRows, frame?.hint ?? null);
+  const rows = withoutPromptEchoes(withoutPopup(withoutCommandList(unhinted, frame === null ? null : ownCommandList(texts, frame, idle, allRows)), popupAt(texts, frame, idle)), frame, idle);
   const plain = readCues(rows, frame, noticeOver(texts, frame, idle));
   if (idle?.dialogsInBox !== true || frame === null) return plain;
   // From the top edge down: a dialog in the box's place lies there, and the transcript above is no part of it.
   // The box's own prompt glyph, where the layout names one (`frame.ownPrompt`), is no pointer there.
   const at = frame.top;
-  // The box's own trailer rows are the box's: the key hints of a dialog's text field (OMP's answer
-  // editor, `⏎ or ⌃Q submit  esc cancel`) name two keys, which would read as the dialog that hides the box.
-  const own = frame.trailer === undefined ? rows : withoutSpan(rows, frame.trailer);
   // A draft-shaped box with a row cut by an ellipsis is neither a draft nor a dialog: claim unreadable.
-  if (plain.strength !== "strong" && wrapUnderGlyph(withoutOwnPrompt(own, frame).map(rowText), frame, idle) === "cut") {
+  if (plain.strength !== "strong" && wrapUnderGlyph(withoutOwnPrompt(rows, frame), frame, idle) === "cut") {
     return { ...plain, cues: [], strength: "none", cutWrap: true };
   }
-  const prompt = frame.submitCloses === true ? withoutLeadingPointer(withoutOwnPrompt(own, frame), frame.interior.prompt) : withoutPromptGlyph(withoutOwnPrompt(own, frame), frame, idle);
-  const down = readCues(withoutDraftContinuation(prompt, frame, idle).slice(at), null, null);
+  const down = readCues(withoutDraftContinuation(withoutPromptGlyph(withoutOwnPrompt(rows, frame), frame, idle), frame, idle).slice(at), null, null);
   // A weak shape inside the box is the box's own hint row (OMP draws "to change thinking effort" there).
   if (down.strength !== "strong" || plain.strength === "strong") return plain;
   return { ...down, cluster: down.cluster.map((i) => i + at), cues: down.cues.map((cue) => ({ kind: cue.kind, row: cue.row + at })) };
@@ -627,7 +609,8 @@ function withoutDraftContinuation(rows: readonly FrameRow[], frame: Frame, idle:
  * `lines`: a layout that names `frame.draftLines` says no dialog in its box points with the prompt glyph.
  * There a box that fails the wrap test is still the draft's own lines when {@link ownLines} holds: no row
  * holds an option or a key hint, and no list the profile names stands in the box. Any of those keeps
- * the box a list.
+ * the box a list. A layout that names `frame.draftCaret` says its editor draws its cursor as one
+ * reverse-video cell: there the same holds only while the box's rows hold that cell ({@link oneCaretCell}).
  *
  * `cut`: the rows pass that test, but a row ends in an ellipsis ({@link endsInEllipsis}). pi cuts a menu
  * or hint row wider than the box with `…` (or `...`), so the row fills the width the way a soft wrap
@@ -636,10 +619,30 @@ function withoutDraftContinuation(rows: readonly FrameRow[], frame: Frame, idle:
  * a tap's Enter would submit the draft. So `cut` makes the read unreadable ({@link CueRead.cutWrap}):
  * no dialog card, no taps, no free Send. Unreadable is the safe failure; a wrong dialog is not.
  */
-function draftWrap(texts: readonly string[], frame: Frame, idle: IdleProfile): DraftRead {
+function draftWrap(rows: readonly FrameRow[], frame: Frame, idle: IdleProfile): DraftRead {
+  const texts = rows.map(rowText);
   const soft = softWrap(texts, frame);
-  if (soft !== "no" || idle.frame.draftLines !== true) return soft;
-  return ownLines(texts, frame, idle) ? "lines" : "no";
+  if (soft !== "no") return soft;
+  const lines = idle.frame.draftLines === true || (idle.frame.draftCaret === true && oneCaretCell(rows, frame));
+  return lines && ownLines(texts, frame, idle) ? "lines" : "no";
+}
+
+/**
+ * Whether a found box's rows, from its prompt row down to its last interior row, hold exactly one
+ * reverse-video run with visible text, and that run is one cell wide: an editor's own cursor drawn as a
+ * cell (`frame.draftCaret`). A text field's cursor is one cell; a dialog's highlighted row is wider, and
+ * two cells are no one cursor.
+ */
+function oneCaretCell(rows: readonly FrameRow[], frame: Frame): boolean {
+  let cells = 0;
+  for (let i = frame.interior.prompt; i <= frame.interior.last && i < rows.length; i++) {
+    for (const run of rows[i]!.segments) {
+      if (run.inverse !== true || run.text.length === 0) continue;
+      if (displayWidth(run.text) !== 1) return false;
+      cells++;
+    }
+  }
+  return cells === 1;
 }
 
 /** The {@link draftWrap} test of one paragraph soft-wrapped to the box's width, for every layout. */
@@ -649,7 +652,8 @@ function softWrap(texts: readonly string[], frame: Frame): DraftRead {
   // A blank top edge gives no width to fill: read no wrap.
   if (width <= WRAP_SLACK) return "no";
   const { prompt } = frame.interior;
-  let last = frame.interior.last;
+  // The trailer under the draft (an open box's statusline) is no wrapped row of it.
+  let last = frame.trailer === undefined ? frame.interior.last : frame.trailer.first - 1;
   while (last > prompt && isBlank(texts[last]!)) last--;
   if (last === prompt) return "no";
   let cut = false;
@@ -695,11 +699,12 @@ function endsInEllipsis(text: string): boolean {
 
 /** The {@link draftWrap} of a box whose prompt row opens on a pointer glyph the frame took as the prompt
  *  marker (the draft does not start with it), or `no` for any other box. */
-function wrapUnderGlyph(texts: readonly string[], frame: Frame, idle: IdleProfile): DraftRead {
+function wrapUnderGlyph(rows: readonly FrameRow[], frame: Frame, idle: IdleProfile): DraftRead {
   if (frame.placeholder) return "no";
+  const texts = rows.map(rowText);
   const glyph = texts[frame.interior.prompt]!.trimStart()[0];
   if (glyph === undefined || !POINTERS.includes(glyph) || frame.interior.text.startsWith(glyph)) return "no";
-  return draftWrap(texts, frame, idle);
+  return draftWrap(rows, frame, idle);
 }
 
 /** The rows with the pointer glyph the box's prompt row opens on read as blank, when the frame took it as
@@ -707,7 +712,7 @@ function wrapUnderGlyph(texts: readonly string[], frame: Frame, idle: IdleProfil
  *  layout's own lines ({@link draftWrap}). */
 function withoutPromptGlyph(rows: readonly FrameRow[], frame: Frame, idle: IdleProfile): readonly FrameRow[] {
   const texts = rows.map(rowText);
-  const draft = wrapUnderGlyph(texts, frame, idle);
+  const draft = wrapUnderGlyph(rows, frame, idle);
   if (draft !== "wrapped" && draft !== "lines") return rows;
   const glyph = texts[frame.interior.prompt]!.trimStart()[0]!;
   const segments = [...rows[frame.interior.prompt]!.segments];

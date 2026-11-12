@@ -129,6 +129,9 @@ const AGENT_VIEW_KEYS = {
   // Not a crew dimension: the pane's running subagents (bridge/subagents.ts), absent when none is
   // running or on an older bridge.
   subagents: true,
+  // Not a crew dimension: the pane's background jobs (bridge/jobs-journal.ts), absent when there are
+  // none or on an older bridge.
+  jobs: true,
   // Not a crew dimension: the model the pane's agent is on, from the same probe as `cache`, and
   // absent until that agent has taken one turn. An older bridge or peer omits it.
   model: true,
@@ -173,6 +176,10 @@ const AGENT_VIEW_KEYS = {
   instance: true,
   // Not a crew dimension: the pane's usage dots (bridge/usage.ts), present only while the statusLine wrapper reports them.
   usage: true,
+  // A session turned its walky talky off (M89). Present only while it is off, so a solo golden body carries no such key.
+  walkyOff: true,
+  // How many pins the pane's session holds (M90). Present only above zero, so a solo golden body carries no such key.
+  pins: true,
 } satisfies Record<keyof AgentView, true>;
 
 const DEVICE_AUTH_KEYS = {
@@ -228,6 +235,9 @@ const UPDATE_INFO_KEYS = {
   // neither, and that reads as Stable with no way back to offer.
   line: true,
   back: true,
+  // The build the lead answers the crew with (2026-11-09). Optional and ABSENT on a solo install: the
+  // bridge sends it only while a trust store exists.
+  build: true,
 } satisfies Record<keyof UpdateInfo, true>;
 
 describe("solo zero-tax — the client's mirror types carry no crew dimension", () => {
@@ -287,12 +297,14 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
       "hooks",
       "host",
       "instance",
+      "jobs",
       "kind",
       "lastActiveAt",
       "lastSeenAt",
       "model",
       "paneId",
       "paneLabel",
+      "pins",
       "progress",
       "readableLines",
       "sendProtocol",
@@ -311,6 +323,7 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
       "todos",
       "turnId",
       "usage",
+      "walkyOff",
       "workspaceId",
       "workspaceLabel",
       "workspaceNumber",
@@ -320,6 +333,9 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
       // The way back to Stable (M60 spec 01) — optional, sent only in that one case.
       "back",
       "bridgeStale",
+      // The build the lead answers the crew with (2026-11-09) — optional, sent only while a trust
+      // store exists, so a solo payload carries none.
+      "build",
       "checkedAt",
       "current",
       // The two bands the operator can close (M17/08) — optional here, because a bridge older than

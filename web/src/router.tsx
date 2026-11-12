@@ -8,6 +8,7 @@ import { UPDATE_MODE_HOLD, isReloadHeldBy, subscribeReloadHeld } from "@/lib/rel
 
 import { BootSplash, RootError, RootLayout } from "@/routes/root";
 import { HomeRoute } from "@/routes/home";
+import { SlotRoute } from "@/routes/slot";
 import { SpaceRoute } from "@/routes/space";
 import { NewRoute } from "@/routes/new";
 import { NewAddRoute } from "@/routes/new-add";
@@ -26,6 +27,7 @@ import {
   SettingsVoiceHostRoute,
   SettingsVoiceModelRoute,
   SettingsSystemRoute,
+  SettingsInstallCountRoute,
 } from "@/routes/settings-sections";
 import { CrewRoute } from "@/routes/crew";
 import { MachineRoute } from "@/routes/machine";
@@ -88,6 +90,8 @@ export const router = createBrowserRouter([
     HydrateFallback: BootSplash,
     children: [
       { index: true, element: <HomeRoute /> },
+      // A permanent address for one browser tab; it replaces itself with that tab's last pane (lib/slots.ts).
+      { path: "slot/:slot", element: <SlotRoute /> },
       { path: "space/:spaceId", element: <SpaceRoute /> },
       // The New page (M48), a page since 1.19.0 and a bottom sheet before. No loader: it reads the root
       // snapshot (for a pane's folder and branch) and asks the chosen machine's bridge for its own lists.
@@ -124,6 +128,8 @@ export const router = createBrowserRouter([
       // to hold — a revoke or a pair is then the app's standard mutation shape (api call →
       // revalidate), with no second data path.
       { path: "settings/system", loader: devicesLoader, element: <SettingsSystemRoute /> },
+      // One level below System, like Voice's two pages: the install count's switch and its explanation.
+      { path: "settings/system/install-count", element: <SettingsInstallCountRoute /> },
       // The Updates page, a sibling of settings and crew. No loader of its own: everything on it is
       // either the snapshot (root loader) or the card's own read of /api/update/check. It is
       // deliberately ON the poll loop for `crew`'s stated reason — a run in progress and a member

@@ -482,6 +482,8 @@ interface Spec14Case {
   readonly queueKey?: string;
   /** The pause after the text write the profile names (`paste.settleMs`, #507), where it names one. */
   readonly pasteSettleMs?: number;
+  /** A whole-text paste the profile measured (`paste.block`) and what its fold counts (`paste.foldLines`), where it names one. */
+  readonly pasteBlock?: { readonly foldLines: "breaks" | "lines" };
 }
 
 const SPEC14_CASES: readonly Spec14Case[] = [
@@ -503,6 +505,7 @@ const SPEC14_CASES: readonly Spec14Case[] = [
       { anchor: "top", row: "  ┃  hello there" },
     ],
     collapse: { text: "[Pasted ~12 lines]", group: "lines", value: "12" },
+    pasteBlock: { foldLines: "lines" },
     submit: ["Enter"],
     probeStatus: "provisional",
     enterWhileRunning: "queues",
@@ -750,7 +753,8 @@ describe.each(SPEC14_CASES)("the $id profile (M56 spec 14)", (c) => {
     expect(p.keys.queueKey).toBe(c.queueKey);
     expect(p.reservedLeads).toEqual(c.reservedLeads ?? ["/", "!", "@"]);
     expect(p.probe.char.length).toBeGreaterThan(0);
-    expect(p.paste).toEqual(c.pasteSettleMs === undefined ? { bracketed: true } : { bracketed: true, settleMs: c.pasteSettleMs });
+    const written = c.pasteSettleMs === undefined ? { bracketed: true } : { bracketed: true, settleMs: c.pasteSettleMs };
+    expect(p.paste).toEqual(c.pasteBlock === undefined ? written : { ...written, block: true, foldLines: c.pasteBlock.foldLines });
     expect(p.hooks).toBeDefined();
   });
 
@@ -810,6 +814,10 @@ describe("the frame schema of the interior walk (M56 spec 14)", () => {
     ["an underPainted flag with no under pattern", ["idle", "frame", "underPainted"], true, "idle.frame.underPainted"],
     ["an ownPrompt flag that is no boolean", ["idle", "frame", "ownPrompt"], "yes", "idle.frame.ownPrompt"],
     ["a draftLines flag that is no boolean", ["idle", "frame", "draftLines"], "yes", "idle.frame.draftLines"],
+    ["a draftCaret flag that is no boolean", ["idle", "frame", "draftCaret"], "yes", "idle.frame.draftCaret"],
+    ["a layout placeholder pattern list that is no list", ["idle", "frame", "placeholderPatterns"], "^Try", "idle.frame.placeholderPatterns"],
+    ["an empty layout placeholder pattern list", ["idle", "frame", "placeholderPatterns"], [], "idle.frame.placeholderPatterns"],
+    ["a layout placeholder pattern that is no expression", ["idle", "frame", "placeholderPatterns"], ["[unclosed"], "idle.frame.placeholderPatterns[0]"],
     ["a dialogsInBox flag that is no boolean", ["idle", "dialogsInBox"], "yes", "idle.dialogsInBox"],
     ["a promptEchoes flag that is no boolean", ["idle", "promptEchoes"], "yes", "idle.promptEchoes"],
     ["a placeholder prefix list that is no list", ["idle", "placeholders", "prefixes"], "Ask", "idle.placeholders.prefixes"],
@@ -817,6 +825,7 @@ describe("the frame schema of the interior walk (M56 spec 14)", () => {
     ["an empty placeholder pattern list", ["idle", "placeholders", "patterns"], [], "idle.placeholders.patterns"],
     ["a placeholder pattern that is no expression", ["idle", "placeholders", "patterns"], ["[unclosed"], "idle.placeholders.patterns[0]"],
     ["a placeholder anyText flag that is no boolean", ["idle", "placeholders", "anyText"], "yes", "idle.placeholders.anyText"],
+    ["a placeholder caretOnGhost flag that is no boolean", ["idle", "placeholders", "caretOnGhost"], "yes", "idle.placeholders.caretOnGhost"],
     ["an answer prompt that is no expression", ["idle", "answerPrompt"], "[unclosed", "idle.answerPrompt"],
   ];
   for (const [name, path, value, field] of cases) {
@@ -836,6 +845,13 @@ describe("the frame schema of the interior walk (M56 spec 14)", () => {
     expect(parseProfile(rawClaude()).idle.placeholders.anyText).toBe(true);
     expect(parseProfile(rawOpencode()).idle.placeholders.anyText).toBeUndefined();
     expect(parseProfile(change(rawClaude(), ["idle", "placeholders", "anyText"], false)).idle.placeholders.anyText).toBeUndefined();
+  });
+
+  it("reads the caret-on-ghost switch (`caretOnGhost`, M83 spec 05): absent means on, a shell prompt's profile turns it off", () => {
+    expect(parseProfile(rawClaude()).idle.placeholders.caretOnGhost).toBeUndefined();
+    expect(parseProfile(change(rawClaude(), ["idle", "placeholders", "caretOnGhost"], true)).idle.placeholders.caretOnGhost).toBeUndefined();
+    expect(parseProfile(change(rawClaude(), ["idle", "placeholders", "caretOnGhost"], false)).idle.placeholders.caretOnGhost).toBe(false);
+    expect(parseProfile(parseJsonObject(readFileSync(join(PROFILES_DIR, "cursor.json"), "utf8"))!).idle.placeholders.caretOnGhost).toBe(false);
   });
 
   it("reads a scrolling box (`scroll`, omp gang 2026-10-25) and refuses a bad one", () => {
@@ -863,7 +879,8 @@ describe("the frame schema of the interior walk (M56 spec 14)", () => {
     expect(failure(change(own, ["idle", "frame", "rows"], undefined)).path).toBe("idle.frame.ownPrompt");
     const pi = parseProfile(parseJsonObject(readFileSync(join(PROFILES_DIR, "pi.json"), "utf8"))!);
     expect(pi.idle.frame.ownPrompt).toBeUndefined();
-    expect(pi.idle.frameAlternates?.map((frame) => frame.ownPrompt)).toEqual([true]);
+    // The rail layout (issue 747) names no glyph of its own: every row of it carries the rail.
+    expect(pi.idle.frameAlternates?.map((frame) => frame.ownPrompt)).toEqual([true, true, undefined]);
   });
 
   it("names a newline draft as the box's own lines (`draftLines`) on Muse alone, never on pi (#552)", () => {
@@ -875,6 +892,17 @@ describe("the frame schema of the interior walk (M56 spec 14)", () => {
       expect(read(id).frameAlternates?.every((frame) => frame.draftLines === undefined) ?? true, id).toBe(true);
     }
     expect(parseProfile(change(rawClaude(), ["idle", "frame", "draftLines"], false)).idle.frame.draftLines).toBeUndefined();
+  });
+
+  it("names the caret-proven newline draft (`draftCaret`) on pi's main frame alone (#722)", () => {
+    const read = (id: string) => parseProfile(parseJsonObject(readFileSync(join(PROFILES_DIR, `${id}.json`), "utf8"))!).idle;
+    const named = readdirSync(PROFILES_DIR)
+      .filter((file) => file.endsWith(".json"))
+      .map((file) => file.slice(0, -".json".length))
+      .filter((id) => read(id).frame.draftCaret === true || (read(id).frameAlternates?.some((frame) => frame.draftCaret === true) ?? false));
+    expect(named).toEqual(["pi"]);
+    expect(read("pi").frameAlternates?.every((frame) => frame.draftCaret === undefined)).toBe(true);
+    expect(parseProfile(change(rawClaude(), ["idle", "frame", "draftCaret"], false)).idle.frame.draftCaret).toBeUndefined();
   });
 
   it("takes keys.interruptClearsDraft as a boolean and nothing else (M68 spec 01)", () => {

@@ -219,6 +219,21 @@ export interface CommandListRows {
    */
   readonly pointerBold?: boolean;
   /**
+   * The highlighted entry carries no pointer glyph: it is the one entry-shaped row whose command
+   * stands on a background other than the box's own fill (what the box's top edge row paints in the
+   * column where the command starts), and `pointer` then names the same shape as `entry`. Every other
+   * entry sits on that fill. A read with no styled rows at hand finds no pointer, and one with more
+   * than one entry off the fill finds no list. Never with `pointerBold`. Optional.
+   */
+  readonly pointerFill?: boolean;
+  /**
+   * The list is drawn in the box's own edge run, right over its top edge: its rows carry the box's
+   * edge glyph, so the interior walk (`idle.frame.walk`) ends at the list's lowest entry and the top
+   * edge is the row under it. A command is then pressed over such a list only when the list's pointer
+   * is read and rests on the typed command. Needs the side `above`. Optional.
+   */
+  readonly inEdgeRun?: boolean;
+  /**
    * The harness paints a bracketed argument hint (` [<model-id>]`) after a complete command in
    * the box, in the bottom rule's colour, and takes it away the moment an argument is typed: it
    * is no draft text, so the frame leaves it out of the draft it reads. Only a trailing bracketed
@@ -327,6 +342,14 @@ export interface FrameTrailer {
   readonly pad?: string;
   /** How many padding rows at most. */
   readonly maxPad: number;
+  /**
+   * True when the trailer row is the box's own key hint: the keys that submit and cancel this box,
+   * drawn inside it (OMP's answer editor prints `⏎ or Ctrl+Q submit  ⎋ cancel` there). No modal cue
+   * reads that row or its padding ({@link Frame.hint}), so the box's own hint never reads as a dialog's
+   * footer. The row pattern is what makes it safe: name it only for a pattern that matches the hint
+   * the harness draws for this box and no other row. Optional.
+   */
+  readonly hint?: true;
 }
 
 /** One shape of the input box: its anchors, bounds and the fields of its walk (`idle.frame`). */
@@ -353,9 +376,26 @@ export interface FrameLayout {
    * typed with newlines then reads as the box's own lines, not as a pointed list between two rules, when
    * no row of it is an option row or a key hint and no named command list stands in
    * the box (cues.ts `draftWrap`). Muse points with `›` and `⟩` in its dialogs and keeps `❯` for its
-   * prompt (#552). pi draws its menus with the same `❯` as its prompt, so it must not name this. Optional.
+   * prompt (#552). pi draws its menus with the same `❯` as its prompt, so it must not name this; it names
+   * `draftCaret`. Optional.
    */
   readonly draftLines?: boolean;
+  /**
+   * The narrower form of `draftLines`, for a profile whose dialogs may point with the prompt glyph: true
+   * when the box's editor draws its own cursor as one reverse-video cell in the draft. A draft typed with
+   * newlines then reads as the box's own lines only while its rows hold exactly one such cell, one cell
+   * wide, and no option row, key hint or named command list (cues.ts `draftWrap`). A list a dialog draws
+   * holds no text cursor among its rows, and a highlighted row is wider than one cell. A read with no
+   * styling has no cell, so it stays a list: the safe side. pi's editor draws the cell (pi-tui
+   * `renderFakeCursor`) and an extension may put `❯` in front of it (#722). Optional.
+   */
+  readonly draftCaret?: boolean;
+  /**
+   * More placeholder shapes (`idle.placeholders.patterns`, the same plain-read-only fallback) that hold
+   * for THIS layout alone. A profile with several layouts (`idle.frameAlternates`) whose hints differ
+   * names them here, so a hint of one box never reads a draft typed in another as empty. Optional.
+   */
+  readonly placeholderPatterns?: readonly string[];
   readonly maxDraftRows: number;
   /** How many rows above the last non-blank row the bottom edge may sit (the frame module's
    *  search bound, M56 spec 03): the tallest thing the harness draws under a live box. */
@@ -410,13 +450,6 @@ export interface FrameLayout {
    */
   readonly underPainted?: boolean;
   /**
-   * The interior walk only. The box is a dialog's own text field (OMP's answer editor), which closes
-   * once the submit key takes its text: after that key, a read where this box is gone is the evidence
-   * the text went. Its text goes in as one line, since such a field may submit on a line break.
-   * Optional.
-   */
-  readonly submitCloses?: true;
-  /**
    * The interior walk only, with `rows`. True when the text in front of the draft hole on the prompt
    * row is the box's own prompt glyph, never a dialog's pointer. On a harness that draws its dialogs in
    * the box's place (`idle.dialogsInBox`) the modal cues read the rows from the top edge down, and there
@@ -430,6 +463,28 @@ export interface FrameLayout {
    * layout without it grows with its draft, so the box always shows the whole text.
    */
   readonly scroll?: FrameScroll;
+  /**
+   * This shape of the box answers a question the agent asked: it opens in the composer's place while a
+   * question waits (OMP's answer editor for `Other (type your own)` and `n note`), and what is sent there
+   * is the answer. A person's send from the phone may type into it, with the usual probe, check and
+   * submit; a held send, a walky talky message and every other caller wait for the question to close
+   * (the Send Protocol's `ANSWER_BOX`), and so does a command, which the box would take as the answer.
+   * The frame carries it ({@link Frame.answers}). Optional.
+   */
+  readonly answers?: true;
+  /**
+   * The keys that send a text from this shape of the box, when they are not `keys.submit`: the key its
+   * own hint names. Pressed on every path a send into this box takes, since a box that answers a
+   * question has no turn to queue behind. Never Escape. Optional: without it the box takes the
+   * profile's keys.
+   */
+  readonly submit?: readonly string[];
+  /**
+   * A line break typed into this shape of the box submits it (OMP's answer editor takes a raw line feed
+   * as Enter): a text of more than one line is refused `multiline` before any key, never split into
+   * an answer and a stray message. Optional.
+   */
+  readonly newlineSubmits?: true;
 }
 
 /**
@@ -507,6 +562,13 @@ export interface Profile {
        * the box is empty. Optional; a styled read never takes that path.
        */
       readonly anyText?: true;
+      /**
+       * False when a reverse-video cell on the first glyph of the hole is typed text, not a caret on a
+       * ghost suggestion. Absent means the caret is skipped (a hole is still a placeholder when one
+       * leading reverse-video cell is followed by faint or ghost-coloured cells). For a box whose hint
+       * under a caret must read as a draft, such as a shell prompt a send would run as a command.
+       */
+      readonly caretOnGhost?: false;
     };
     readonly volatile: {
       readonly above: {
@@ -800,11 +862,19 @@ export interface Profile {
     readonly settleMs?: number;
     /**
      * The harness takes ONE bracketed paste of a whole multi-line text and folds a long one into its
-     * collapse form, whose `lines` group counts the paste's line breaks. Measured per harness in the
-     * lab: where it is true and the multiplexer frames a paste itself (`pasteBlock`), a send is one
-     * paste instead of a write per line, so a long dictation never grows the box past the screen.
+     * collapse form, whose `lines` group counts the paste's lines as {@link foldLines} says. Measured
+     * per harness in the lab: where it is true and the multiplexer frames a paste itself (`pasteBlock`),
+     * a send is one paste instead of a write per line, so a long dictation never grows the box past the
+     * screen.
      */
     readonly block?: boolean;
+    /**
+     * What the collapse form's `lines` group counts on a whole paste (`block`): the line breaks
+     * (`breaks`, Claude Code 2.1.304: 30 lines fold to `+29 lines`) or the lines (`lines`, opencode
+     * 1.19.5 and 2.2.6: 30 lines fold to `[Pasted ~30 lines]`, one long line to `~1`). Optional, and
+     * only with `block`: absent reads `breaks`.
+     */
+    readonly foldLines?: "breaks" | "lines";
     /**
      * The token the harness draws for an image file it takes off a whole-text paste, as a regular
      * expression source (Claude Code: `[Image #N]`). Optional, and only with `block`: without it, a
@@ -1164,11 +1234,17 @@ function commandList(value: JsonValue | undefined): CommandListRows {
   if (node.leadOpens !== undefined && node.leadOpens !== true && node.leadOpens !== false) fail(`${path}.leadOpens`, "must be true or false");
   if (node.leadOpens === true && (node.lead === undefined || node.lead === "")) fail(`${path}.leadOpens`, "needs a lead");
   if (node.staleWhenEmpty !== undefined && node.staleWhenEmpty !== true && node.staleWhenEmpty !== false) fail(`${path}.staleWhenEmpty`, "must be true or false");
+  if (node.pointerFill !== undefined && node.pointerFill !== true && node.pointerFill !== false) fail(`${path}.pointerFill`, "must be true or false");
+  if (node.pointerFill === true && node.pointerBold === true) fail(`${path}.pointerFill`, "cannot go with pointerBold");
+  if (node.inEdgeRun !== undefined && node.inEdgeRun !== true && node.inEdgeRun !== false) fail(`${path}.inEdgeRun`, "must be true or false");
+  if (node.inEdgeRun === true && !(withSides.sides ?? ["under", "above"]).includes("above")) fail(`${path}.inEdgeRun`, 'needs the side "above"');
   const withPointerBold = node.pointerBold === true ? { ...withNamespaces, pointerBold: true } : withNamespaces;
   const withArgumentHint = node.argumentHint === true ? { ...withPointerBold, argumentHint: true } : withPointerBold;
   const withArgumentList = node.argumentList === true ? { ...withArgumentHint, argumentList: true } : withArgumentHint;
   const withLeadOpens = node.leadOpens === true ? { ...withArgumentList, leadOpens: true } : withArgumentList;
-  const withStale = node.staleWhenEmpty === true ? { ...withLeadOpens, staleWhenEmpty: true } : withLeadOpens;
+  const withStaleOnly = node.staleWhenEmpty === true ? { ...withLeadOpens, staleWhenEmpty: true } : withLeadOpens;
+  const withFill = node.pointerFill === true ? { ...withStaleOnly, pointerFill: true } : withStaleOnly;
+  const withStale = node.inEdgeRun === true ? { ...withFill, inEdgeRun: true } : withFill;
   if (node.notForText === undefined) return withStale;
   const notFor = pattern(node.notForText, `${path}.notForText`);
   if (notFor.test("")) fail(`${path}.notForText`, "must not match an empty text");
@@ -1317,8 +1393,10 @@ function parsePlaceholders(node: JsonObject): Profile["idle"]["placeholders"] {
       : { ...withPrefixes, patterns: textList(node.patterns, "idle.placeholders.patterns", 1).map((item, i) => pattern(item, `idle.placeholders.patterns[${String(i)}]`).source) };
   if (node.anyText !== undefined && node.anyText !== true && node.anyText !== false) fail("idle.placeholders.anyText", "must be true or false");
   const withAnyText = node.anyText === true ? { ...withPatterns, anyText: true as const } : withPatterns;
-  if (node.fg === undefined) return withAnyText;
-  return { ...withAnyText, fg: colourList(node.fg, "idle.placeholders.fg") };
+  if (node.caretOnGhost !== undefined && node.caretOnGhost !== true && node.caretOnGhost !== false) fail("idle.placeholders.caretOnGhost", "must be true or false");
+  const withCaret = node.caretOnGhost === false ? { ...withAnyText, caretOnGhost: false as const } : withAnyText;
+  if (node.fg === undefined) return withCaret;
+  return { ...withCaret, fg: colourList(node.fg, "idle.placeholders.fg") };
 }
 
 /** `idle.frame.trailer`: the last row inside the box, and the padding rows under it. */
@@ -1326,11 +1404,30 @@ function parseTrailer(value: JsonValue): FrameTrailer {
   const node = object(value, "idle.frame.trailer");
   const row = pattern(field(node, "row", "idle.frame.trailer"), "idle.frame.trailer.row").source;
   const maxPad = node.maxPad === undefined ? 0 : whole(node.maxPad, "idle.frame.trailer.maxPad", 0);
+  if (node.hint !== undefined && node.hint !== true) fail("idle.frame.trailer.hint", "must be true when named");
+  const hint = node.hint === true ? { hint: true as const } : {};
   if (node.pad === undefined) {
     if (maxPad > 0) fail("idle.frame.trailer.maxPad", "needs a pad pattern");
-    return { row, maxPad };
+    return { row, maxPad, ...hint };
   }
-  return { row, pad: pattern(node.pad, "idle.frame.trailer.pad").source, maxPad };
+  return { row, pad: pattern(node.pad, "idle.frame.trailer.pad").source, maxPad, ...hint };
+}
+
+/** The fields of a box that answers a question, as {@link parseAnswerBox} gathers them. */
+type AnswerBoxFields = { answers?: true; submit?: readonly string[]; newlineSubmits?: true };
+
+/** `idle.frame.answers`, `submit` and `newlineSubmits`: what a box that answers a question takes ({@link FrameLayout.answers}). */
+function parseAnswerBox(frameNode: JsonObject): AnswerBoxFields {
+  for (const key of ["answers", "newlineSubmits"] as const) {
+    if (frameNode[key] !== undefined && frameNode[key] !== true) fail(`idle.frame.${key}`, "must be true when named");
+  }
+  const submit = frameNode.submit === undefined ? undefined : textList(frameNode.submit, "idle.frame.submit", 1);
+  if (submit?.some((key) => /^(?:esc|escape)$/iu.test(key)) === true) fail("idle.frame.submit", "must not name Escape");
+  const box: AnswerBoxFields = {};
+  if (frameNode.answers === true) box.answers = true;
+  if (submit !== undefined) box.submit = submit;
+  if (frameNode.newlineSubmits === true) box.newlineSubmits = true;
+  return box;
 }
 
 /** `idle.frame.scroll`: which rows a scrolled box keeps in view, and its height then. */
@@ -1358,9 +1455,16 @@ function parseFrame(frameNode: JsonObject): FrameLayout {
   const withIndent = frameNode.draftIndent === undefined ? withWidgets : { ...withWidgets, draftIndent: whole(frameNode.draftIndent, "idle.frame.draftIndent", 1) };
   if (frameNode.draftLines !== undefined && frameNode.draftLines !== true && frameNode.draftLines !== false) fail("idle.frame.draftLines", "must be true or false");
   const withLines = frameNode.draftLines === true ? { ...withIndent, draftLines: true } : withIndent;
-  const base = frameNode.scroll === undefined ? withLines : { ...withLines, scroll: parseScroll(frameNode.scroll, maxDraftRows) };
+  if (frameNode.draftCaret !== undefined && frameNode.draftCaret !== true && frameNode.draftCaret !== false) fail("idle.frame.draftCaret", "must be true or false");
+  const withCaretCell = frameNode.draftCaret === true ? { ...withLines, draftCaret: true } : withLines;
+  const withHints =
+    frameNode.placeholderPatterns === undefined
+      ? withCaretCell
+      : { ...withCaretCell, placeholderPatterns: textList(frameNode.placeholderPatterns, "idle.frame.placeholderPatterns", 1).map((item, i) => pattern(item, `idle.frame.placeholderPatterns[${String(i)}]`).source) };
+  const scrolled = frameNode.scroll === undefined ? withHints : { ...withHints, scroll: parseScroll(frameNode.scroll, maxDraftRows) };
+  const base = { ...scrolled, ...parseAnswerBox(frameNode) };
   if (walk === "edges") {
-    for (const key of ["rows", "trailer", "continuation", "submitCloses", "ownPrompt", "maxWidgetRows"] as const) {
+    for (const key of ["rows", "trailer", "continuation", "ownPrompt", "maxWidgetRows"] as const) {
       if (frameNode[key] !== undefined) fail(`idle.frame.${key}`, "belongs to the interior walk");
     }
     const edgeBottom = anchor(field(frameNode, "bottom", "idle.frame"), "idle.frame.bottom", null, true);
@@ -1380,11 +1484,9 @@ function parseFrame(frameNode: JsonObject): FrameLayout {
   }
   if (frameNode.underPainted === true && frameNode.under === undefined) fail("idle.frame.underPainted", "needs an under pattern");
   const withPainted = frameNode.underPainted === true ? { ...withUnder, underPainted: true } : withUnder;
-  if (frameNode.submitCloses !== undefined && frameNode.submitCloses !== true) fail("idle.frame.submitCloses", "must be true");
   if (frameNode.ownPrompt !== undefined && frameNode.ownPrompt !== true && frameNode.ownPrompt !== false) fail("idle.frame.ownPrompt", "must be true or false");
   if (frameNode.ownPrompt === true && frameNode.rows === undefined) fail("idle.frame.ownPrompt", "needs a rows pattern");
-  const withCloses = frameNode.submitCloses === true ? { ...withPainted, submitCloses: true as const } : withPainted;
-  const withOwnPrompt = frameNode.ownPrompt === true ? { ...withCloses, ownPrompt: true } : withCloses;
+  const withOwnPrompt = frameNode.ownPrompt === true ? { ...withPainted, ownPrompt: true } : withPainted;
   if (frameNode.continuation === undefined) return withOwnPrompt;
   const continuation = pattern(frameNode.continuation, "idle.frame.continuation");
   if (!continuation.source.includes("(?<text>")) fail("idle.frame.continuation", "must hold the named group text");
@@ -1623,6 +1725,12 @@ export function parseProfile(raw: JsonValue): Profile {
     if (block === true && bracketed !== true) fail("paste.block", "needs paste.bracketed");
     paste = settleMs === undefined ? { bracketed: bracketed === true } : { bracketed: bracketed === true, settleMs };
     if (block === true) paste = { ...paste, block: true };
+    const foldLines = pasteNode.foldLines;
+    if (foldLines !== undefined) {
+      if (foldLines !== "breaks" && foldLines !== "lines") fail("paste.foldLines", 'must be "breaks" or "lines"');
+      if (block !== true) fail("paste.foldLines", "needs paste.block");
+      paste = { ...paste, foldLines };
+    }
     if (pasteNode.image !== undefined) {
       if (block !== true) fail("paste.image", "needs paste.block");
       paste = { ...paste, image: pattern(pasteNode.image, "paste.image").source };

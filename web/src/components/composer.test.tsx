@@ -17,7 +17,9 @@ import { CrewProvider } from "./crew-provider";
 import { Composer } from "./composer";
 import { addRow, chordKey, DEFAULT_BOARD, setCell } from "@/lib/key-board";
 import { resetKeyBoard, setKeyBoard } from "@/lib/key-board-store";
-import { type PaneSubagent, type ServerSummary, type TranscriptEntry } from "@/lib/types";
+import { type PaneJob, type PaneSubagent, type PinRow, type ServerSummary, type TranscriptEntry } from "@/lib/types";
+import { __resetBeltIntents, queueBeltIntent, takeBeltIntent } from "@/lib/belt-intent";
+import { paneScopeKey } from "@/lib/scope";
 import { SubagentSheetCtx, type SubagentSheetHandle, type SubagentTarget } from "./chat-cards";
 import type { Surface } from "@/lib/surface/surface";
 import { asJsonObject } from "@/lib/json";
@@ -566,7 +568,7 @@ describe("Composer: the Surface table (M56 spec 06)", () => {
     renderComposerWithStatus({ surface: UNREACHABLE, unreachableNote: "workshop is not answering the lead" });
     const box = screen.getByPlaceholderText("workshop is not answering the lead");
     expect(box).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toHaveAttribute("aria-disabled", "true");
   });
 
   it("composer unreachable with no note says the box cannot be reached", () => {
@@ -588,7 +590,7 @@ describe("Composer: the Surface table (M56 spec 06)", () => {
     const box = screen.getByPlaceholderText(/type a reply/i);
     await user.type(box, "later");
     expect(box).toHaveValue("later");
-    expect(screen.getByRole("button", { name: "Reconnect to send" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reconnect to send" })).toHaveAttribute("aria-disabled", "true");
     expect(recordedSends()).toEqual([]);
   });
 });
@@ -2257,6 +2259,93 @@ describe("Composer — no draft preview while its own send is in flight", () => 
   });
 });
 
+// Issue 691: on an iPhone with the keyboard up, the first tap on Send only dropped the keyboard. The
+// press moved focus off the field, and a busy (disabled) Send let the tap fall through to the box.
+describe("Composer — one tap on Send keeps the keyboard up (issue 691)", () => {
+  function holdSend() {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const posts: string[] = [];
+    server.use(
+      http.post(/\/api\/pane\/[^/]+\/keys$/, async () => HttpResponse.json({ ok: true })),
+      http.post<never, { id: string; text: string }>("/api/send", async ({ request }) => {
+        const body = await request.json();
+        posts.push(body.text);
+        await gate;
+        return HttpResponse.json(sendAnswer(body.id, "sent"));
+      }),
+    );
+    return { release, posts };
+  }
+
+  it("refuses the focus move of a mouse down on Send", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    const box = screen.getByPlaceholderText(/type a reply/i);
+    await user.type(box, "hello");
+    const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    screen.getByRole("button", { name: "Send" }).dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+  });
+
+  it("does not cancel pointer down on Send, which would drop the click on iPhone WebKit", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    await user.type(screen.getByPlaceholderText(/type a reply/i), "hello");
+    const down = new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
+    screen.getByRole("button", { name: "Send" }).dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(false);
+  });
+
+  it("keeps a busy Send under the finger: a tap sends nothing more and the field keeps focus", async () => {
+    const user = userEvent.setup();
+    const { release, posts } = holdSend();
+    renderComposer();
+    const box = screen.getByPlaceholderText(/type a reply/i);
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(posts).toEqual(["hello"]));
+    const send = screen.getByRole("button", { name: "Send" });
+    await waitFor(() => expect(send).toHaveAttribute("aria-disabled", "true"));
+    expect(send).not.toBeDisabled();
+    expect(send).toHaveClass("opacity-50");
+    box.focus();
+    await user.type(box, "more");
+    await user.click(send);
+    expect(posts).toEqual(["hello"]);
+    expect(box).toHaveFocus();
+    release();
+    await waitFor(() => expect(send).not.toHaveAttribute("aria-disabled"));
+  });
+
+  it("does not open the hold menu from a long press on a busy Send", async () => {
+    const user = userEvent.setup();
+    const { release, posts } = holdSend();
+    renderComposer();
+    const box = screen.getByPlaceholderText(/type a reply/i);
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(posts).toEqual(["hello"]));
+    const send = screen.getByRole("button", { name: "Send" });
+    await waitFor(() => expect(send).toHaveAttribute("aria-disabled", "true"));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      fireEvent.pointerDown(send, { button: 0, clientX: 5, clientY: 5 });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(700);
+      });
+      fireEvent.contextMenu(send);
+      fireEvent.pointerUp(send);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(screen.queryByRole("button", { name: "Send as message" })).toBeNull();
+    release();
+  });
+});
+
 // The no-service-worker self-updater must never reload over unsent work. The composer holds a reload
 // (lib/reload-guard) while its phone-owned input has REAL text or an upload is in flight — but a
 // terminal draft alone is SAFE (it lives on the "❯" line and its preview re-derives after a reload),
@@ -3394,7 +3483,7 @@ describe("Composer — the composer is one box", () => {
     expect(box.className).toMatch(/(?:^|\s)bg-muted\/40(?=\s|$)/);
     expect(box.className).not.toMatch(/(?:^|\s)bg-background(?=\s|$)/);
     expect(attach()).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toHaveAttribute("aria-disabled", "true");
   });
 });
 
@@ -4209,7 +4298,7 @@ describe("Composer — a draft that holds masked text", () => {
   it("does not block Send", () => {
     renderComposerWithStatus();
     fireEvent.change(screen.getByPlaceholderText(/type a reply/i), { target: { value: "ghp_••••••••" } });
-    expect(screen.getByRole("button", { name: "Send" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).not.toHaveAttribute("aria-disabled");
   });
 });
 
@@ -5046,7 +5135,7 @@ describe("outcome at the thumb", () => {
     const user = userEvent.setup();
     renderState("offline");
     await user.type(screen.getByRole("textbox"), "later");
-    expect(screen.getByRole("button", { name: "Reconnect to send" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reconnect to send" })).toHaveAttribute("aria-disabled", "true");
     expect(screen.getByRole("textbox")).toHaveValue("later");
     expect(recordedSends()).toEqual([]);
     expect(header()).toBe("");
@@ -5745,6 +5834,158 @@ describe("Composer agents mark and sheet", () => {
   });
 });
 
+describe("Composer jobs mark and sheet (issue 670)", () => {
+  const NOW = Date.parse("2026-11-03T12:00:00.000Z");
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const JOBS: PaneJob[] = [
+    { id: "job-1", label: "suite", command: "bun test", startedAt: iso(NOW - 4 * 60_000) },
+    { id: "job-2", label: "lint", command: "bun run lint", startedAt: iso(NOW - 6 * 60_000), exitCode: 1, endedAt: iso(NOW - 60_000) },
+  ];
+
+  it("has no jobs mark when the pane carries no jobs", () => {
+    renderComposer();
+    expect(document.querySelector('[data-slot="belt-jobs"]')).toBeNull();
+    cleanup();
+    renderComposer({ jobs: [] });
+    expect(document.querySelector('[data-slot="belt-jobs"]')).toBeNull();
+  });
+
+  it("names the mark by the running count, stands it in the fixed block, and opens the sheet with both groups", async () => {
+    vi.useFakeTimers({ now: NOW, shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderComposer({ jobs: JOBS, changesPill: { onClick: vi.fn(), label: "Files" } });
+      const mark = screen.getByRole("button", { name: "Jobs 1" });
+      expect(mark).toHaveAttribute("data-slot", "belt-jobs");
+      const scroller = document.querySelector<HTMLElement>('[data-slot="composer-controls"]')!;
+      expect(scroller.contains(mark)).toBe(false);
+      expect(mark.querySelector('[data-slot="belt-jobs-count"]')!.textContent).toBe("1");
+
+      await user.click(mark);
+      expect(mark).toHaveAttribute("aria-expanded", "true");
+      const sheet = screen.getByRole("dialog", { name: "Jobs 1" });
+      expect(within(sheet).getByText("bun test")).toBeInTheDocument();
+      expect(within(sheet).getByText("4m")).toBeInTheDocument();
+      expect(within(sheet).getByText("Exit code 1")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stays, with no badge, while only ended jobs are listed", () => {
+    renderComposer({ jobs: [JOBS[1]!] });
+    const mark = screen.getByRole("button", { name: "Jobs 0" });
+    expect(mark.querySelector('[data-slot="belt-jobs-count"]')).toBeNull();
+  });
+});
+
+describe("Composer pins mark and sheet (M90 spec 03)", () => {
+  afterEach(() => __resetBeltIntents());
+  const NOW = Date.now();
+  const ROWS: PinRow[] = [
+    { id: "p1", itemId: "t1:0", kind: "user", excerpt: "what changed today?", textLength: 19, anchor: "what changed today?", pinnedAt: NOW - 120_000 },
+    { id: "p2", itemId: "t2:1", kind: "reply", excerpt: "One commit: abc1234.", textLength: 20, anchor: "One commit", pinnedAt: NOW - 60_000 },
+  ];
+
+  /** A composer whose pins list the test can empty, the way the pane view's hook does after an Unpin. */
+  function Pinned({ onShow, onOpened }: { onShow?: (pin: PinRow) => boolean; onOpened?: () => void }) {
+    const [rows, setRows] = useState<readonly PinRow[]>(ROWS);
+    return (
+      <Composer
+        paneId="w1:p1"
+        agent="claude"
+        isShell={false}
+        gone={false}
+        readOnly={false}
+        surface={FREE}
+        text="pane output"
+        terminalDraft={null}
+        rawTerminalDraft={null}
+        prefs={{ wrap: true, fontSize: 11, draftFontSize: 14, chatFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true, stretchText: false }}
+        display={{ open: false, onToggle: vi.fn() }}
+        onSent={vi.fn()}
+        changesPill={{ onClick: vi.fn(), label: "Files" }}
+        pins={{
+          count: rows.length,
+          rows,
+          onUnpin: (id) => setRows((held) => held.filter((row) => row.id !== id)),
+          onOpened: onOpened ?? vi.fn(),
+          onShow: onShow ?? (() => true),
+        }}
+      />
+    );
+  }
+  const mountPinned = (props: ComponentProps<typeof Pinned> = {}) =>
+    render(<RouterProvider router={createMemoryRouter([{ path: "/", element: <Pinned {...props} /> }])} />);
+
+  it("has no pins mark when the pane passes no pins, or none are left", () => {
+    renderComposer();
+    expect(document.querySelector('[data-slot="belt-pins"]')).toBeNull();
+    cleanup();
+    renderComposer({ pins: { count: 0, rows: [], onUnpin: vi.fn(), onOpened: vi.fn(), onShow: () => true } });
+    expect(document.querySelector('[data-slot="belt-pins"]')).toBeNull();
+  });
+
+  it("names the mark by the count, stands it in the fixed block left of Files, and opens the sheet with the list", async () => {
+    const user = userEvent.setup();
+    const onOpened = vi.fn();
+    mountPinned({ onOpened });
+    const mark = screen.getByRole("button", { name: "2 pinned" });
+    expect(mark).toHaveAttribute("data-slot", "belt-pins");
+    expect(mark.querySelector('[data-slot="belt-pins-count"]')!.textContent).toBe("2");
+    const scroller = document.querySelector<HTMLElement>('[data-slot="composer-controls"]')!;
+    expect(scroller.contains(mark)).toBe(false);
+    const files = screen.getByRole("button", { name: "Files" });
+    expect(Array.from(files.parentElement!.querySelectorAll("button")).map((b) => b.getAttribute("aria-label"))).toEqual(["2 pinned", "Files"]);
+    expect(onOpened).not.toHaveBeenCalled();
+
+    await user.click(mark);
+    expect(mark).toHaveAttribute("aria-expanded", "true");
+    const sheet = screen.getByRole("dialog", { name: "Pinned messages" });
+    expect(within(sheet).getByText("One commit: abc1234.")).toBeInTheDocument();
+    expect(within(sheet).getByText("what changed today?")).toBeInTheDocument();
+    expect(onOpened).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the sheet and takes the mark away after the last Unpin", async () => {
+    const user = userEvent.setup();
+    mountPinned();
+    await user.click(screen.getByRole("button", { name: "2 pinned" }));
+    const sheet = screen.getByRole("dialog", { name: "Pinned messages" });
+    await user.click(within(sheet).getAllByRole("button", { name: "Unpin" })[0]!);
+    expect(screen.getByRole("button", { name: "1 pinned" })).toBeInTheDocument();
+    await user.click(within(screen.getByRole("dialog", { name: "Pinned messages" })).getByRole("button", { name: "Unpin" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(document.querySelector('[data-slot="belt-pins"]')).toBeNull());
+  });
+
+  it("moves focus to the belt when the last Unpin takes the sheet and the mark away", async () => {
+    const user = userEvent.setup();
+    mountPinned();
+    await user.click(screen.getByRole("button", { name: "2 pinned" }));
+    for (let left = 2; left > 0; left -= 1) {
+      const sheet = screen.getByRole("dialog", { name: "Pinned messages" });
+      await user.click(within(sheet).getAllByRole("button", { name: "Unpin" })[0]!);
+    }
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const belt = document.querySelector('[data-slot="composer-actions"]')!;
+    await waitFor(() => expect(belt.contains(document.activeElement)).toBe(true));
+  });
+
+  it("opens the sheet for a pins intent a column's tap left, once", async () => {
+    queueBeltIntent(paneScopeKey(undefined, "w1:p1"), { kind: "pins" });
+    mountPinned();
+    expect(await screen.findByRole("dialog", { name: "Pinned messages" })).toBeInTheDocument();
+    expect(takeBeltIntent(paneScopeKey(undefined, "w1:p1"))).toBeNull();
+  });
+
+  it("ignores a pins intent when the pane holds no pins", () => {
+    queueBeltIntent(paneScopeKey(undefined, "w1:p1"), { kind: "pins" });
+    renderComposer();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
 describe("Composer command suggestions (#458)", () => {
   beforeEach(() => __resetOperatorCommands());
   afterEach(() => __resetOperatorCommands());
@@ -5820,7 +6061,7 @@ describe("Composer — known launch startup send-lock", () => {
     expect(box).not.toBeDisabled();
     await user.type(box, "keep this draft");
     expect(screen.getByText("Starting…")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Send$/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Send$/ })).toHaveAttribute("aria-disabled", "true");
     fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
     await user.click(screen.getByRole("button", { name: "Quick" }));
     await user.click(screen.getByRole("button", { name: "continue" }));

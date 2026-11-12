@@ -17,10 +17,10 @@ import { findInputFrame } from "../../web/src/lib/surface/frame.ts";
 import { surfaceOfScreen } from "../../web/src/lib/surface/fold.ts";
 import { isFree, type Surface, type SurfaceTurn } from "../../web/src/lib/surface/surface.ts";
 import { KeyGate } from "./key-gate.ts";
-import { BOUNDS, BOX_CHANGED, LATE_PROBE, boxMatches, COMMAND_SETTLE_MS, boxMatchesTail, commandBoxMatches, GENERIC_PROBE, uploadAlone, wholePaste, LOCK_BOUND_MS, locateText, neverHeldEntry, probeLanding, RowRing, runsInTurnEntry, SendProtocol, SessionLocks, STALE_SCREEN, steadyRow, type SendDeps, type SendRequest } from "./protocol.ts";
+import { BOUNDS, BOX_CHANGED, LATE_PROBE, boxMatches, COMMAND_SETTLE_MS, boxMatchesTail, commandBoxMatches, GENERIC_PROBE, uploadAlone, wholePaste, LOCK_BOUND_MS, locateText, neverHeldEntry, probeLanding, RowRing, runsInTurnEntry, SendProtocol, SessionLocks, STALE_SCREEN, steadyRow, type SendDeps, type SendLedger, type SendRequest } from "./protocol.ts";
 import { RequestStore } from "./requests.ts";
 import { SurfaceLedger } from "./counters.ts";
-import { HoldStore } from "./holds.ts";
+import { HOLD_ENDED_KEEP_MS, HoldStore } from "./holds.ts";
 import type { PaneWake } from "../pane-wake.ts";
 import { StopService } from "./stop.ts";
 import { AuditLog } from "../audit.ts";
@@ -3771,6 +3771,34 @@ describe("pure helpers", () => {
     expect(boxMatches("[Image #1]see", "", [`see ${shot}`], collapse, null)).toBe(false);
   });
 
+  test("a fold that counts lines (paste.foldLines, opencode #749): one line is ~1, thirty are ~30, and the line-break count no longer passes", () => {
+    const opencode = profileFor("opencode", "2.2.6", { log: () => undefined });
+    const collapse = new RegExp(opencode!.profile.collapse.pattern, "uy");
+    const thirty = Array.from({ length: 30 }, (_, i) => `line ${String(i + 1)}`);
+    const one = ["word ".repeat(300).trim()];
+    const wholeThirty = wholePaste(opencode, thirty);
+    const wholeOne = wholePaste(opencode, one);
+    expect(wholeThirty).toMatchObject({ images: 0, foldsLines: true });
+    expect(wholeOne).toMatchObject({ images: 0, foldsLines: true });
+    expect(boxMatches("[Pasted ~30 lines]", "", thirty, collapse, wholeThirty)).toBe(true);
+    expect(boxMatches("[Pasted ~1 lines]", "", one, collapse, wholeOne)).toBe(true);
+    // Claude Code's count, and every other count, is another paste.
+    for (const box of ["[Pasted ~29 lines]", "[Pasted ~31 lines]", "[Pasted ~30 lines] x", "[Pasted ~30 lines][Pasted ~30 lines]", "line 1"]) {
+      expect(boxMatches(box, "", thirty, collapse, wholeThirty)).toBe(false);
+    }
+    expect(boxMatches("[Pasted ~0 lines]", "", one, collapse, wholeOne)).toBe(false);
+    // A paste opencode inserts literally is compared as typed.
+    expect(boxMatches("line 1 line 2", "", ["line 1", "line 2"], collapse, wholePaste(opencode, ["line 1", "line 2"]))).toBe(true);
+    expect(boxMatches("line 1 line 3", "", ["line 1", "line 2"], collapse, wholePaste(opencode, ["line 1", "line 2"]))).toBe(false);
+    // Claude Code keeps the line breaks: +29 for thirty lines.
+    const claude = profileFor("claude", "2.1.304", { log: () => undefined });
+    const claudeCollapse = new RegExp(claude!.profile.collapse.pattern, "uy");
+    const claudeThirty = wholePaste(claude, thirty);
+    expect(claudeThirty?.foldsLines).toBeUndefined();
+    expect(boxMatches("[Pasted text #1 +29 lines]", "", thirty, claudeCollapse, claudeThirty)).toBe(true);
+    expect(boxMatches("[Pasted text #1 +30 lines]", "", thirty, claudeCollapse, claudeThirty)).toBe(false);
+  });
+
   test("wholePaste: only a profile that measured it, only a long or multi-line text without a reserved lead, upload images taken off", () => {
     const match = profileFor("claude", "2.1.304", { log: () => undefined });
     expect(match?.profile.paste?.block).toBe(true);
@@ -4078,18 +4106,22 @@ describe("real screens from the fixture corpus", () => {
   }
   // Seen live on 2026-10-17: Claude Code's usage row in the blank row between the key row and the box
   // for about ten seconds after a turn. The profile names it (`idle.noticeGaps`), so the box stays free.
-  test("on a heads-up notice with the usage row under its keys: hello goes on one tap", async () => {
-    const { pane, send } = rig();
-    pane.over = [
-      "✦ Heads up · One of the notes says a nightly cleanup task",
-      "  deletes everything on your X: drive at 03:00. All your repos",
-      "  live on that drive.",
-      "  1: Learn more   2: Knew this already   0: Dismiss",
-      "  You've used 87% of your weekly limit · resets Oct 22, 1am (Ameri…",
-    ];
-    const answer = await send("hello");
-    expect(answer.receipt).toMatchObject({ outcome: "sent" });
-    expect(pane.transcript.at(-1)).toBe("> hello");
+  // Seen live on 2026-11-03, Claude Code 2.1.317 with `verbose` on: the session's token count in the
+  // same place, right-aligned, for as long as the notice stays.
+  test("on a heads-up notice with the usage row or the verbose token count under its keys: hello goes on one tap", async () => {
+    for (const gap of ["  You've used 87% of your weekly limit · resets Oct 22, 1am (Ameri…", `${" ".repeat(60)}230267 tokens`]) {
+      const { pane, send } = rig();
+      pane.over = [
+        "✦ Heads up · One of the notes says a nightly cleanup task",
+        "  deletes everything on your X: drive at 03:00. All your repos",
+        "  live on that drive.",
+        "  1: Learn more   2: Knew this already   0: Dismiss",
+        gap,
+      ];
+      const answer = await send("hello");
+      expect(answer.receipt, gap.trim()).toMatchObject({ outcome: "sent" });
+      expect(pane.transcript.at(-1)).toBe("> hello");
+    }
   });
 
   // Lane 8788, 2026-10-19: Claude Code's rating survey stood on the update row right over the box, and
@@ -4138,6 +4170,40 @@ describe("real screens from the fixture corpus", () => {
     expect((await send("4")).receipt).toMatchObject({ outcome: "sent" });
     expect(pane.transcript.at(-1)).toBe("> 4");
   });
+
+  // 2026-11-05, Claude Code 2.1.317 (issue 705): Claude's right-aligned context field, `N% until
+  // auto-compact`, sits on the row under the survey's keys. All ten sends on that box were refused
+  // `unconfirmed` or `stale_surface` (modal unreadable, the single-key cue on the key row).
+  const CONTEXT_ROW = `${" ".repeat(100)}4% until auto-compact`;
+
+  test("on the rating survey over the context row: a sentence goes on one tap, a digit takes the notice path", async () => {
+    for (const between of [[CONTEXT_ROW], ["", CONTEXT_ROW], [`${" ".repeat(100)}27% until auto`]]) {
+      const { pane, send } = rig();
+      pane.over = [...SURVEY_ROWS, ...between];
+      const answer = await send("ok merge the five, running the crew update now");
+      expect(answer.receipt, JSON.stringify(between)).toMatchObject({ outcome: "sent" });
+      expect(answer.cause).toBeUndefined();
+      expect(pane.transcript.at(-1)).toBe("> ok merge the five, running the crew update now");
+    }
+    const { pane, send } = rig();
+    pane.over = [...SURVEY_ROWS, CONTEXT_ROW];
+    const first = await send("2");
+    expect(first.receipt).toMatchObject({ outcome: "refused", reason: "unconfirmed", keys: [] });
+    expect(first.cause).toBe("notice_key");
+    expect(first.offers).toEqual(["commit", "keys"]);
+  });
+
+  for (const name of ["claude--v2317-survey-context-row--w160.txt", "claude--v2317-survey-context-row-plain--w160.txt"]) {
+    test(`the capture ${name} reads free with the survey over the context row, and a digit is refused to the notice path`, async () => {
+      const captured = rig({ pane: still(fixture(name)) });
+      const prepared = await captured.protocol.handle({ id: "fixture-survey-ctx", text: "", mode: "prepare" }, { session: "main", paneId: "%1", harness: "claude" });
+      expect(prepared.surface).toMatchObject({ turn: "idle", modal: "none", composer: "empty" });
+      const digit = await captured.send("2");
+      expect(digit.receipt).toMatchObject({ outcome: "refused", reason: "unconfirmed", keys: [] });
+      expect(digit.cause).toBe("notice_key");
+      expect(captured.pane.calls).toEqual([]);
+    });
+  }
 
   test("the field screen's capture reads free with the survey over the titled box, and a digit is refused to the notice path", async () => {
     const captured = rig({ pane: still(fixture("claude--v2303-titled-edge-survey--w160.txt")) });
@@ -5184,6 +5250,89 @@ describe("the held send (M56 spec 15)", () => {
     expect(pane.transcript.at(-1)).toBe("> then give it a title");
   });
 
+  // Issue 740: three held sends past their 30 minutes came back after every restart as "Not sent" cards,
+  // each with a fresh hour to stand, until the files were deleted by hand.
+  /** A ledger that keeps the outcomes it is told, for the boot step's count. */
+  const countingLedger = (outcomes: string[]): SendLedger => ({
+    send: (_key, end) => {
+      outcomes.push(end.outcome);
+    },
+    noteManual: () => undefined,
+    capState: () => {
+      throw new Error("not asked on start");
+    },
+    inbox: () => undefined,
+    example: () => undefined,
+  });
+
+  test("a held send whose budget ran out while the bridge was down ends expired at its own expiry, counted once, and stands only the rest of the hour (issue 740)", async () => {
+    const first = untrusted();
+    await first.send("then give it a title", { id: "held-000090" });
+    const expiresAt = first.holds.get("held-000090")!.expiresAt;
+    const later = expiresAt + 60 * 1000;
+    const store = new RequestStore(join(dir, "sends"), () => later);
+    store.recover(SendProtocol.crashReceipt);
+    const holds = new HoldStore(join(dir, "held"), () => later);
+    expect(SendProtocol.reconcileHolds(holds, store)).toBe(0);
+    const counted: string[] = [];
+    expect(SendProtocol.expireHoldsOnStart(holds, store, later, countingLedger(counted))).toEqual({ ended: ["held-000090"], dropped: [] });
+    // The card stays, so a person who has not seen it still does; its hour runs from the expiry, not from now.
+    expect(holds.get("held-000090")).toMatchObject({ state: "ended", outcome: "expired", endedAt: expiresAt });
+    expect(store.get("held-000090")?.receipt).toMatchObject({ outcome: "expired" });
+    expect(counted).toEqual(["expired"]);
+    // A second restart a minute later changes nothing: no fresh end time, no second count.
+    const again = new HoldStore(join(dir, "held"), () => later + 60 * 1000);
+    expect(SendProtocol.expireHoldsOnStart(again, store, later + 60 * 1000, countingLedger(counted))).toEqual({ ended: [], dropped: [] });
+    expect(again.get("held-000090")?.endedAt).toBe(expiresAt);
+    expect(counted).toEqual(["expired"]);
+    // Past the hour from the expiry, the row goes and is never replayed.
+    const past = expiresAt + HOLD_ENDED_KEEP_MS + 1;
+    const last = new HoldStore(join(dir, "held"), () => past);
+    expect(SendProtocol.expireHoldsOnStart(last, store, past)).toEqual({ ended: [], dropped: ["held-000090"] });
+    expect(existsSync(join(dir, "held", "held-000090.json"))).toBe(false);
+  });
+
+  test("a held send past its budget by more than the hour goes outright, settled expired and counted (issue 740)", async () => {
+    const first = untrusted();
+    await first.send("then give it a title", { id: "held-000094" });
+    const past = first.holds.get("held-000094")!.expiresAt + HOLD_ENDED_KEEP_MS + 1;
+    const store = new RequestStore(join(dir, "sends"), () => past);
+    store.recover(SendProtocol.crashReceipt);
+    const holds = new HoldStore(join(dir, "held"), () => past);
+    const counted: string[] = [];
+    expect(SendProtocol.expireHoldsOnStart(holds, store, past, countingLedger(counted))).toEqual({ ended: [], dropped: ["held-000094"] });
+    expect(holds.list()).toEqual([]);
+    expect(store.get("held-000094")?.receipt).toMatchObject({ outcome: "expired" });
+    expect(counted).toEqual(["expired"]);
+  });
+
+  test("a row that ended expired a few minutes ago stays on start; one older than the hour goes; other rows are not this step's (issue 740)", async () => {
+    const first = untrusted();
+    await first.send("then give it a title", { id: "held-000091" });
+    await first.send("and a second one", { id: "held-000092" });
+    await first.send("and a third one", { id: "held-000093" });
+    first.holds.end("held-000091", "expired");
+    first.holds.end("held-000092", "refused", "pane_gone");
+    const endedAt = first.holds.get("held-000091")!.endedAt!;
+    const soon = endedAt + 5 * 60 * 1000;
+    const store = new RequestStore(join(dir, "sends"), () => soon);
+    store.recover(SendProtocol.crashReceipt);
+    const holds = new HoldStore(join(dir, "held"), () => soon);
+    expect(SendProtocol.expireHoldsOnStart(holds, store, soon)).toEqual({ ended: [], dropped: [] });
+    expect(holds.list().map((entry) => [entry.id, entry.state])).toEqual([
+      ["held-000091", "ended"],
+      ["held-000092", "ended"],
+      ["held-000093", "held"],
+    ]);
+    const late = endedAt + HOLD_ENDED_KEEP_MS + 1;
+    const after = new HoldStore(join(dir, "held"), () => late);
+    expect(SendProtocol.expireHoldsOnStart(after, store, late)).toEqual({ ended: ["held-000093"], dropped: ["held-000091"] });
+    expect(after.list().map((entry) => [entry.id, entry.state, entry.outcome])).toEqual([
+      ["held-000092", "ended", "refused"],
+      ["held-000093", "ended", "expired"],
+    ]);
+  });
+
   test("a release the bridge died in ends unknown(crash) on boot, its text kept, and is never sent again", async () => {
     const first = untrusted();
     await first.send("then give it a title", { id: "held-000017" });
@@ -5354,7 +5503,7 @@ describe("the held send (M56 spec 15)", () => {
     });
   });
 
-  test("a held send never goes into a box that answers the agent's question (idle.answerPrompt); a person's send still may", async () => {
+  test("a held send never goes into a box that answers the agent's question (idle.answerPrompt); a person's send from the phone still may", async () => {
     const capture = (name: string): string => readFileSync(join(import.meta.dir, `../../web/src/fixtures/panes/${name}`), "utf8");
     const clock = { now: 1_000_000 };
     const holds = new HoldStore(join(dir, "held"), () => clock.now);
@@ -5368,10 +5517,14 @@ describe("the held send (M56 spec 15)", () => {
     expect(released?.receipt).toMatchObject({ requestId: "held-answer-01", outcome: "held" });
     expect(holds.get("held-answer-01")?.state).toBe("held");
     expect(r.pane.calls).toEqual([]);
-    // The person, looking at the question, may answer it from the phone: that send is typed.
+    // A send that is no person's own (a walky talky message, a hook, the CLI) waits too (#704).
     const direct = rig({ harness: "hermes", version: "0.22.2" });
     direct.pane.fixed = capture("hermes--clarify-other.txt");
-    const answer = await direct.send("CockroachDB");
+    const other = await direct.send("CockroachDB");
+    expect(other.receipt).toMatchObject({ outcome: "refused", reason: "not_free" });
+    expect(direct.pane.calls).toEqual([]);
+    // The person, looking at the question, may answer it from the phone: that send is typed.
+    const answer = await direct.send("CockroachDB", { fromPhone: true });
     expect(answer.receipt?.reason).not.toBe("not_free");
     expect(direct.pane.calls.length).toBeGreaterThan(0);
   });
@@ -8574,82 +8727,6 @@ describe("a parked pane wakes before the send (Herdr's `omp (sleeping)`)", () =>
     expect(pane.keysSeen).toEqual([]);
     expect(r.protocol.heldOf("main", "%1")).toEqual([expect.objectContaining({ state: "ended", outcome: "refused", reason: "wake_timeout", text: "then give it a title" })]);
     expect(r.deps.store.get("wake-held-03")?.receipt).toMatchObject({ reason: "wake_timeout", detail: "The agent was asleep and did not wake in time. Nothing was typed." });
-  });
-});
-
-/**
- * omp 18.12.2's answer editor, the box `Other (type your own)` opens (captured 2026-10-23), drawn from
- * its capture with the box's text on its `> ` row. Ctrl+Q takes the text and closes it: the pane then
- * draws `after`, the next screen of the capture set.
- */
-class OmpEditorPane extends FakePane {
-  /** Texts the editor took as the answer. */
-  answers: string[] = [];
-  closed = false;
-  private readonly editor = plainCapture("omp-lab--v18-12-answer-editor-empty.txt");
-  private readonly next: string[];
-
-  constructor(after: string) {
-    super("generic");
-    this.next = plainCapture(after);
-    const base = this.writeKeys;
-    this.writeKeys = (paneId, keys) => {
-      for (const key of keys) {
-        if ((key === "ctrl+q" || key === "Enter") && !this.closed) {
-          this.keysSeen.push(key);
-          this.answers.push(this.box);
-          this.box = "";
-          this.closed = true;
-          this.revision++;
-        } else void base(paneId, [key]);
-      }
-      return Promise.resolve(muxAck());
-    };
-  }
-
-  override render(): string {
-    if (this.closed) return this.next.join("\n");
-    return this.editor.map((row) => (row.startsWith("│ >") ? `${`│ > ${this.box}`.padEnd(row.length - 1)}│` : row)).join("\n");
-  }
-}
-
-/** An SGR sequence (ESC, `[`, parameters, `m`): the capture's colours, dropped for the fake pane's plain rows. */
-const SGR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;:]*m`, "gu");
-
-function plainCapture(name: string): string[] {
-  return fixture(name)
-    .split(/\r?\n/u)
-    .map((row) => row.replace(SGR, ""));
-}
-
-describe("omp's answer editor (field case 2026-10-23: Other (type your own) from the phone)", () => {
-  const editorRig = (after: string): Rig & { pane: OmpEditorPane } => {
-    const pane = new OmpEditorPane(after);
-    return { ...rig({ pane, harness: "omp", version: "18.12.2" }), pane };
-  };
-
-  test.each([false, true])("Send types the answer and the editor's going is the evidence (phone: %s)", async (fromPhone) => {
-    const { pane, send } = editorRig("omp-lab--v18-12-answer-editor-sent.txt");
-    const answer = await send("a deep teal, like the sea at dusk", { fromPhone });
-    expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["probe", "Backspace", fromPhone ? "Enter" : "ctrl+q"] });
-    expect(pane.answers).toEqual(["a deep teal, like the sea at dusk"]);
-    expect(pane.keysSeen).not.toContain(fromPhone ? "ctrl+q" : "Enter");
-  });
-
-  test("the next question of the Ask call drawn where the editor stood is no dialog that took the key", async () => {
-    const { pane, send } = editorRig("omp-lab--v18-12-ask-other-pointed.txt");
-    const answer = await send("a deep teal");
-    expect(answer.receipt?.outcome).toBe("sent");
-    expect(pane.answers).toEqual(["a deep teal"]);
-  });
-
-  test("a text of two lines goes in as one line: the newline key never reaches the editor", async () => {
-    const { pane, send } = editorRig("omp-lab--v18-12-answer-editor-sent.txt");
-    const answer = await send("a deep teal\nlike the sea at dusk");
-    expect(answer.receipt?.outcome).toBe("sent");
-    expect(pane.answers).toEqual(["a deep teal like the sea at dusk"]);
-    expect(pane.keysSeen).not.toContain("ctrl+j");
-    expect(pane.keysSeen).not.toContain("Enter");
   });
 });
 

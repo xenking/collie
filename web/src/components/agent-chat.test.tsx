@@ -6,12 +6,26 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { createMemoryRouter, RouterProvider, useParams, useRevalidator } from "react-router";
 
-import { __resetConnectionHealth } from "@/lib/connection-health";
+import { __resetConnectionHealth, NETWORK_LATCH_MS, noteNetworkFailure } from "@/lib/connection-health";
 import type { JsonValue } from "@/lib/json";
 
 // Mock the race guard at AgentChat's seam so the frozen-revision tests can observe exactly what
 // `detectedRevision` the tap handler passes (the guard's own behaviour is covered in
 // prompt-select-block.test.tsx). The other tests in this file never reach it.
+// This file's cases were written for the plain tab row and the field composer, the words a theme gets
+// when it names none. The default theme Collie names `folder` and `box`, so the active theme is pinned
+// to the plain words here; the folder and box looks have their own cases (tab-strip, pane-strip,
+// composer, themes).
+vi.mock("@/lib/theme/store", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/theme/store")>();
+  return {
+    ...original,
+    useActiveTheme: () => {
+      const active = original.useActiveTheme();
+      return { ...active, theme: { ...active.theme, surface: { ...active.theme.surface, tabs: "plain", composer: "field" } } };
+    },
+  };
+});
 vi.mock("@/lib/prompt-action", () => ({
   submitPromptOption: vi.fn(),
 }));
@@ -39,13 +53,15 @@ import { __resetOperatorCommands } from "@/lib/operator-config";
 import { paneMirrorOverride, setPaneMirrorOverride } from "@/lib/mirror-invert";
 import { submitPromptOption } from "@/lib/prompt-action";
 import { submitWizardKeys } from "@/lib/wizard-action";
-import { fixtureAgents, fixtureShellPanes, fixtureTabs, fixtureTranscriptWithImage, paneTextWithDraft, recordedSends, sendAnswer, sendHandler } from "@/test/handlers";
+import { fixtureAgents, fixtureLaunchedTab, fixtureLaunchersWithAgents, fixtureShellPanes, fixtureTabs, fixtureTranscriptWithImage, paneTextWithDraft, recordedSends, sendAnswer, sendHandler } from "@/test/handlers";
+import type { StartLaunchBody } from "@/lib/api";
 import type { Ask, Surface } from "@/lib/surface/surface";
 import { parseAnsi } from "@/lib/ansi";
 import { splitLines } from "@/lib/blocks";
 import { liftDialog, readerBlocks } from "@/lib/surface/lift";
 import { CrewProvider } from "./crew-provider";
-import type { AgentStatus, AgentView, ChatWindowBody, ServerSummary, TabView } from "@/lib/types";
+import type { AgentStatus, AgentView, ChatWindowBody, ServerSummary, TabView, WorkspaceView } from "@/lib/types";
+import { ROOT_ROUTE_ID } from "@/lib/loaders";
 import { withHeaderHost } from "@/test/header-host";
 import { COLLAPSE_MS } from "./ui/collapse";
 import { AgentChat } from "./agent-chat";
@@ -87,7 +103,10 @@ beforeEach(() => {
   __resetOperatorCommands();
 });
 
-function renderChat(overrides: Partial<ComponentProps<typeof AgentChat>> = {}) {
+function renderChat(
+  overrides: Partial<ComponentProps<typeof AgentChat>> = {},
+  rootSpaces?: readonly WorkspaceView[],
+) {
   const agent = fixtureAgents[0]!; // a blocked claude agent
   const props: ComponentProps<typeof AgentChat> = {
     paneId: agent.paneId,
@@ -104,7 +123,14 @@ function renderChat(overrides: Partial<ComponentProps<typeof AgentChat>> = {}) {
     onSelect: vi.fn(),
     ...overrides,
   };
-  const router = createMemoryRouter([{ path: "/", element: withHeaderHost(<AgentChat {...props} />) }]);
+  const element = withHeaderHost(<AgentChat {...props} />);
+  // The snapshot's spaces ride the root route's data; the header reads them to name a worktree's repo.
+  const router =
+    rootSpaces === undefined
+      ? createMemoryRouter([{ path: "/", element }])
+      : createMemoryRouter([{ id: ROOT_ROUTE_ID, path: "/", loader: () => null, element }], {
+          hydrationData: { loaderData: { [ROOT_ROUTE_ID]: { workspaces: rootSpaces } } },
+        });
   const { container } = render(<RouterProvider router={router} />);
   return { props, container };
 }
@@ -313,7 +339,8 @@ describe("AgentChat — the pane header's identity block", () => {
     // proved its keys are exactly the members of AgentStatus — Object.entries widens them to string
     // because it cannot see that proof.
     for (const [status, word] of Object.entries(words) as [AgentStatus, string][]) {
-      const agent = { ...fixtureAgents[0]!, status };
+      // Unseen, so a finished pane still draws `done`: a seen one rests as `idle` (issue 665).
+      const agent = { ...fixtureAgents[0]!, status, lastActiveAt: 200, lastSeenAt: 100 };
       const { container } = renderChat({ agent, agents: [agent] });
       // The dot names it, badged onto the agent's own tile inside the identity block. (The AgentIcon
       // beside it is also a role="img", hence the list rather than a first-match query.)
@@ -601,7 +628,7 @@ describe("AgentChat — read-only device", () => {
     expect(screen.queryByText(/spare-phone/)).toBeNull();
     const box = screen.getByPlaceholderText(/read-only, not authorised/i);
     expect(box).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toHaveAttribute("aria-disabled", "true");
     // The terminal mirror still renders — reading is always allowed.
     expect(screen.getByText("recent pane output")).toBeInTheDocument();
   });
@@ -659,7 +686,7 @@ describe("AgentChat — a stale saved copy", () => {
     renderChat({ stale: true, lastSeenAt: SAVED_AT, error: true });
     await user.type(screen.getByPlaceholderText(/type a reply/i), "hello");
     // Spec 11 names why: the send button says what it waits for, and stays off.
-    expect(screen.getByRole("button", { name: "Reconnect to send" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reconnect to send" })).toHaveAttribute("aria-disabled", "true");
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
   });
 
@@ -1398,6 +1425,31 @@ describe("AgentChat — status rides the header title slot, not the tab strip", 
   });
 });
 
+// The tab bar's "+" (M91): with an agent to offer it opens the New tab sheet, and a row starts as a tab
+// beside this workspace's own pane, through the same `POST /api/launch` the New page uses.
+describe("AgentChat \u2014 the tab bar's + opens the New tab sheet", () => {
+  it("lists the machine's agents and starts one beside the workspace's pane", async () => {
+    const launches: StartLaunchBody[] = [];
+    server.use(
+      http.get("/api/launchers", () => HttpResponse.json(fixtureLaunchersWithAgents)),
+      http.post("/api/launch", async ({ request }) => {
+        // SAFETY: the body is the app's own: `lib/api.ts`'s `startLaunch` is the only caller and it posts a `StartLaunchBody`.
+        launches.push((await request.json()) as StartLaunchBody);
+        return HttpResponse.json(fixtureLaunchedTab);
+      }),
+    );
+    const user = userEvent.setup();
+    renderChat({ tabs: fixtureTabs });
+
+    await user.click(screen.getByRole("button", { name: "New tab" }));
+    const sheet = within(await screen.findByRole("dialog", { name: "New tab in webapp" }));
+    await user.click(await sheet.findByRole("button", { name: /Claude Code/ }));
+
+    await waitFor(() => expect(launches).toHaveLength(1));
+    expect(launches[0]).toMatchObject({ harness: "claude", paneId: fixtureAgents[0]!.paneId });
+  });
+});
+
 // The History affordance opens the agent's own transcript — the only real scrollback a Claude pane
 // has, because its terminal runs on the alternate screen and Herdr retains nothing behind the
 // viewport. It's gated on the pane actually reporting an agent session, so the button can never
@@ -2005,7 +2057,7 @@ describe("AgentChat — a pane on a host the lead can't reach", () => {
     // Disabled, so the user can't even get text in — and Send is off with it. The point of asserting
     // the network too is that nothing routes around the disabled state.
     expect(box).toBeDisabled();
-    expect(screen.getByLabelText("Send")).toBeDisabled();
+    expect(screen.getByLabelText("Send")).toHaveAttribute("aria-disabled", "true");
     await new Promise((r) => setTimeout(r, 0));
     expect(calls).toEqual([]);
   });
@@ -2232,7 +2284,10 @@ describe("the pane fits its viewport", () => {
     // The two are flex siblings in the same column: one gives, one does not.
     expect(mirror.getAttribute("role")).toBe("presentation");
     expect(mirror.parentElement).toBe(bottomRow.parentElement);
-    expect(mirror.className).toMatch(/(?:^|\s)min-h-0(?=\s|$)/);
+    // It still gives (`flex-1`), but no longer to zero: it holds a floor of the viewport (#667), so a
+    // tall docked card shrinks first. The floor replaced `min-h-0`.
+    expect(mirror.className).toMatch(/(?:^|\s)min-h-\[30dvh\](?=\s|$)/);
+    expect(mirror.className).not.toMatch(/(?:^|\s)min-h-0(?=\s|$)/);
     expect(mirror.className).toMatch(/(?:^|\s)flex-1(?=\s|$)/);
 
     // STATED, not inherited. `shrink-0` is what makes the bound below the whole story.
@@ -2337,6 +2392,20 @@ describe("the pane fits its viewport", () => {
       kb.restore();
     }
   });
+  it("keeps the reading box at a lower floor while the keyboard is up (#667)", async () => {
+    const kb = withSoftKeyboard();
+    try {
+      const { container } = renderChat({ text: STATUS_TEXT });
+      const reading = () => container.querySelector<HTMLElement>('[data-slot="pane-reading"]')!;
+      expect(reading().className).toMatch(/(?:^|\s)min-h-\[30dvh\](?=\s|$)/);
+      act(() => document.querySelector<HTMLTextAreaElement>('[data-slot="chat-input"]')!.focus());
+      kb.open(460);
+      await waitFor(() => expect(reading().className).toMatch(/(?:^|\s)min-h-\[20dvh\](?=\s|$)/));
+      expect(reading().className).not.toMatch(/min-h-\[30dvh\]/);
+    } finally {
+      kb.restore();
+    }
+  });
 
   it("keeps a floor under the folder tab — the gap above the mirror may shrink, never close", () => {
     // THE OPERATOR ASKED FOR A DENSER TAB ROW and chose this gap rather than shrinking the tab's
@@ -2380,14 +2449,16 @@ describe("the pane fits its viewport", () => {
     expect(secondMirror.className).toMatch(/(?:^|\s)mt-0(?=\s|$)/);
   });
 
-  it("caps the draft field as a fraction of the viewport, not at a constant", () => {
+  it("caps the draft field as a fraction of the visible height, not at a constant", () => {
     // `max-h-40` was 160px, chosen against a full-height screen — a THIRD of everything visible
-    // with the keyboard up, and the growth that pushed the send button off the bottom. `10rem` IS
-    // that 160px, so at rest on any ordinary screen this field is byte-identical to before; only
-    // the case that was broken changes.
+    // with the keyboard up, and the growth that pushed the send button off the bottom. Then
+    // `min(10rem,30dvh)`, which still left six lines of chat on a phone with the keyboard up (Altan,
+    // 2026-11-07). The cap is now the smaller of five rows and a fifth of the visible height,
+    // computed in lib/draft-cap.ts and handed to the field as `--draft-cap`.
     renderChat({ text: STATUS_TEXT });
     const field = screen.getByRole("textbox");
-    expect(field.className).toMatch(/max-h-\[min\(10rem,\d+dvh\)\]/);
+    expect(field.className).toMatch(/max-h-\[var\(--draft-cap\)\]/);
+    expect(field.style.getPropertyValue("--draft-cap")).toMatch(/^\d+px$/);
     expect(field.className).not.toMatch(/(?:^|\s)max-h-40(?=\s|$)/);
   });
 });
@@ -4483,8 +4554,8 @@ describe("AgentChat: a new agent pane draws Chat from the first frame", () => {
 // Altan, airplane mode with Tailscale up, a pane open in Chat: the body went blank under a strip that
 // said "showing what was saved". The rule now: what the Chat body holds stays on screen through any
 // failed poll, and it is marked as the saved copy (the dated line above the body) on the read that
-// proves the outage: at once for a read that got no answer, on the second 5xx in a row. The line stays
-// until a live answer.
+// proves the outage: once the herd read latches a read that got no answer (its strike, then its retry,
+// 2026-10-29), on the second 5xx in a row. The line stays until a live answer.
 describe("AgentChat — a failed poll keeps the Chat on screen", () => {
   const journalAgent = () => ({ ...fixtureAgents[0]!, hasSession: true });
   type ChatMode = "live" | "drop" | "502";
@@ -4536,6 +4607,15 @@ describe("AgentChat — a failed poll keeps the Chat on screen", () => {
   }
 
   const savedLine = () => screen.queryByText(/^Saved copy from .+\. Older text is on the bridge\.$/);
+  // The herd read of the same poll gets no answer either, and so does a later one past
+  // NETWORK_LATCH_MS with no live answer: that latches.
+  const herdGetsNoAnswer = () =>
+    act(() => {
+      noteNetworkFailure();
+      vi.setSystemTime(Date.now() + NETWORK_LATCH_MS);
+      noteNetworkFailure();
+    });
+  afterEach(() => vi.useRealTimers());
 
   it("online, content shown, then a poll that gets no answer: the blocks stay and the saved line appears", async () => {
     const view = renderPolled();
@@ -4545,6 +4625,7 @@ describe("AgentChat — a failed poll keeps the Chat on screen", () => {
     expect(savedLine()).toBeNull();
 
     mode = "drop";
+    herdGetsNoAnswer();
     await view.poll();
     await waitFor(() => expect(savedLine()).toBeInTheDocument());
     expect(view.blocks()).toBe(shown);
@@ -4585,6 +4666,7 @@ describe("AgentChat — a failed poll keeps the Chat on screen", () => {
     expect(document.querySelector('[data-slot="saved-copy"]')).toBeNull();
 
     mode = "drop";
+    herdGetsNoAnswer();
     await view.poll();
     await waitFor(() => expect(savedLine()).toBeInTheDocument());
     const stream = document.querySelector('[data-slot="session-stream"]')!;
@@ -4607,6 +4689,16 @@ describe("AgentChat — a failed poll keeps the Chat on screen", () => {
 
 // The branch the pane's folder is on rides line 2, after the workspace, in the line's own 12px box.
 describe("AgentChat header — the branch on the path line", () => {
+  const space = (over: Partial<WorkspaceView>): WorkspaceView => ({
+    workspaceId: "w1",
+    number: 1,
+    label: "lucky-meadow-d1ec",
+    focused: false,
+    activeTabId: "w1:t1",
+    tabCount: 1,
+    paneCount: 1,
+    ...over,
+  });
   const pathLine = (c: HTMLElement) => c.querySelector<HTMLElement>('[data-slot="pane-place"]')!.parentElement!;
 
   it("follows the workspace with the branch, before the meta, without changing the line's height", () => {
@@ -4623,6 +4715,35 @@ describe("AgentChat header — the branch on the path line", () => {
   it("draws no branch when the pane has none", () => {
     const { container } = renderChat();
     expect(pathLine(container).querySelector('[data-slot="branch-label"]')).toBeNull();
+  });
+
+  // Issue #666: Herdr names a worktree space by a random slug, which names no project.
+  it("names the repository, then the branch, for a pane in a linked worktree", () => {
+    const base = fixtureAgents[0]!;
+    const agent: AgentView = { ...base, workspaceId: "w1", workspaceLabel: "lucky-meadow-d1ec", gitHead: { kind: "branch", name: "fix-login" } };
+    const spaces = [space({ workspaceId: "w1", label: "lucky-meadow-d1ec", repoRoot: "/home/k/projects/membero", isWorktree: true })];
+    const { container } = renderChat({ agent, agents: [agent, ...fixtureAgents.slice(1)] }, spaces);
+    const place = container.querySelector<HTMLElement>('[data-slot="pane-place"]')!;
+    expect(place).toHaveTextContent("membero");
+    expect(place).not.toHaveTextContent("lucky-meadow-d1ec");
+    const label = within(pathLine(container)).getByText("Branch fix-login").closest('[data-slot="branch-label"]')!;
+    expect(label.previousElementSibling).toBe(place);
+  });
+
+  it("keeps the workspace's own name for a pane in a root checkout", () => {
+    const base = fixtureAgents[0]!;
+    const agent: AgentView = { ...base, workspaceId: "w1", workspaceLabel: "membero", gitHead: { kind: "branch", name: "main" } };
+    const spaces = [space({ workspaceId: "w1", label: "membero", repoRoot: "/home/k/projects/membero", isWorktree: false })];
+    const { container } = renderChat({ agent, agents: [agent, ...fixtureAgents.slice(1)] }, spaces);
+    expect(container.querySelector('[data-slot="pane-place"]')).toHaveTextContent("membero");
+  });
+
+  it("matches the pane's space by machine too: another machine's w1 does not rename it", () => {
+    const base = fixtureAgents[0]!;
+    const agent: AgentView = { ...base, workspaceId: "w1", workspaceLabel: "sandbox", host: "lodge" };
+    const spaces = [space({ workspaceId: "w1", host: "attic", repoRoot: "/srv/other", isWorktree: true })];
+    const { container } = renderChat({ agent, agents: [agent, ...fixtureAgents.slice(1)] }, spaces);
+    expect(container.querySelector('[data-slot="pane-place"]')).toHaveTextContent("sandbox");
   });
 });
 

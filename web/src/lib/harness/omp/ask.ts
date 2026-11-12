@@ -101,11 +101,11 @@
 // text above, they are current: the footer may now end `Alt+H hide` and `Ctrl+O expand`/`collapse`.
 //
 // BATCHED QUESTIONS. A call with several single-select questions adds the `⇥/←/→ question` footer
-// segment and a tab strip whose active tab is marked by background and bold ONLY. The grammar reads
-// the strip, binds the active tab's index into `coreSignature` and binds the styled region, so two
-// steps with identical words are not mistaken for one another. Enter saves the answer and advances; a
-// revisited step may show one saved `◉` answer. Unknown controls, scroll indicators and anything the
-// strip cannot place still decline.
+// segment (the tab keycap is the preset's) and a tab strip whose active tab is marked by background
+// and bold ONLY. The grammar reads the strip, binds the active tab's index into `coreSignature` and
+// binds the styled region, so two steps with identical words are not mistaken for one another. Enter
+// saves the answer and advances; a revisited step may show one saved `◉` answer (the preset's).
+// Unknown controls, scroll indicators and anything the strip cannot place still decline.
 //
 // THE REVIEW SCREEN. After the last question omp draws a review: one numbered answer per tab, the
 // Submit tab active and a static `❯ Submit` row, under the footer `⏎ submit · ↑/↓ scroll · ⎋ cancel`.
@@ -127,6 +127,7 @@
 import type { StyledLine } from "../../blocks";
 import { canonicalStyledLines, encodeStyledRegion } from "../../styled-region";
 import { hasHiddenCharacter, MAX_REGION_CHARS } from "../bound-region";
+import { OMP_NERD, OMP_UNICODE, type OmpGlyphPreset } from "./keycaps";
 import { pointerWalk } from "../menu-hints";
 import type { PromptModel, PromptOption } from "../prompt-model";
 import { isBlank, lineText, rstrip } from "./markers";
@@ -139,31 +140,19 @@ export interface AskSelectRegion {
   startLine: number;
 }
 
-/** One keycap dialect: the footer's two keycaps and the glyphs the same symbol preset draws in the
- *  body. A screen must match ONE preset in all four places, so a footer from one preset over rows from
- *  another is not a screen this grammar knows. */
-interface Preset {
-  enter: string;
-  escape: string;
-  /** `theme.nav.cursor`, the pointer in front of the pointed row. */
-  pointer: string;
-  /** `theme.radio.unselected`, the marker in front of every option of a single-select question. */
-  radio: string;
-  /** `theme.radio.selected`, a revisited batch question's saved answer. */
-  chosen: string;
-  /** The Tab keycap of a batch's `<tab>/←/→ question` segment; absent where no batch was captured. */
-  tab?: string;
-}
+/** One keycap dialect: the footer's keycaps and the glyphs the same symbol preset draws in the body.
+ *  A screen must match ONE preset in every place, so a footer from one preset over rows from another
+ *  is not a screen this grammar knows. `tab` is null for a dialect no batch was captured in. */
+type Preset = Omit<OmpGlyphPreset, "name" | "tab"> & { readonly tab: string | null };
 
 const PRESETS: readonly Preset[] = [
   // omp 18.4 `unicode` preset, the default (`omp--v18-4-ask-single.txt`).
-  { enter: "⏎", escape: "⎋", pointer: "❯", radio: "○", chosen: "◉", tab: "⇥" },
+  OMP_UNICODE,
   // omp 17.x text keycaps over the same glyphs (`omp--select-menu.txt`, v17.2.12).
-  { enter: "Enter", escape: "Esc", pointer: "❯", radio: "○", chosen: "◉" },
-  // omp's `nerd` preset, private-use glyphs (`omp--select-menu-other.txt`, v18.4.4): U+F0311 for Enter,
-  // U+F12B7 for Escape, U+F054 (nf-fa-chevron_right) as the pointer, U+F10C (nf-fa-circle_o) as the radio.
-  // Its batch (`omp--v18-11-ask-nerd-batch.txt`, v18.11.1): U+F0312 for Tab, U+F192 (nf-fa-dot_circle_o) chosen.
-  { enter: "\u{F0311}", escape: "\u{F12B7}", pointer: "\u{F054}", radio: "\u{F10C}", chosen: "\u{F192}", tab: "\u{F0312}" },
+  { ...OMP_UNICODE, enter: "Enter", escape: "Esc", tab: null },
+  // omp's `nerd` preset, private-use glyphs (`omp--select-menu-other.txt`, v18.4.4; a batch and its
+  // review in `omp--v18-18-0-nerd-ask-*`, 18.18.0). The glyphs are listed in omp/keycaps.ts.
+  OMP_NERD,
 ];
 
 /** The footer, segment by segment, for a preset. Compared exactly: see the header. */
@@ -172,6 +161,15 @@ function footerOf(preset: Preset, tabbed: boolean): string[] {
   if (tabbed) segments.push(`${preset.tab}/←/→ question`);
   segments.push(`${preset.escape} cancel`);
   return segments;
+}
+
+/** The preset whose question footer this is, and whether it carries the batch's tab segment. */
+function matchQuestionFooter(segments: string[]): { preset: Preset; tabbed: boolean } | null {
+  for (const preset of PRESETS) {
+    if (matchesAskFooter(segments, footerOf(preset, false), true)) return { preset, tabbed: false };
+    if (preset.tab !== null && matchesAskFooter(segments, footerOf(preset, true), true)) return { preset, tabbed: true };
+  }
+  return null;
 }
 
 /** omp's own label for the free-text row (`OTHER_OPTION` in ask-dialog.ts). omp renames any option
@@ -241,9 +239,9 @@ export function detectAskSelectRegion(lines: StyledLine[]): AskSelectRegion | nu
   if (footerRow === null) return null;
   const footer = readOmpHintList(footerRow[1]!);
   if (footer === null) return null;
-  const tabbed = PRESETS.some((p) => p.tab !== undefined && footer.segments.includes(`${p.tab}/←/→ question`));
-  const preset = PRESETS.find((p) => (!tabbed || p.tab !== undefined) && matchesAskFooter(footer.segments, footerOf(p, tabbed), true));
-  if (preset === undefined) return readReview(lines, texts, end, footer.segments);
+  const matched = matchQuestionFooter(footer.segments);
+  if (matched === null) return readReview(lines, texts, end, footer.segments);
+  const { preset, tabbed } = matched;
   const expandWord = EXPAND_SEGMENT.exec(footer.segments.at(-1)!)?.[1];
   const truncated = expandWord === "expand";
   const maxQuestionRows = expandWord === "collapse" ? MAX_BODY_ROWS : MAX_QUESTION_ROWS;
@@ -331,7 +329,9 @@ export function detectAskSelect(lines: StyledLine[]): PromptModel | null {
 
 /** Review Enter submits once; Up/Down scroll here and must never be a pointer walk. */
 function readReview(lines: StyledLine[], texts: string[], end: number, footer: string[]): AskSelectRegion | null {
-  const preset = PRESETS.find((p) => p.tab !== undefined && matchesAskFooter(footer, [`${p.enter} submit`, "↑/↓ scroll", `${p.escape} cancel`]));
+  const preset = PRESETS.find(
+    (p) => p.tab !== null && matchesAskFooter(footer, [`${p.enter} submit`, "↑/↓ scroll", `${p.escape} cancel`]),
+  );
   if (preset === undefined) return null;
   const lowerDivider = end - 2;
   if (!DIVIDER.test(texts[lowerDivider]!)) return null;
@@ -351,6 +351,9 @@ function readReview(lines: StyledLine[], texts: string[], end: number, footer: s
   for (let i = 0; i < tabs.labels.length - 1; i++) {
     const prefix = `${i + 1}. ${tabs.labels[i]}: `;
     if (!rows[i]!.startsWith(prefix) || rows[i]!.length === prefix.length) return null;
+    // Only a complete review submits (ASK_NOTES.md): omp 18.18 marks a question with no answer
+    // `unanswered` and adds a warning row, and either declines.
+    if (rows[i]!.slice(prefix.length) === "unanswered") return null;
   }
   const signature = texts.slice(titleAt, end + 1).join("\n");
   if (signature.length > MAX_REGION_CHARS) return null;
@@ -375,32 +378,46 @@ interface AskTabs {
   current: number;
 }
 
-/** The current tab is bold with a background; its text alone never identifies the step. */
+/**
+ * The current tab is the one label whose every cell carries a background; its text alone never
+ * identifies the step. omp 18.10 drew it bold on a background, omp 18.18 on a background only, so
+ * bold is not required. Fail closed on anything else: no label or two labels covered, a label
+ * covered in part, or a background reaching past the current label's one padding cell on each
+ * side (over a border, a neighbour, the whole row). A theme that paints every tab is unreadable.
+ */
 function readTabs(line: StyledLine): AskTabs | null {
   const text = rstrip(lineText(line));
   const inner = BOX_ROW.exec(text)?.[1];
   if (inner === undefined) return null;
   const labels = inner.trim().split(/ {2,}/);
   if (labels.length < 2 || labels.at(-1) !== "Submit") return null;
-  let offset = 0;
-  let current = -1;
+  const painted: boolean[] = [];
   for (const segment of line.segments) {
-    const label = segment.text.trim();
-    if (segment.bg !== undefined && segment.bold && label.length > 0) {
-      if (current !== -1) return null;
-      const start = offset + segment.text.indexOf(label);
-      let searchAt = 2;
-      for (let i = 0; i < labels.length; i++) {
-        const at = text.indexOf(labels[i]!, searchAt);
-        if (at < 0) return null;
-        if (at === start && label === labels[i]) current = i;
-        searchAt = at + labels[i]!.length;
-      }
-      if (current === -1) return null;
-    }
-    offset += segment.text.length;
+    for (let i = 0; i < segment.text.length; i++) painted.push(segment.bg !== undefined);
   }
-  return current === -1 ? null : { labels, current };
+  const starts: number[] = [];
+  let searchAt = 2;
+  for (const label of labels) {
+    const at = text.indexOf(label, searchAt);
+    if (at < 0) return null;
+    starts.push(at);
+    searchAt = at + label.length;
+  }
+  let current = -1;
+  for (let i = 0; i < labels.length; i++) {
+    let cells = 0;
+    for (let at = starts[i]!; at < starts[i]! + labels[i]!.length; at++) if (painted[at] === true) cells++;
+    if (cells === 0) continue;
+    if (cells !== labels[i]!.length || current !== -1) return null;
+    current = i;
+  }
+  if (current === -1) return null;
+  const from = starts[current]! - 1;
+  const to = starts[current]! + labels[current]!.length;
+  for (let at = 0; at < painted.length; at++) {
+    if (painted[at] === true && (at < from || at > to)) return null;
+  }
+  return { labels, current };
 }
 
 /**
@@ -439,7 +456,7 @@ function readBody(rows: string[], preset: Preset, allowSelected: boolean): Optio
       if (owner === undefined || owner.label === OTHER_LABEL) return null;
       // omp draws the description before the preview, never after it.
       if (owner.preview !== undefined) return null;
-      if (description.startsWith(preset.radio) || description.startsWith(preset.pointer) || description.startsWith(preset.chosen)) return null;
+      if ([preset.radio, preset.pointer, preset.radioSelected].some((glyph) => description.startsWith(glyph))) return null;
       owner.description = owner.description === undefined ? description : `${owner.description} ${description}`;
       continue;
     }
@@ -462,8 +479,9 @@ function readBody(rows: string[], preset: Preset, allowSelected: boolean): Optio
 function readOption(row: string, preset: Preset, bodyRow: number, allowSelected: boolean): Option | null {
   const inner = BOX_ROW.exec(row)?.[1]?.replace(/\s+$/, "");
   if (inner === undefined) return null;
-  const selected = allowSelected && (inner.startsWith(`${preset.pointer} ${preset.chosen} `) || inner.startsWith(`  ${preset.chosen} `));
-  const radio = selected ? preset.chosen : preset.radio;
+  const selected =
+    allowSelected && (inner.startsWith(`${preset.pointer} ${preset.radioSelected} `) || inner.startsWith(`  ${preset.radioSelected} `));
+  const radio = selected ? preset.radioSelected : preset.radio;
   const pointed = inner.startsWith(`${preset.pointer} ${radio} `);
   if (!pointed && !inner.startsWith(`  ${radio} `)) return null;
   const rest = inner.slice((pointed ? preset.pointer.length : 1) + 1 + radio.length + 1);
@@ -472,6 +490,9 @@ function readOption(row: string, preset: Preset, bodyRow: number, allowSelected:
   return { label: noted === null ? rest : noted[1]!, note: noted !== null, pointed, selected, bodyRow };
 }
 
+// omp 18.16 renders Alt as a glyph keycap (`⌥H hide`, omp--v18-16-0-ask-single-glyph-hide--w200.txt),
+// so that hint is accepted in both forms. `Ctrl+O` stays text-only: a glyph `⌃O expand` has not been
+// captured, and the truncated state must decline rather than offer answers on a cut screen.
 function matchesAskFooter(segments: string[], expected: string[], allowExpansion = false): boolean {
   let length = segments.length;
   if (allowExpansion && EXPAND_SEGMENT.test(segments[length - 1]!)) length--;

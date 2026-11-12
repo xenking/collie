@@ -28,8 +28,9 @@
 // verbatim, and it is deliberate.
 //
 // Pure and host-aware, so a crew's two `w1`s are two workspaces (lib/hosts.ts § spaceKey).
-import { hostKey, leadHost, primarySession, scopeHostKey, sessionsOnHost } from "./hosts";
-import { panePlaceParts } from "./pane-name";
+import { hostKey, leadHost, paneSpaceKey, primarySession, scopeHostKey, sessionsOnHost, spaceKey } from "./hosts";
+import { PLACE_SEP, panePlaceParts } from "./pane-name";
+import { repoNameOf, repoRootKey, uniqueRootByRepo } from "./spaces";
 import type { AgentView, ServerSummary, SessionSummary, TabView, WorkspaceView } from "./types";
 
 /**
@@ -67,8 +68,14 @@ const KEY_SEP = "\u0000";
 export interface WorkspaceGroup {
   /** `(host, session, workspaceId)` — the only triple that names one workspace in a merged herd. */
   key: string;
-  /** The heading's text: the workspace's own name. */
+  /** The workspace's own name: the identity every preference and filter key is built from. */
   label: string;
+  /**
+   * The heading's text when it differs from {@link label}: `repo › slug` for a linked git worktree
+   * whose root is NOT open as a workspace (so it did not fold), because the slug alone names no repo
+   * (issue #666). Only set when `workspaces` were passed. Display only; never a key.
+   */
+  heading?: string | undefined;
   /** Tab by tab in the order they were met, each tab's agents then that tab's bare shells. */
   panes: AgentView[];
 }
@@ -88,6 +95,7 @@ interface TabBucket {
 interface Bucket {
   key: string;
   label: string;
+  heading: string | undefined;
   /** The machine's place in `servers`, or after them in first-met order — the outermost sort key. */
   hostSeq: number;
   /** The multiplexer's own workspace number — the sort key within one machine. */
@@ -158,13 +166,7 @@ export function resolveIsolatedPrefKeys(
   { workspaces, scope, servers, sessions }: Pick<GroupOptions, "workspaces" | "scope" | "servers" | "sessions"> = {},
 ): string[] {
   if (isolated.length === 0 || workspaces === undefined || workspaces.length === 0) return [...isolated];
-  const rootByRepo = new Map<string, WorkspaceView>();
-  for (const w of workspaces) {
-    if (w.repoRoot !== undefined && w.isWorktree === false) {
-      const repoKey = `${hostKey(w)}${KEY_SEP}${w.repoRoot}`;
-      if (!rootByRepo.has(repoKey)) rootByRepo.set(repoKey, w);
-    }
-  }
+  const rootByRepo = uniqueRootByRepo(workspaces);
   if (rootByRepo.size === 0) return [...isolated];
   return isolated.map((key) => {
     const firstCut = key.indexOf(KEY_SEP);
@@ -180,7 +182,7 @@ export function resolveIsolatedPrefKeys(
       (w) => hostKey(w) === host && (w.label.trim() || w.workspaceId) === label,
     );
     if (match === undefined || match.isWorktree !== true || match.repoRoot === undefined) return key;
-    const parent = rootByRepo.get(`${host}${KEY_SEP}${match.repoRoot}`);
+    const parent = rootByRepo.get(repoRootKey(match));
     if (parent === undefined) return key;
     return `${host}${KEY_SEP}${session}${KEY_SEP}${parent.label.trim() || parent.workspaceId}`;
   });
@@ -213,21 +215,15 @@ export function groupPanesByWorkspace(
   const parentBySpace = new Map<string, WorkspaceView>();
   const minNumberBySpace = new Map<string, number>();
   if (workspaces !== undefined && workspaces.length > 0) {
-    const rootByRepo = new Map<string, WorkspaceView>();
-    for (const w of workspaces) {
-      if (w.repoRoot !== undefined && w.isWorktree === false) {
-        const host = hostKey(w);
-        const repoKey = `${host}${KEY_SEP}${w.repoRoot}`;
-        if (!rootByRepo.has(repoKey)) {
-          rootByRepo.set(repoKey, w);
-          minNumberBySpace.set(`${host}${KEY_SEP}${w.workspaceId}`, w.number);
-        }
-      }
+    // Issue #743: a repo opened twice has no root, so its worktrees stay their own groups.
+    const rootByRepo = uniqueRootByRepo(workspaces);
+    for (const root of rootByRepo.values()) {
+      minNumberBySpace.set(`${hostKey(root)}${KEY_SEP}${root.workspaceId}`, root.number);
     }
     for (const w of workspaces) {
       if (w.repoRoot === undefined || w.isWorktree !== true) continue;
       const host = hostKey(w);
-      const parent = rootByRepo.get(`${host}${KEY_SEP}${w.repoRoot}`);
+      const parent = rootByRepo.get(repoRootKey(w));
       if (parent !== undefined) {
         parentBySpace.set(`${host}${KEY_SEP}${w.workspaceId}`, parent);
         const parentSpaceKey = `${host}${KEY_SEP}${parent.workspaceId}`;
@@ -235,6 +231,12 @@ export function groupPanesByWorkspace(
         if (w.number < prev) minNumberBySpace.set(parentSpaceKey, w.number);
       }
     }
+  }
+  // The repo name of every linked worktree the snapshot lists, for the heading of one that did not fold.
+  const repoBySpace = new Map<string, string>();
+  for (const w of workspaces ?? []) {
+    const repo = w.isWorktree === true ? repoNameOf(w) : null;
+    if (repo !== null) repoBySpace.set(spaceKey(w.host, w.workspaceId), repo);
   }
   const byKey = new Map<string, Bucket>();
   // Seeded from `servers`, so a named machine's rank never depends on which pane arrived first. The
@@ -244,6 +246,12 @@ export function groupPanesByWorkspace(
   if (leadRank >= 0 && !hostSeqs.has("")) hostSeqs.set("", leadRank);
   let workspaceSeq = 0;
   let tabSeq = 0;
+
+  // `repo › slug` for a pane in a worktree that has no open root to fold under; else nothing to add.
+  const unfoldedHeading = (pane: AgentView): string | undefined => {
+    const repo = repoBySpace.get(paneSpaceKey(pane));
+    return repo === undefined ? undefined : `${repo}${PLACE_SEP}${panePlaceParts(pane).space}`;
+  };
 
   const tabOf = (pane: AgentView): TabBucket => {
     const host = hostKey(pane);
@@ -271,6 +279,7 @@ export function groupPanesByWorkspace(
         // The workspace's own name, by the one place rule (lib/pane-name.ts) — the same string the
         // space strip and the crumb use, so the heading and the strip can never disagree.
         label: parent !== undefined ? parent.label.trim() || parent.workspaceId : panePlaceParts(pane).space,
+        heading: parent === undefined && inMetaSession ? unfoldedHeading(pane) : undefined,
         hostSeq,
         workspaceNumber: effectiveNumber,
         seq: workspaceSeq++,
@@ -312,6 +321,7 @@ export function groupPanesByWorkspace(
     .map((g) => ({
       key: g.key,
       label: g.label,
+      heading: g.heading,
       panes: [...g.tabs.values()]
         .toSorted((a, b) => a.worktreeRank - b.worktreeRank || a.spaceOrder - b.spaceOrder || a.seq - b.seq)
         .flatMap((tab) =>

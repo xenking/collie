@@ -14,7 +14,7 @@
 // from nothing but the rows.
 
 import { displayWidth, widePieces } from "../text-width";
-import { anyListRow, insideList, listedBottom, openListUnder } from "./command-list";
+import { anyListRow, edgeRunListRow, insideList, listedBottom, openListUnder } from "./command-list";
 import { popupUnder } from "./popup";
 import { readAboveNotice } from "./notice";
 import type { FrameAnchor, Profile } from "./profile";
@@ -27,11 +27,15 @@ export interface FrameRun {
   readonly text: string;
   /** The run's foreground colour; absent for the terminal's default ink (`idle.frame.underPainted`). */
   readonly fg?: string | undefined;
+  /** The run's background colour; absent for the terminal's default (`commandList.pointerFill`). */
+  readonly bg?: string | undefined;
   readonly bold?: boolean;
   readonly dim?: boolean;
   readonly italic?: boolean;
   readonly underline?: boolean;
   readonly strike?: boolean;
+  /** Reverse video: a terminal cursor drawn as a cell, not text. */
+  readonly inverse?: boolean;
 }
 
 /** One screen row as styled runs. A parsed `StyledLine` is one. */
@@ -82,10 +86,6 @@ export interface Frame {
     readonly named: readonly NamedRow[];
   };
   readonly anchorsHit: readonly FrameAnchorHit[];
-  /** The interior walk's trailer rows (`idle.frame.trailer`): the row the box draws under the draft and its padding. No modal cue reads them. */
-  readonly trailer?: RowSpan;
-  /** The box closes once the submit key takes its text (`idle.frame.submitCloses`). */
-  readonly submitCloses?: true;
   /**
    * The box's own prompt glyph: with the layout's `ownPrompt`, or a strict borderless frame with an
    * explicit bottom anchor and in-box dialogs. Records the prompt row and the column where its draft
@@ -98,6 +98,22 @@ export interface Frame {
    * the tail. Absent on a box that shows its whole draft, and on every layout that does not scroll.
    */
   readonly scrolled?: true;
+  /**
+   * The box's own key hint inside it, the trailer row and its padding, when the layout's trailer says
+   * so (`idle.frame.trailer.hint`). No modal cue reads these rows (cues.ts `readCuesFor`). Absent otherwise.
+   */
+  readonly hint?: RowSpan;
+  /**
+   * The interior walk's trailer (`idle.frame.trailer`), the row the box draws under the draft and its
+   * padding: an open box's statusline, or a key hint. No part of the draft. Absent on a layout without one.
+   */
+  readonly trailer?: RowSpan;
+  /** The layout's `answers`: this box answers a question the agent asked (profile.ts {@link FrameLayout.answers}). */
+  readonly answers?: true;
+  /** The layout's own submit keys (`idle.frame.submit`), when it names them. */
+  readonly submit?: readonly string[];
+  /** The layout's `newlineSubmits`: a line break typed here submits the box. */
+  readonly newlineSubmits?: true;
 }
 
 /** A row under the bottom edge that a named footer row of the profile matches. */
@@ -144,7 +160,7 @@ interface Compiled {
   readonly hint: ReadonlySet<string> | null;
   /** The placeholder's colours (`idle.placeholders.fg`); null for a profile that names none. */
   readonly placeholderFg: ReadonlySet<string> | null;
-  /** The placeholder's shapes (`idle.placeholders.patterns`); empty for a profile that names none. */
+  /** The placeholder's shapes (`idle.placeholders.patterns` and the layout's own); empty when neither names one. */
   readonly placeholderPatterns: readonly RegExp[];
 }
 
@@ -183,7 +199,8 @@ function compile(idle: IdleProfile): Compiled {
     },
     hint: idle.inlineHint === undefined ? null : new Set(idle.inlineHint.fg),
     placeholderFg: idle.placeholders.fg === undefined ? null : new Set(idle.placeholders.fg),
-    placeholderPatterns: (idle.placeholders.patterns ?? []).map((source) => new RegExp(source, "u")),
+    // The profile's shapes hold for every layout; a layout's own (`idle.frame.placeholderPatterns`) for it alone.
+    placeholderPatterns: [...(idle.placeholders.patterns ?? []), ...(idle.frame.placeholderPatterns ?? [])].map((source) => new RegExp(source, "u")),
   };
   compiledByIdle.set(idle, compiled);
   return compiled;
@@ -321,9 +338,18 @@ function sgrFlag(sgr: number): keyof Omit<FrameRun, "text"> | null {
  * Whether every visible character in the draft hole passes `test` on its run. The prompt row is read
  * from the hole's offset, so the marker in front of it never counts; the rows under it are read
  * whole. False when the hole holds nothing visible.
+ *
+ * One exception, the cursor on a ghost suggestion: a terminal cursor is a reverse-video cell, and on
+ * a suggestion it sits on the suggestion's first glyph (`ESC[7m` + one letter, then the dim rest). That
+ * one leading cell is not typed text, so it is skipped, but only when dim or ghost-coloured cells
+ * follow it: a one-letter draft under the cursor has nothing after it and stays a draft, and typed
+ * text is not reverse video, so a typed word before a dim completion stays a draft (issue 659). A
+ * profile turns the skip off with `idle.placeholders.caretOnGhost: false`, for a box whose hint under
+ * a caret must stay a draft (a shell prompt: a send into it would run as a command).
  */
-function holeEvery(rows: readonly FrameRow[], prompt: number, holeStart: number, last: number, test: (run: FrameRun) => boolean): boolean {
+function holeEvery(rows: readonly FrameRow[], prompt: number, holeStart: number, last: number, skipCaret: boolean, test: (run: FrameRun) => boolean): boolean {
   let sawContent = false;
+  let sawCaretCell = false;
   for (let j = prompt; j <= last; j++) {
     let offset = 0;
     for (const run of rows[j]!.segments) {
@@ -331,6 +357,10 @@ function holeEvery(rows: readonly FrameRow[], prompt: number, holeStart: number,
       offset += run.text.length;
       const visible = run.text.slice(from);
       if (visible.trim().length === 0) continue;
+      if (skipCaret && !sawContent && !sawCaretCell && run.inverse === true && visible.length === 1) {
+        sawCaretCell = true;
+        continue;
+      }
       if (!test(run)) return false;
       sawContent = true;
     }
@@ -339,14 +369,14 @@ function holeEvery(rows: readonly FrameRow[], prompt: number, holeStart: number,
 }
 
 /** Whether every visible character in the draft hole is drawn in the placeholder attribute. */
-function holeIsFaint(rows: readonly FrameRow[], prompt: number, holeStart: number, last: number, sgr: number): boolean {
+function holeIsFaint(rows: readonly FrameRow[], prompt: number, holeStart: number, last: number, sgr: number, skipCaret: boolean): boolean {
   const flag = sgrFlag(sgr);
-  return flag !== null && holeEvery(rows, prompt, holeStart, last, (run) => run[flag] === true);
+  return flag !== null && holeEvery(rows, prompt, holeStart, last, skipCaret, (run) => run[flag] === true);
 }
 
 /** Whether every visible character in the draft hole is drawn in one of the placeholder's colours. */
-function holeIsGhostColoured(rows: readonly FrameRow[], prompt: number, holeStart: number, last: number, colours: ReadonlySet<string> | null): boolean {
-  return colours !== null && holeEvery(rows, prompt, holeStart, last, (run) => run.fg !== undefined && colours.has(run.fg));
+function holeIsGhostColoured(rows: readonly FrameRow[], prompt: number, holeStart: number, last: number, colours: ReadonlySet<string> | null, skipCaret: boolean): boolean {
+  return colours !== null && holeEvery(rows, prompt, holeStart, last, skipCaret, (run) => run.fg !== undefined && colours.has(run.fg));
 }
 
 /**
@@ -391,8 +421,9 @@ function readPlaceholder(
   anchorsHit: FrameAnchorHit[],
 ): boolean {
   const byText = isPlaceholderText(text, idle, patterns.length > 0 && readIsUnstyled(rows) ? patterns : []);
-  const bySgr = holeIsFaint(rows, prompt, holeStart, last, idle.placeholders.sgr);
-  const byFg = holeIsGhostColoured(rows, prompt, holeStart, last, colours);
+  const skipCaret = idle.placeholders.caretOnGhost !== false;
+  const bySgr = holeIsFaint(rows, prompt, holeStart, last, idle.placeholders.sgr, skipCaret);
+  const byFg = holeIsGhostColoured(rows, prompt, holeStart, last, colours, skipCaret);
   if (byText) anchorsHit.push("placeholder-text");
   if (bySgr) anchorsHit.push("placeholder-sgr");
   if (byFg) anchorsHit.push("placeholder-fg");
@@ -769,8 +800,7 @@ export function frameAt(rows: readonly FrameRow[], bottom: number, idle: IdlePro
   };
   // A borderless box with an explicit bottom anchor is already bound by its prompt and strict
   // continuation indentation. For in-box cue reads, the glyph consumed by that prompt is its own.
-  if (strict && !c.bottom.blank && idle.dialogsInBox === true) Object.assign(frame, { ownPrompt: { row: prompt, end: holeStart } });
-  return frame;
+  return strict && !c.bottom.blank && idle.dialogsInBox === true ? { ...frame, ownPrompt: { row: prompt, end: holeStart } } : frame;
 }
 
 /**
@@ -823,21 +853,31 @@ function interiorFrameAt(rows: readonly FrameRow[], bottom: number, idle: IdlePr
 
   // The last row of the box's interior: the bottom edge itself on an open box.
   let last = open ? bottom : bottom - 1;
-  const innerLast = last;
+  // The trailer's rows, under the draft; the box's own key hint when the layout says so (`trailer.hint`).
+  let trailer: RowSpan | null = null;
   if (c.interior.trailerRow !== null) {
+    const padEnd = last;
     let pads = 0;
     while (last >= 0 && c.interior.trailerPad !== null && pads < c.interior.maxPad && c.interior.trailerPad.test(texts[last]!.trimEnd())) {
       pads++;
       last--;
     }
     if (last < 0 || !c.interior.trailerRow.test(texts[last]!.trimEnd())) return null;
+    trailer = { first: last, last: padEnd };
     last--;
   }
 
   let top = last;
   if (c.interior.rows !== null) {
     let stop = -1;
+    const list = idle.volatile.below.commandList;
     while (top >= 0 && bottom - top <= budget && c.interior.rows.test(texts[top]!.trimEnd())) {
+      // A command list drawn in the box's own edge run (`commandList.inEdgeRun`) stands over the top
+      // edge: its lowest entry ends the box, and the row under it must be the top edge.
+      if (top < last && edgeRunListRow(texts[top]!, list)) {
+        stop = top + 1;
+        break;
+      }
       // A row that is the top edge and cannot be a prompt row ends the box: a draft's indented rows
       // above it are the transcript's.
       if (anchored(texts[top]!, c.top) !== null && (isBlank(texts[top]!) ? !c.prompt.pattern.test("") : anchored(texts[top]!, c.prompt) === null)) {
@@ -904,11 +944,9 @@ function interiorFrameAt(rows: readonly FrameRow[], bottom: number, idle: IdlePr
     volatile: { above, status, footer, named },
     anchorsHit,
   };
-  // The two optional fields are set only where the profile names them, so every other frame keeps its shape.
-  if (c.interior.trailerRow !== null) Object.assign(frame, { trailer: { first: last + 1, last: innerLast } });
-  if (idle.frame.submitCloses === true) Object.assign(frame, { submitCloses: true });
+  const hinted = trailer === null ? frame : idle.frame.trailer?.hint === true ? { ...frame, trailer, hint: trailer } : { ...frame, trailer };
   // The layout's own prompt glyph (`ownPrompt`): only on a box whose every row the profile's `rows` named.
-  return idle.frame.ownPrompt === true && c.interior.rows !== null ? { ...frame, ownPrompt: { row: prompt, end: holeStart } } : frame;
+  return idle.frame.ownPrompt === true && c.interior.rows !== null ? { ...hinted, ownPrompt: { row: prompt, end: holeStart } } : hinted;
 }
 
 const compiledOverlays = new WeakMap<IdleProfile, readonly RegExp[]>();
@@ -964,13 +1002,27 @@ export function overlayInRows(rows: readonly FrameRow[], indices: readonly numbe
  */
 export function findInputFrame(rows: readonly FrameRow[], idle: IdleProfile): Frame | null {
   const found = findLayout(rows, idle);
-  if (found !== null) return atScroll(rows, found, idle);
+  if (found !== null) return answerBox(atScroll(rows, found, idle), idle);
   if (idle.frameAlternates === undefined) return null;
   for (const alternate of alternatesOf(idle)) {
     const hit = findLayout(rows, alternate);
-    if (hit !== null) return atScroll(rows, hit, alternate);
+    if (hit !== null) return answerBox(atScroll(rows, hit, alternate), alternate);
   }
   return null;
+}
+
+/** A {@link Frame} while {@link answerBox} adds its layout's answer fields. */
+type FrameDraft = { -readonly [K in keyof Frame]: Frame[K] };
+
+/** The frame with what its layout says a box that answers a question takes (`answers`, `submit`, `newlineSubmits`). */
+function answerBox(frame: Frame, idle: IdleProfile): Frame {
+  const { answers, submit, newlineSubmits } = idle.frame;
+  if (answers === undefined && submit === undefined && newlineSubmits === undefined) return frame;
+  const boxed: FrameDraft = { ...frame };
+  if (answers === true) boxed.answers = answers;
+  if (submit !== undefined) boxed.submit = submit;
+  if (newlineSubmits === true) boxed.newlineSubmits = newlineSubmits;
+  return boxed;
 }
 
 /**
