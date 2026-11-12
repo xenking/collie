@@ -152,7 +152,9 @@ export function maskPin<P extends PinWords>(pin: P): P {
   const masked = { ...pin };
   if (pin.text !== undefined) masked.text = redactText(pin.text);
   if (pin.excerpt !== undefined) masked.excerpt = redactText(pin.excerpt);
-  if (pin.anchor !== undefined) masked.anchor = redactText(pin.anchor);
+  // The stored anchor is a prefix: cutting before masking can split a secret so its pattern no longer matches.
+  const words = masked.text ?? masked.excerpt;
+  if (pin.anchor !== undefined) masked.anchor = words === undefined ? redactText(pin.anchor) : words.slice(0, pin.anchor.length);
   if (pin.tool?.input === undefined) return masked;
   return { ...masked, tool: { ...pin.tool, input: redactText(pin.tool.input) } };
 }

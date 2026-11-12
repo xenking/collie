@@ -15,7 +15,8 @@ import type { PinRow } from "@/lib/types";
 // is only discovered (never reported) lacks until a pins route has touched it. So the list is read ONCE when
 // the pane opens (excerpts only, so it is cheap), and then the wire count drives: a change in it is a pin
 // made or dropped somewhere else (another phone, the desk), and reads the list again. A pin or an unpin
-// from this phone reads it again too, and so does the sheet when it opens (`refresh`).
+// from this phone reads it again too, and so does the sheet when it opens (`refresh`). A new journal session
+// drops the old session's rows and reads again, even when both sessions have the same pin count.
 //
 // ── OPTIMISTIC, AND HONEST ABOUT A REFUSAL ───────────────────────────────────
 // A pin shows its mark at once (the block's item id is `pending`), and an unpin takes its row out at once. A
@@ -43,28 +44,40 @@ const NO_ROWS: readonly PinRow[] = [];
 export function useMessagePins({
   paneId,
   scope,
+  session,
   enabled,
   wireCount,
 }: {
   paneId: string;
   scope: Scope | undefined;
+  session: string | null;
   enabled: boolean;
   /** `AgentView.pins` of the pane, 0 when absent. */
   wireCount: number;
 }): MessagePins {
-  const [list, setList] = useState<PinRow[] | null>(() => heldPins(paneId, scope));
+  const [list, setList] = useState<PinRow[] | null>(() => heldPins(paneId, scope, session));
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   // A read that finishes after a newer one started is dropped, so an old list never replaces a newer one.
   const reads = useRef(0);
+  const [heldSession, setHeldSession] = useState(session);
+  const sessionNow = useRef(session);
+  sessionNow.current = session;
+  // Reset before paint, as useChatWindow does: no pin from the previous conversation belongs here.
+  if (heldSession !== session) {
+    setHeldSession(session);
+    setList(heldPins(paneId, scope, session));
+    setPending(new Set());
+    reads.current += 1;
+  }
 
   const refresh = useCallback(() => {
     if (!enabled) return;
     reads.current += 1;
     const mine = reads.current;
-    void readPins(paneId, scope).then((rows) => rows !== null && mine === reads.current && setList(rows));
-  }, [enabled, paneId, scope]);
+    void readPins(paneId, scope, session).then((rows) => rows !== null && mine === reads.current && setList(rows));
+  }, [enabled, paneId, scope, session]);
 
-  // Once when the pane opens, and again whenever the wire's count moves.
+  // Once when the pane or journal session opens, and again whenever the wire's count moves.
   useEffect(() => {
     refresh();
     // The read must not land after the pane view is gone.
@@ -79,20 +92,23 @@ export function useMessagePins({
       setPending((held) => new Set(held).add(item.id));
       try {
         const made = await pinItem(scope, paneId, item.id);
+        if (sessionNow.current !== session) return;
         // The answer is the pin itself, so the row stands before the list is read again.
         setList((rows) => newestFirst([...(rows ?? []).filter((row) => row.itemId !== made.itemId), rowOf(made)]));
         refresh();
       } catch (thrown) {
-        setStatus(pinFailure(thrown), "warn");
+        if (sessionNow.current === session) setStatus(pinFailure(thrown), "warn");
       } finally {
-        setPending((held) => {
-          const next = new Set(held);
-          next.delete(item.id);
-          return next;
-        });
+        if (sessionNow.current === session) {
+          setPending((held) => {
+            const next = new Set(held);
+            next.delete(item.id);
+            return next;
+          });
+        }
       }
     },
-    [enabled, paneId, scope, refresh],
+    [enabled, paneId, scope, session, refresh],
   );
 
   const unpin = useCallback(
@@ -102,8 +118,10 @@ export function useMessagePins({
       setList((rows) => (rows ?? []).filter((row) => row.id !== pinId));
       try {
         await unpinItem(scope, paneId, pinId);
+        if (sessionNow.current !== session) return;
         refresh();
       } catch (thrown) {
+        if (sessionNow.current !== session) return;
         // Put the row back where the list had it, then read the list: a refusal can mean the pin is gone already (another
         // phone dropped it), and the machine's list is the truth either way.
         if (removed !== undefined) setList((rows) => newestFirst([...(rows ?? []).filter((row) => row.id !== pinId), removed]));
@@ -111,7 +129,7 @@ export function useMessagePins({
         refresh();
       }
     },
-    [enabled, list, paneId, scope, refresh],
+    [enabled, list, paneId, scope, session, refresh],
   );
 
   const rows = list ?? NO_ROWS;

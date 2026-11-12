@@ -11,15 +11,15 @@ const reply = (id: string): ChatItem => ({ id, kind: "reply", text: `text of ${i
 
 let paneNo = 0;
 // A pane id of its own per case: the last list a pane answered is kept for the page's life (lib/loaders.ts).
-const open = (over: { enabled?: boolean; wireCount?: number } = {}) => {
+const open = (over: { enabled?: boolean; wireCount?: number; session?: string } = {}) => {
   paneNo += 1;
   const paneId = `w9:p${paneNo}`;
   return renderHook(
-    (props: { enabled: boolean; wireCount: number }) => ({
-      pins: useMessagePins({ paneId, scope: undefined, enabled: props.enabled, wireCount: props.wireCount }),
+    (props: { enabled: boolean; wireCount: number; session?: string }) => ({
+      pins: useMessagePins({ paneId, scope: undefined, session: props.session ?? "session-1", enabled: props.enabled, wireCount: props.wireCount }),
       status: useStatus(),
     }),
-    { initialProps: { enabled: over.enabled ?? true, wireCount: over.wireCount ?? 0 } },
+    { initialProps: { enabled: over.enabled ?? true, wireCount: over.wireCount ?? 0, ...over } },
   );
 };
 
@@ -55,6 +55,17 @@ describe("useMessagePins", () => {
     setMessagePins([fixturePin({ itemId: "a:0" })]);
     view.rerender({ enabled: true, wireCount: 1 });
     await waitFor(() => expect(view.result.current.pins.count).toBe(1));
+  });
+
+  it("drops the previous conversation's pins and refetches when the session changes with the same count", async () => {
+    setMessagePins([fixturePin({ itemId: "a:0" })]);
+    const view = open({ wireCount: 1 });
+    await waitFor(() => expect(view.result.current.pins.pinned.has("a:0")).toBe(true));
+    server.use(http.get(/\/api\/pane\/[^/]+\/pins$/, () => HttpResponse.json({ pins: [fixturePin({ itemId: "b:0" })] })));
+    view.rerender({ enabled: true, wireCount: 1, session: "session-2" });
+    expect(view.result.current.pins.rows).toEqual([]);
+    expect(view.result.current.pins.pinned.has("a:0")).toBe(false);
+    await waitFor(() => expect([...view.result.current.pins.pinned.keys()]).toEqual(["b:0"]));
   });
 
   it("marks a block at once when it is pinned, keeps the row the answer brought, and reads again", async () => {
