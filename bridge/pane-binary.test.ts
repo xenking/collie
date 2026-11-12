@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -309,5 +309,16 @@ describe("createPaneVersion — the pane's last answer while its agent is gone f
     await versionOf(omp, "p1", ompRunning);
     expect((await versionOf(omp, "p2", shell)).version).toBe("18.6.1");
     expect((await versionOf(claude, "p1", shell)).command).toBeUndefined();
+  });
+
+  test("sessions with the same pane id hold separate last-good versions", async () => {
+    const deps = { versions, binaries: () => binaries, probe: probe(null), host: linux, now: () => 0 };
+    const first = createPaneVersion(deps);
+    const second = createPaneVersion(deps);
+    await first(omp, "p1", ompRunning);
+    expect((await first(omp, "p1", shell)).version).toBe("18.18.0");
+    expect((await second(omp, "p1", shell)).version).toBe("18.6.1");
+    const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    expect(source.indexOf("const paneVersion = createPaneVersion")).toBeGreaterThan(source.indexOf("const makeSession: SessionFactory"));
   });
 });

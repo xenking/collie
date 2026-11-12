@@ -616,7 +616,7 @@ export interface HttpAccountSource {
   readonly kind: "http";
   readonly harness: string;
   readonly url: string;
-  /** The resolved config directory this source reads its login from, when applicable. */
+  /** The credential directory spelling this source reads, when applicable (raw on Claude's Keychain). */
   readonly configDir?: string;
   /** The login, read fresh for each ask. */
   login(): Promise<CredentialRead>;
@@ -639,8 +639,8 @@ export interface LocalAccountSource {
 export type AccountSource = HttpAccountSource | LocalAccountSource;
 
 export function claudeAccountSource(seams: CredentialSeams, configDir?: string): AccountSource {
-  // `configDir` stays raw (see {@link claudeKeychainService}); `resolvedDir` is the cleaned path the
-  // slot is keyed on. A session on the default dir always reads `<home>/.claude`, whatever the bridge's env says.
+  // Keep the raw spelling for the cache as well as the login: macOS Keychain hashes that exact directory.
+  // A session on the default dir always reads `<home>/.claude`, whatever the bridge's env says.
   const raw = configDir ?? "";
   const resolvedDir = raw.trim() === "" ? join(seams.home, ".claude") : join(raw, ".");
   const readDir = raw.trim() === "" ? resolvedDir : raw;
@@ -648,7 +648,7 @@ export function claudeAccountSource(seams: CredentialSeams, configDir?: string):
     kind: "http",
     harness: "claude",
     url: CLAUDE_USAGE_URL,
-    configDir: resolvedDir,
+    configDir: readDir,
     login: () => readClaudeLogin(seams, readDir),
     headers: (token) => ({
       Authorization: `Bearer ${token}`,
@@ -908,15 +908,14 @@ export class AccountWindows {
   }
 
   private resolveKey(harness: string, configDir: string, factory: (dir: string) => AccountSource): string | undefined {
-    const normalized = join(configDir, ".");
     const base = this.sources.get(harness);
-    if (base?.kind === "http" && base.configDir !== undefined && base.configDir === normalized) return harness;
-    return this.ensureCustomKey(harness, normalized, configDir, factory);
+    if (base?.kind === "http" && base.configDir === configDir) return harness;
+    return this.ensureCustomKey(harness, configDir, factory);
   }
 
-  /** The slot is keyed on the cleaned path; its source is built from `rawDir`, the value the session's env held. */
-  private ensureCustomKey(harness: string, normalized: string, rawDir: string, factory: (dir: string) => AccountSource): string | undefined {
-    const key = `${harness}\u0000${normalized}`;
+  /** Raw directory spelling is credential identity: a trailing slash can select another Keychain login. */
+  private ensureCustomKey(harness: string, configDir: string, factory: (dir: string) => AccountSource): string | undefined {
+    const key = `${harness}\u0000${configDir}`;
     if (this.customKeys.has(key)) {
       this.customKeys.delete(key);
       this.customKeys.add(key);
@@ -938,7 +937,7 @@ export class AccountWindows {
       this.sources.delete(evict);
     }
     this.customKeys.add(key);
-    this.sources.set(key, factory(rawDir));
+    this.sources.set(key, factory(configDir));
     this.states.set(key, { reading: undefined, lastAttempt: -Infinity, backoffUntil: 0, limitedInARow: 0, inFlight: null, lastNote: null });
     if (this.present(harness)) this.ask(key, now);
     return key;

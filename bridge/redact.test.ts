@@ -203,7 +203,7 @@ describe("redact — the pattern list carries its version", () => {
     // just keeps that older copy. If this fails, bump MASK_VERSION in redact.ts and pin the new hash.
     const hash = new Bun.CryptoHasher("sha256").update(maskPatternsSource()).digest("hex");
     expect({ version: MASK_VERSION, hash }).toEqual({
-      version: 1,
+      version: 3, // Pin anchors and clipped Jobs now mask from full text; invalidate older crew responses.
       hash: "30eae8d4c86947baac218f2899437c41db5f3fc72b843ab0cd9d089e7b0fb40c",
     });
   });

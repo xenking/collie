@@ -1906,7 +1906,7 @@ export function AgentChat({
   const hostVersion = useHostVersion(agent?.host ?? scope?.host);
   const pinsKept = agent !== undefined && agent.kind !== "shell" && !gone && hostKeepsPins(hostVersion);
   const pinsReadable = pinsKept && !savedCopyWrites && !connecting && hostBlock === undefined;
-  const messagePins = useMessagePins({ paneId, scope, enabled: pinsReadable, wireCount: agent?.pins ?? 0 });
+  const messagePins = useMessagePins({ paneId, scope, session: chatFeed.window.session, enabled: pinsReadable, wireCount: agent?.pins ?? 0 });
   const pinsWritable = pinsReadable && !readOnly;
   // The belt's mark and its sheet follow the wire like the Agents and Jobs marks (and like a column's belt,
   // components/strip-column.tsx), so a pane the phone cannot ask right now (connecting, a saved copy, a refused

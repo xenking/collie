@@ -16,6 +16,7 @@ import type { ChangeCommitDiff, ChangeDiff, FileReadAnswer, FilesListing, PaneRe
 import { redactEntry } from "./journal/text.ts";
 import type { TranscriptEntry } from "./journal/types.ts";
 import { redactAnsi, redactText } from "./redact.ts";
+import { clipLine } from "./subagents.ts";
 
 /**
  * A mirror read with its text masked. The grid keeps its escapes and its columns (`redactAnsi`), and
@@ -88,13 +89,21 @@ export function maskSubagentList<T extends { description: string; agentId?: stri
   });
 }
 
+const JOB_LABEL_MAX = 200;
+const JOB_COMMAND_MAX = 300;
+
 /**
  * A pane's background jobs with their words masked. The command is a line the agent ran, and a key
  * passed on a command line is the commonest leak there is; the label is text the agent wrote, and the
  * job id may be a name it chose. Exit codes and times are numbers.
  */
-export function maskJobList<T extends { id: string; label: string; command: string }>(jobs: readonly T[]): T[] {
-  return jobs.map((job) => ({ ...job, id: redactText(job.id), label: redactText(job.label), command: redactText(job.command) }));
+export function maskJobList<T extends { id: string; label: string; command: string }>(jobs: readonly T[], redact = true): T[] {
+  return jobs.map((job) => ({
+    ...job,
+    id: redact ? redactText(job.id) : job.id,
+    label: clipLine(redact ? redactText(job.label) : job.label, JOB_LABEL_MAX),
+    command: clipLine(redact ? redactText(job.command) : job.command, JOB_COMMAND_MAX),
+  }));
 }
 
 /** The pane fields an agent or a program wrote, which the mask reaches. */
@@ -152,7 +161,9 @@ export function maskPin<P extends PinWords>(pin: P): P {
   const masked = { ...pin };
   if (pin.text !== undefined) masked.text = redactText(pin.text);
   if (pin.excerpt !== undefined) masked.excerpt = redactText(pin.excerpt);
-  if (pin.anchor !== undefined) masked.anchor = redactText(pin.anchor);
+  // The stored anchor is a prefix: cutting before masking can split a secret so its pattern no longer matches.
+  const words = masked.text ?? masked.excerpt;
+  if (pin.anchor !== undefined) masked.anchor = words === undefined ? redactText(pin.anchor) : words.slice(0, pin.anchor.length);
   if (pin.tool?.input === undefined) return masked;
   return { ...masked, tool: { ...pin.tool, input: redactText(pin.tool.input) } };
 }

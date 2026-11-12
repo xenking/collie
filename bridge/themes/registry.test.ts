@@ -287,13 +287,15 @@ describe("the store", () => {
     const gate = new Promise<void>((open) => {
       release = open;
     });
+    const started = Promise.withResolvers<void>();
     const { fetch, calls } = fakeFetch(async () => {
+      started.resolve();
       await gate;
       return json(doc([entry()]));
     });
     const { store: s } = store({ fetch });
     const first = s.refresh();
-    await Promise.resolve();
+    await started.promise;
     expect((await s.status()).fetching).toBe(true);
     const second = s.refresh();
     release();

@@ -149,6 +149,28 @@ describe("GET /pins", () => {
     expect(list).toContain(`"textLength":${masked.store.list("claude.s1")[0]!.text.length}`);
   });
 
+  test("masks the whole pin before deriving an anchor or excerpt that splits a secret", async () => {
+    const secret = "ghp_" + "A".repeat(36);
+    for (const prefixLength of [70, EXCERPT_CHARS - 10]) {
+      const text = "w".repeat(prefixLength) + " " + secret;
+      const masked = rig({ redact: true }, async () => [{ uuid: "boundary", ts: "", role: "user", parts: [{ kind: "text", text }] }]);
+      const post = await masked.call({ method: "POST", body: { itemId: "boundary:0" } });
+      const one = await masked.call({ method: "GET", pin: "p1" });
+      const listed = await masked.call({ method: "GET" });
+      expect(post.status).toBe(201);
+      expect(one.status).toBe(200);
+      for (const answer of [post, one, listed]) expect(JSON.stringify(answer)).not.toContain("AAAAA");
+      const full = "body" in one && "pin" in one.body ? one.body.pin : undefined;
+      const row = "body" in listed && "pins" in listed.body ? listed.body.pins[0] : undefined;
+      expect(full).toBeDefined();
+      expect(row).toBeDefined();
+      expect(full?.anchor).toBe(full?.text.slice(0, 80));
+      expect(row?.anchor).toBe(full?.anchor);
+      expect(row?.excerpt).toBe(full?.text.slice(0, EXCERPT_CHARS));
+      expect(masked.store.list("claude.s1")[0]!.text).toBe(text);
+    }
+  });
+
   test("an empty session answers an empty list", async () => {
     expect(await rig().call({ method: "GET" })).toEqual({ status: 200, body: { pins: [] } });
   });

@@ -1723,17 +1723,11 @@ const SURFACE_PLATFORM = surfacePlatform({
     }
   },
 });
-/**
- * The pane's agent version, one reader for the send path and the Surface shadow over one cache: of the
- * pane's own program when the pane's foreground read shows it, else of the PATH binary
- * (bridge/pane-binary.ts, ADR 0124). A binary the login PATH misses still names its version in the
- * send, the shadow, the report and the trouble count, and both keep one last answer per pane.
- * `sendProfile` is the send path's profile at that version.
- */
-const paneVersion = createPaneVersion({ versions: sendVersions, binaries: harnessBinaries, probe: procProbe() });
-const sendProfile = createPaneProfile({ versions: sendVersions, binaries: harnessBinaries, platform: SURFACE_PLATFORM, paneVersion });
-
 const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
+  // The send path and Surface shadow share the session's last-good pane versions. Pane ids may repeat
+  // on another mux session, so this cache must belong to the session, not to the bridge.
+  const paneVersion = createPaneVersion({ versions: sendVersions, binaries: harnessBinaries, probe: procProbe() });
+  const sendProfile = createPaneProfile({ versions: sendVersions, binaries: harnessBinaries, platform: SURFACE_PLATFORM, paneVersion });
   const built = endpoint.kind === "program" ? programAdapter(endpoint.source) : terminalAdapter(endpoint.socketPath);
   const target = built.target;
   // The repo facts wrapper sits OUTSIDE the beacon and hint wrappers and is applied once, for every mux:
