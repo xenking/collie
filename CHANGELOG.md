@@ -23,13 +23,15 @@ Running a crew? Update the lead first; members follow on their own. Details:
 
 ## [Unreleased]
 
+## [1.28.3] - 2026-11-13
+
 ### Changed
 
 - **A tall draft stacks the attach button over the send button.** At three lines or more, as when dictating a paragraph, the paperclip moves up over the primary action and the field takes the freed width; at one line or an empty box it goes back, and the default box stays the one row it was. Nothing remounts, so the caret and focus stay. See [ADR 0114](./.adr/0111-a-tall-draft-stacks-the-composer-buttons.md). ([15f4ff4](https://github.com/xenking/collie/commit/15f4ff4))
 
 ### Fixed
 
-- **The bridge no longer freezes on a stray stop signal.** A `SIGTSTP` reached the bridge on macOS and stopped it (state `T`) for 36 hours while launchd still listed the service as running: the phone, `curl` and `collie status` all timed out and nothing restarted it. The bridge now ignores the terminal job-control stops (`SIGTSTP`, `SIGTTIN`, `SIGTTOU`), which a service with no terminal has no use for; `SIGSTOP` still pauses it on purpose.
+- **The bridge no longer freezes on a stray stop signal.** A `SIGTSTP` reached the bridge on macOS and stopped it (state `T`) for 36 hours while launchd still listed the service as running: the phone, `curl` and `collie status` all timed out and nothing restarted it. The bridge now ignores the terminal job-control stops (`SIGTSTP`, `SIGTTIN`, `SIGTTOU`), which a service with no terminal has no use for; `SIGSTOP` still pauses it on purpose. ([9f84cae](https://github.com/xenking/collie/commit/9f84cae))
 - **OMP's macOS Ask hide hint no longer hides its answer card.** OMP 18.16.0 prints `⌥H hide` in the Unicode preset; the shared footer reader now accepts that exact spelling, retaining the dialog's normal pointer walk and all existing binding checks.
 - **OMP sends respect its steering behavior instead of waiting for yield.** A normal Send uses Enter, not Ctrl+Q, so a running OMP receives the message through its configured steering path.
 - **An OMP started from New keeps the selected folder, including home.** The launch passes `--cwd=.` explicitly, preventing OMP's automatic switch from the home directory to `/tmp`.
