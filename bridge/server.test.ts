@@ -6082,6 +6082,12 @@ describe("the pins route (M90)", () => {
     expect(isTopologyWrite("/api/pane/w1/pins", "POST")).toBe(false);
     expect(crewRouteFor("/api/pane/w1/pins")).toBe("pane/w1/pins");
   });
+
+  test("a crew caller masks the complete pin before the member cuts its excerpt, regardless of its local setting", () => {
+    const src = readFileSync(join(import.meta.dir, "server.ts"), "utf8");
+    const route = src.slice(src.indexOf('if (action === "pins"'), src.indexOf('return pinsResponse(answer'));
+    expect(route).toContain('redact: cfg.redact || caller.via === "crew"');
+  });
 });
 
 describe("the answer route", () => {

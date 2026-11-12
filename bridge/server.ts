@@ -2545,7 +2545,8 @@ export function startServer(opts: {
           {
             store: pins,
             journal: await pinsJournal(cfg, journals, transcripts, rt.engine, herdr, paneId, (pane, key) => pinKeys.remember(pinPaneKey(session, pane), pinFingerprint(session, pane), key)),
-            redact: cfg.redact,
+            // A lead cannot mask a secret after the member's excerpt has already split it.
+            redact: cfg.redact || caller.via === "crew",
             audit: audit_,
             device,
             session,

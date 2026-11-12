@@ -717,6 +717,8 @@ export class Push {
     badge: number | undefined,
   ): Promise<void> {
     const now = this.clock.now();
+    // A newer render supersedes a clear still waiting in the burst, not the other way around.
+    this.burst?.delete(tag);
     const out: StoredSubscription[] = [];
     const verdicts: string[] = [];
     for (const sub of this.subs.values()) {
@@ -813,6 +815,7 @@ export class Push {
    * clear makes stale; the phone shows it and closes it on the same reconnect.
    */
   private async flushClears(burst: Map<string, string | undefined>): Promise<void> {
+    if (burst.size === 0) return;
     const tags = [...burst.keys()];
     const out: Delivery[] = [];
     const verdicts: string[] = [];

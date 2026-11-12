@@ -908,6 +908,28 @@ describe("Push — silent pushes are cut per device", () => {
     expect(JSON.parse(sent[0]!).tags).toEqual(["collie:herd:a", "collie:herd:b"]);
   });
 
+  test("a newer render cancels its queued clear, and a later clear still closes the slot", async () => {
+    const cfg = await tempCfg();
+    const sent: { type?: string }[] = [];
+    const clock = new ManualClock();
+    const push = new Push(cfg, (_s, payload) => (sent.push(JSON.parse(payload)), Promise.resolve()), { clock, clearBurstMs: CLEAR_BURST_MS });
+    enable(push, [sub("phone")]);
+    const tag = "collie:herd";
+    await push.send(render(tag));
+    const oldClear = push.send({ type: "clear", tag });
+    await clock.advance(CLEAR_BURST_MS / 2);
+    await push.send(render(tag));
+    await clock.advance(CLEAR_BURST_MS);
+    await oldClear;
+    expect(sent).toHaveLength(2);
+    expect(sent.every((row) => row.type !== "clear")).toBe(true);
+    const newClear = push.send({ type: "clear", tag });
+    await clock.advance(CLEAR_BURST_MS);
+    await newClear;
+    expect(sent).toHaveLength(3);
+    expect(sent[2]!.type).toBe("clear");
+  });
+
   test("a counted hour prints one line per device and starts again", async () => {
     const { push, clock } = await rig([{ endpoint: "phone", device: "pixel" }]);
     const lines: string[] = [];

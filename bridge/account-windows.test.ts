@@ -667,6 +667,36 @@ describe("AccountWindows", () => {
     expect(windows.limits("claude")).toBeUndefined();
   });
 
+  it("keeps distinct macOS Keychain logins for raw directory spellings with and without a trailing slash", async () => {
+    const usedServices: string[] = [];
+    const windows = new AccountWindows({
+      enabled: true,
+      sources: [claudeAccountSource({
+        ...fileSeams({}),
+        platform: "darwin",
+        keychain: async (serviceName) => {
+          usedServices.push(serviceName ?? CLAUDE_KEYCHAIN_SERVICE);
+          return login({ accessToken: serviceName?.endsWith("75564947") ? "account-slashed" : "account-plain" });
+        },
+      })],
+      fetch: async (_url, init) => ({
+        status: 200,
+        text: async () => flatBody({ utilization: init.headers.Authorization?.endsWith("slashed") ? 75 : 25, resets_at: RESET_5H }, null),
+      }),
+      now: () => NOW,
+      userAgent: "collie/test",
+      log: () => {},
+    });
+    windows.observe([pane("claude")]);
+    windows.limits("claude", "/profiles/work");
+    windows.limits("claude", "/profiles/work/");
+    await windows.settled();
+    expect(windows.limits("claude", "/profiles/work")?.[0]?.used).toBe(25);
+    expect(windows.limits("claude", "/profiles/work/")?.[0]?.used).toBe(75);
+    expect(usedServices).toContain(`${CLAUDE_KEYCHAIN_SERVICE}-2ea9e238`);
+    expect(usedServices).toContain(`${CLAUDE_KEYCHAIN_SERVICE}-75564947`);
+  });
+
   it("isolates custom configDir slots, never falls back to default, and bounds custom slots to MAX_CUSTOM_CONFIG_DIRS", async () => {
     const dirA = "/profiles/a";
     const dirB = "/profiles/b";
