@@ -1838,6 +1838,7 @@ export function startServer(opts: {
     sessionName: string | undefined,
     device: DeviceAuth | null,
     widen = false,
+    maskJobs = cfg.redact,
   ): SnapshotResponse | undefined => {
     const rt = registry.get(sessionName);
     if (!rt) return undefined;
@@ -1882,7 +1883,7 @@ export function startServer(opts: {
       const withSubagents = subagents === undefined ? withTodos : { ...withTodos, subagents };
       // The background jobs' commands are lines the agent ran, the likeliest place for a key, so the same mask.
       const readJobs = journalJobs?.get(p);
-      const jobs = readJobs !== undefined && cfg.redact ? maskJobList(readJobs) : readJobs;
+      const jobs = readJobs === undefined ? undefined : maskJobList(readJobs, maskJobs);
       const withJobs = jobs === undefined ? withSubagents : { ...withSubagents, jobs };
       // The usage dots: numbers only, the session's context and the account's windows (ADR 0118).
       const readUsage = opts.usage?.get(p);
@@ -2676,7 +2677,7 @@ export function startServer(opts: {
     // not move, and a lead that does not send it still gets the primary session. A crew request may
     // still not name a host — widening is a second dimension of ONE machine, and a peer has no
     // peers (§4).
-    snapshot: (view) => localSnapshot(view.session, null, view.widen),
+    snapshot: (view) => localSnapshot(view.session, null, view.widen, true),
     // M22/03: this collie's own capability declaration, for `hello`. The SAME expression the
     // `/api/config` route below publishes to a browser — the primary session's adapter — so a peer
     // cannot report capabilities that differ from the ones it serves its own operator.

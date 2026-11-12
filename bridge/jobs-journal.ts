@@ -28,16 +28,16 @@ import type { LiveWindows } from "./journal/live.ts";
 import { adapterFor } from "./journal/registry.ts";
 import type { JournalAdapter, TranscriptEntry } from "./journal/types.ts";
 import { HELD_FRESH_MS } from "./subagents-journal.ts";
-import { clipLine, QUIET_RUNNING_MS } from "./subagents.ts";
+import { QUIET_RUNNING_MS } from "./subagents.ts";
 import { journalAgentOf, type AgentView } from "./types.ts";
 
 /** One background job of a pane's session, running or ended a short while ago. Attached to `AgentView.jobs`. */
 export interface PaneJob {
   /** The harness's name for the job (Gentle Shell's `job-1`), else the tool call's id. */
   id: string;
-  /** The call's own label or description, on one line and clipped. Empty when the call named none. */
+  /** The call's full label or description. Masked and clipped only when serialized. */
   label: string;
-  /** The command it runs, on one line and clipped. */
+  /** The full command, kept until masking runs before serialization clips it. */
   command: string;
   /** When it started, ISO 8601: the start result's time, else its turn's. */
   startedAt: string;
@@ -50,8 +50,6 @@ export interface PaneJob {
 /** How long an ended job stays on the list. */
 export const RECENT_JOB_MS = 10 * 60_000;
 export const MAX_JOBS = 50;
-export const JOB_LABEL_MAX = 200;
-export const JOB_COMMAND_MAX = 300;
 
 /**
  * The background jobs of a session's turns, as rows: every one still running and every ended one that
@@ -72,8 +70,8 @@ export function journalJobs(entries: readonly TranscriptEntry[]): PaneJob[] {
       if (!Number.isFinite(started)) return;
       const row: PaneJob = {
         id: call.jobId ?? part.id ?? `${entry.uuid}:${index}`,
-        label: clipLine(call.description ?? "", JOB_LABEL_MAX),
-        command: clipLine(call.command, JOB_COMMAND_MAX),
+        label: call.description ?? "",
+        command: call.command,
         startedAt: new Date(started).toISOString(),
       };
       if (call.ongoing === true) {

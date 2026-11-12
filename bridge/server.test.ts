@@ -3621,7 +3621,7 @@ describe("the widened snapshot composes with the host scope (M22/06)", () => {
   test("the peer surface answers the view the LEAD asked for, never a hard-coded one", () => {
     // The blocker M22/06 removed: `snapshot: (session) => localSnapshot(session, null, false)` made a
     // widened peer answer impossible, whatever the lead sent.
-    expect(src).toContain("snapshot: (view) => localSnapshot(view.session, null, view.widen),");
+    expect(src).toContain("snapshot: (view) => localSnapshot(view.session, null, view.widen, true),");
     expect(src).not.toContain("localSnapshot(session, null, false)");
   });
 });
@@ -3646,7 +3646,7 @@ describe("the pane's jobs: read from the live windows, attached beside the subag
   test("the reader is built over the live windows and its list takes the mask before it is attached", () => {
     expect(src).toContain("const journalJobs = live === null || journals === null ? null : new JournalJobs(journals, live, () => Date.now());");
     expect(src).toContain("const readJobs = journalJobs?.get(p);");
-    expect(src).toContain("const jobs = readJobs !== undefined && cfg.redact ? maskJobList(readJobs) : readJobs;");
+    expect(src).toContain("const jobs = readJobs === undefined ? undefined : maskJobList(readJobs, maskJobs);");
   });
 
   test("a pane with no jobs gets no key: the field is spread only when the list is there", () => {
@@ -6087,6 +6087,12 @@ describe("the pins route (M90)", () => {
     const src = readFileSync(join(import.meta.dir, "server.ts"), "utf8");
     const route = src.slice(src.indexOf('if (action === "pins"'), src.indexOf('return pinsResponse(answer'));
     expect(route).toContain('redact: cfg.redact || caller.via === "crew"');
+  });
+
+  test("a crew snapshot masks Jobs before clipping even with the member's local redaction disabled", () => {
+    const src = readFileSync(join(import.meta.dir, "server.ts"), "utf8");
+    expect(src).toContain("snapshot: (view) => localSnapshot(view.session, null, view.widen, true)");
+    expect(src).toContain("maskJobList(readJobs, maskJobs)");
   });
 });
 

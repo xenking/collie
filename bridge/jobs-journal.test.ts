@@ -37,7 +37,7 @@ describe("journalJobs", () => {
       card("f", iso(T0), { kind: "task", summary: "an agent", ongoing: true }),
     ]);
     expect(rows).toEqual([
-      { id: "job-1", label: "first suite run", command: "bun test", startedAt: iso(T0 + 1000) },
+      { id: "job-1", label: "first   suite\nrun", command: "bun test", startedAt: iso(T0 + 1000) },
       { id: "job-2", label: "second", command: "bun test", startedAt: iso(T0 + 2000) },
       { id: "job-4", label: "", command: "bun test", startedAt: iso(T0), endedAt: iso(T0 + 9000) },
       { id: "job-3", label: "", command: "bun test", startedAt: iso(T0), exitCode: 0, endedAt: iso(T0 + 5000) },
@@ -63,6 +63,22 @@ describe("journalJobs", () => {
   test("caps the list", () => {
     const many = Array.from({ length: MAX_JOBS + 5 }, (_, i) => card(`u${i}`, iso(T0), bg({ ongoing: true }), `c${String(i).padStart(3, "0")}`));
     expect(recentJobs(journalJobs(many), T0)).toHaveLength(MAX_JOBS);
+  });
+
+  test("keeps full commands and descriptions until masking runs before the display caps", () => {
+    const secret = "ghp_" + "A".repeat(36);
+    const command = "x".repeat(290) + " " + secret;
+    const description = "x".repeat(190) + " " + secret;
+    const rows = journalJobs([card("boundary", iso(T0), bg({ ongoing: true, command, description }))]);
+    expect(rows[0]).toMatchObject({ command, label: description });
+    const [masked] = maskJobList(rows);
+    expect(masked!.command).not.toContain("AAAA");
+    expect(masked!.label).not.toContain("AAAA");
+    expect(masked!.command.length).toBeLessThanOrEqual(300);
+    expect(masked!.label.length).toBeLessThanOrEqual(200);
+    expect(maskJobList(rows, false)[0]!.command).toContain("AAAA");
+    const crew = maskSnapshotTitles({ agents: [{ jobs: [masked!] }], shellPanes: [] });
+    expect(JSON.stringify(crew)).not.toContain("AAAA");
   });
 });
 

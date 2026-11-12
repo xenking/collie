@@ -53,7 +53,7 @@ export const MASK = "•";
  * the lead no longer vouches for, and gets the body again, masked under this one. A local answer
  * needs no salt: its tag is hashed over the masked body, so a new pattern changes the tag by itself.
  */
-export const MASK_VERSION = 2;
+export const MASK_VERSION = 3;
 
 /** One pattern family. `group` names the capture to mask when the whole match is not the secret. */
 interface Family {
