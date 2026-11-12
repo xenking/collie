@@ -497,6 +497,12 @@ Five kinds, each with its own switch under **Settings → Alerts → Notify when
 
 Finished fires when an agent goes from working to idle, so an agent you interrupt also counts as finished.
 
+By default each agent that needs you gets its own notification, with its name and its place. Nothing is
+summarised. Switch off **One notification per agent**, below Finished, and Collie keeps one notification
+per machine instead and rewrites it as more agents need you: "claude needs you", then "2 agents need you".
+Answering an agent, or opening a finished one, closes only that notification. The wait before an
+alert is the same in both modes.
+
 Machine load sends nothing until you set a rule on a machine's page. The switch turns off every rule at
 once. One alert is sent each time a value climbs and stays high, and a tap opens that machine's Status view. See
 [Machines](crew.md#machines).
@@ -506,6 +512,9 @@ device that has not opened Collie since it was updated. The body stays as the br
 
 Every switch is bridge-wide. A push fans out to every subscribed device, so there is nothing
 per-device to set.
+
+A device with Collie open on screen gets no notification, because the app already shows the alert.
+Lock the phone in the seconds before an alert, and its notification comes about ten seconds late.
 
 The cache warning can also be switched on for **one pane at a time**, from that pane's own settings:
 open the pane, tap the ⋮, then **Pane settings**. Those panes are listed under the global switch in
@@ -538,6 +547,11 @@ as the pushes, so it counts exactly what notifies you.
 Opening a finished pane in Collie retracts its alert, from the lock screen and from the count. A
 blocked pane's alert stays until you answer it.
 
+Taking an alert off the lock screen costs a push that shows nothing, and Chrome allows a site only a
+few of those a day before it shows "This site has been updated in the background". So Collie sends
+each phone at most four of them in a day. Past that, the alert for something you already handled
+stays until the same pane alerts again, or until you next open Collie, which closes it then.
+
 Each herd push carries the count for its session, and the phone adds up every session and machine in
 the crew. Opening the dashboard sets it again from what is on screen when it shows every session, and
 unpairing the device clears it. A dashboard that shows one session of several leaves the count to the
@@ -564,6 +578,8 @@ bin/collie push forget <substring>   # or: push forget --all
 and newer allow Web Push only for a web app that you added to the home screen and opened from its
 icon. In a Safari tab, **Settings → Alerts** shows that line. See
 [Put it on your phone](install.md#iphone-and-ipad) for the steps to add Collie.
+
+![Put Collie on the home screen: iPhone and Android steps.](images/install/pwa-install.svg)
 
 **I added the icon. Do I set up again?** Yes. The home screen app keeps its own storage, separate
 from Safari. Pair it again in the app (`collie pair` on the host, then **Settings → System → Paired

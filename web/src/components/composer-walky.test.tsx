@@ -84,7 +84,7 @@ describe("Send as message (the Send button's long-press menu)", () => {
     await user.type(screen.getByPlaceholderText(/type a reply/i), "Stop and report");
     fireEvent.contextMenu(screen.getByRole("button", { name: "Send" }));
     await user.click(await screen.findByRole("button", { name: "Send as message" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toHaveAttribute("aria-disabled", "true"));
     await user.click(screen.getByRole("button", { name: "Send" }));
     expect(plain).toEqual([]);
     finish();
@@ -211,9 +211,9 @@ describe("the strip follows a queued message (M62 hardening I)", () => {
     expect(screen.getByText("Message to this pane: queued")).toBeInTheDocument();
     // A held message (M62 spec 02): still `accepted`, with what holds it, and when it will be typed.
     act(() => setRows([rowOf({ ...base, reason: "draft present" })]));
-    expect(await screen.findByText("Message to this pane: held: draft present. Typed when the box clears or the turn ends, up to 60 minutes. Do not send it again.")).toBeInTheDocument();
+    expect(await screen.findByText("Message to this pane: held: that session has unsent text. Typed when the box clears or the turn ends, up to 60 minutes. Do not send it again.")).toBeInTheDocument();
     act(() => setRows([rowOf({ ...base, reason: "turn running", at: 2 })]));
-    expect(await screen.findByText(/^Message to this pane: held: turn running\. /)).toBeInTheDocument();
+    expect(await screen.findByText(/^Message to this pane: held: that session is busy\. /)).toBeInTheDocument();
     act(() => setRows([rowOf({ ...base, state: "inbox-only", reason: "dialog open" })]));
     expect(await screen.findByText("Message to this pane: waiting in the inbox, not typed: dialog open")).toBeInTheDocument();
   });
@@ -394,7 +394,7 @@ describe("Cancel on the held outcome line (M62 spec 03)", () => {
     await user.type(screen.getByPlaceholderText(/type a reply/i), "Stop and report");
     fireEvent.contextMenu(screen.getByRole("button", { name: "Send" }));
     await user.click(await screen.findByRole("button", { name: "Send as message" }));
-    expect(await screen.findByText(/Message to this pane: held: draft present/)).toBeInTheDocument();
+    expect(await screen.findByText(/Message to this pane: held: that session has unsent text/)).toBeInTheDocument();
     // No Cancel until the pane's own list carries the held receipt: the strip follows the list, not the first answer.
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "list read" }));

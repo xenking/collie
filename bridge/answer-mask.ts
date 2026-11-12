@@ -16,6 +16,7 @@ import type { ChangeCommitDiff, ChangeDiff, FileReadAnswer, FilesListing, PaneRe
 import { redactEntry } from "./journal/text.ts";
 import type { TranscriptEntry } from "./journal/types.ts";
 import { redactAnsi, redactText } from "./redact.ts";
+import { clipLine } from "./subagents.ts";
 
 /**
  * A mirror read with its text masked. The grid keeps its escapes and its columns (`redactAnsi`), and
@@ -88,22 +89,41 @@ export function maskSubagentList<T extends { description: string; agentId?: stri
   });
 }
 
+const JOB_LABEL_MAX = 200;
+const JOB_COMMAND_MAX = 300;
+
+/**
+ * A pane's background jobs with their words masked. The command is a line the agent ran, and a key
+ * passed on a command line is the commonest leak there is; the label is text the agent wrote, and the
+ * job id may be a name it chose. Exit codes and times are numbers.
+ */
+export function maskJobList<T extends { id: string; label: string; command: string }>(jobs: readonly T[], redact = true): T[] {
+  return jobs.map((job) => ({
+    ...job,
+    id: redact ? redactText(job.id) : job.id,
+    label: clipLine(redact ? redactText(job.label) : job.label, JOB_LABEL_MAX),
+    command: clipLine(redact ? redactText(job.command) : job.command, JOB_COMMAND_MAX),
+  }));
+}
+
 /** The pane fields an agent or a program wrote, which the mask reaches. */
 interface PaneWords {
   terminalTitle?: string;
   todos?: readonly { text: string; activeForm?: string }[];
   subagents?: readonly { description: string }[];
+  jobs?: readonly { id: string; label: string; command: string }[];
 }
 
-/** A pane with its program-set title, its todo list and its subagents masked, whichever it carries. */
+/** A pane with its program-set title, its todo list, its subagents and its jobs masked, whichever it carries. */
 function maskPaneWords<P extends PaneWords>(pane: P): P {
   const titled = maskTerminalTitle(pane);
   const listed = titled.todos === undefined ? titled : { ...titled, todos: maskTodoList(titled.todos) };
-  return listed.subagents === undefined ? listed : { ...listed, subagents: maskSubagentList(listed.subagents) };
+  const agents = listed.subagents === undefined ? listed : { ...listed, subagents: maskSubagentList(listed.subagents) };
+  return agents.jobs === undefined ? agents : { ...agents, jobs: maskJobList(agents.jobs) };
 }
 
 /**
- * A snapshot with every pane's program-set title, todo list and subagents masked. The lead's merged
+ * A snapshot with every pane's program-set title, todo list, subagents and jobs masked. The lead's merged
  * snapshot carries its members' panes as the members sent them, so a member that does not mask sent
  * them in clear.
  */
@@ -123,4 +143,33 @@ export function maskSnapshotTitles<
  */
 export function maskSentAnswer<T extends { entries: readonly { line: string }[] }>(answer: T): T {
   return { ...answer, entries: answer.entries.map((entry) => ({ ...entry, line: redactText(entry.line) })) };
+}
+
+/** The words of one pin (M90): its text or, in a list, its excerpt; its anchor; and the one-line input of a tool card. */
+interface PinWords {
+  text?: string;
+  excerpt?: string;
+  anchor?: string;
+  tool?: { name: string; input?: string };
+}
+
+/**
+ * A pin with every word that leaves it masked. The file keeps the log's own words; only what leaves is
+ * masked. Each mask is as wide as what it hides, so a `textLength` beside them stays true.
+ */
+export function maskPin<P extends PinWords>(pin: P): P {
+  const masked = { ...pin };
+  if (pin.text !== undefined) masked.text = redactText(pin.text);
+  if (pin.excerpt !== undefined) masked.excerpt = redactText(pin.excerpt);
+  // The stored anchor is a prefix: cutting before masking can split a secret so its pattern no longer matches.
+  const words = masked.text ?? masked.excerpt;
+  if (pin.anchor !== undefined) masked.anchor = words === undefined ? redactText(pin.anchor) : words.slice(0, pin.anchor.length);
+  if (pin.tool?.input === undefined) return masked;
+  return { ...masked, tool: { ...pin.tool, input: redactText(pin.tool.input) } };
+}
+
+/** A pins answer, the list of a GET or the one pin of a POST or a GET by id, with every pin masked. */
+export function maskPinsAnswer<T extends { pins?: readonly PinWords[]; pin?: PinWords }>(answer: T): T {
+  const listed = answer.pins === undefined ? answer : { ...answer, pins: answer.pins.map(maskPin) };
+  return listed.pin === undefined ? listed : { ...listed, pin: maskPin(listed.pin) };
 }

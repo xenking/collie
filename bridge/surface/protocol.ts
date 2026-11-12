@@ -274,13 +274,13 @@ import {
   type HeldRow,
   STALE_SCREEN,
 } from "../../web/src/lib/surface/send.ts";
-import { askOf, frameImageKey, isFree, shortHash, type Surface } from "../../web/src/lib/surface/surface.ts";
+import { askOf, frameImageKey, isFree, shortHash, type Surface, type SurfaceTurn } from "../../web/src/lib/surface/surface.ts";
 import { closingReceipt, normalizePrompt, receiptWindowMs, type OpenReceipt } from "../../web/src/lib/surface/edges.ts";
 import type { CapState, CounterKey, ExampleEntry, InboxEntry } from "./counters.ts";
 import { askLifetimeOf, type AskBook } from "./ask.ts";
 import type { KeyGate } from "./key-gate.ts";
 import type { RequestStore, SendRecord } from "./requests.ts";
-import { HOLD_BRIDGE_MAX, HOLD_PANE_MAX, heldRow, type HeldEntry, type HoldCause, type HoldStore } from "./holds.ts";
+import { HOLD_BRIDGE_MAX, HOLD_ENDED_KEEP_MS, HOLD_PANE_MAX, heldRow, type HeldEntry, type HoldCause, type HoldStore } from "./holds.ts";
 import { QueuedSends, type BoxReading, type ReceiptQueued } from "./queued.ts";
 import { PROBE_MARKER, probeCharOf, probeResidue } from "./probe-marker.ts";
 import type { PaneWake } from "../pane-wake.ts";
@@ -461,6 +461,12 @@ export interface SendTarget {
   readonly paneId: string;
   /** The agent string the multiplexer reports; it picks the profile by id. */
   readonly harness: string;
+}
+
+/** What {@link SendProtocol.expireHoldsOnStart} did on start: the ids it ended `expired`, and the ids it dropped. */
+export interface HoldsOnStart {
+  readonly ended: string[];
+  readonly dropped: string[];
 }
 
 /**
@@ -1429,6 +1435,10 @@ function commitKeys(state: RunState): readonly string[] {
     if (keys.steer === undefined) throw new Ended("typed_not_submitted", "changed", { detail: STEER_UNSUPPORTED });
     return keys.steer;
   }
+  // A box whose layout names its own submit keys (`idle.frame.submit`, the key its hint prints) takes
+  // those: a box that answers the agent's question has no turn to queue behind.
+  const own = state.marks.s1?.frame?.submit;
+  if (own !== undefined) return own;
   // Automated sends keep the queue key even on an idle read; only phone sends opt into normal steering.
   if (!state.command && state.request.mode !== "command" && keys.submitWhileRunning === "steers" && state.request.fromPhone !== true) {
     if (keys.queueKey === undefined) throw new Ended("typed_not_submitted", "changed", { detail: TURN_RUNNING });
@@ -1442,8 +1452,12 @@ function commitKeys(state: RunState): readonly string[] {
   return keys.submit;
 }
 
-/** Whether the box answers a question the agent asked: the profile's `idle.answerPrompt` on the frame's prompt row. */
+/**
+ * Whether the box answers a question the agent asked: a frame whose layout says so (`idle.frame.answers`),
+ * or the profile's `idle.answerPrompt` on the frame's prompt row.
+ */
 function answersQuestion(match: ProfileMatch | null, snap: Snap): boolean {
+  if (snap.frame?.answers === true) return true;
   const source = match?.profile.idle.answerPrompt;
   if (source === undefined || snap.frame === null) return false;
   const row = snap.texts[snap.frame.interior.prompt];
@@ -1539,6 +1553,12 @@ const ENTER_MISSED_BOX = "The submit key did not reach the box. A dialog may hav
 
 /** The detail of a held send that met a box answering the agent's question: it waits for an ordinary box. */
 const ANSWER_BOX = "The input box answers a question the agent asked. A held message waits for the question to close.";
+/** The detail of a send that is no person's own at a box answering the agent's question: only the person answers it. */
+const ANSWER_BOX_PERSON = "The input box answers a question the agent asked. Only a send from the phone answers it; this message waits for the question to close.";
+/** The detail of a command at a box answering the agent's question: the box would take it as the answer. */
+const ANSWER_BOX_COMMAND = "The input box answers a question the agent asked, and would take the command as the answer. Close the question first.";
+/** The detail of a text of more than one line at a box whose line break submits it (`idle.frame.newlineSubmits`). */
+const NEWLINE_SUBMITS = "This input box submits at a line break, so only one line can be sent here. Send the text as one line.";
 /**
  * Submit or Discard on a box that no longer holds the text: what the person saw is gone. The route
  * reads this exact sentence to tell a returned card's Discard that only the card may go (ADR 0122).
@@ -1932,8 +1952,25 @@ function aboveUnchanged(before: Snap, after: Snap, scroll = 0): boolean {
     if (tail.length === b.length && tail.every((row, i) => row === b[i])) return true;
     const lost = tail.length - b.length;
     if (bandMoved && lost > 0 && lost <= bandRows && b.some((row) => row.length > 0) && b.every((row, i) => row === tail[i])) return true;
+    if (shift > 0 && pinnedScroll(a, b, shift)) return true;
   }
   return false;
+}
+
+/**
+ * The scroll of {@link aboveUnchanged} under one pinned row: the screen's first row stays where it is,
+ * the same text, while the rows under it scroll up by `shift`. Every row under the pinned one must be
+ * the row `shift` lower down before, so no row is new; only rows that left at the top are gone. The
+ * running-turn compare holds the same rule ({@link aboveScrolled}). Claude Code 2.1.319 over Herdr
+ * (lab, 2026-11-07, 215 columns, a full screen): a slash command whose text wraps grows the box one row
+ * up, the transcript scrolls one row, and the screen's first row stays blank; read as a changed screen,
+ * every long `/subtask` was typed and never submitted.
+ */
+function pinnedScroll(before: readonly string[], after: readonly string[], shift: number): boolean {
+  if (before.length === 0 || after.length < 2 || before[0] !== after[0]) return false;
+  const rest = before.slice(1 + shift);
+  if (rest.length !== after.length - 1) return false;
+  return rest.some((row) => row.length > 0) && rest.every((row, i) => row === after[i + 1]);
 }
 
 /** The lines with the first one's lead character cut: a shell line's `!` turns into the box's prompt glyph. */
@@ -1985,6 +2022,12 @@ export interface WholePaste {
    * its box is not the typed text. Absent: the paste may fold.
    */
   readonly folds?: false;
+  /**
+   * The collapse form's `lines` group counts the paste's lines, not its line breaks (the profile's
+   * `paste.foldLines: "lines"`, opencode: one line folds to `[Pasted ~1 lines]`). Absent: the line
+   * breaks, as Claude Code counts them.
+   */
+  readonly foldsLines?: true;
 }
 
 /**
@@ -2022,12 +2065,13 @@ export function wholePaste(match: ProfileMatch | null, lines: readonly string[],
   const text = lines.join("\n");
   if (lines.length === 1 && text.length <= WHOLE_PASTE_MIN_CHARS) return null;
   if (reservedLead(lines[0] ?? "", match.profile.reservedLeads) !== null) return null;
-  if (paste.image === undefined) return { images: 0, image: null, lines, literal: lines };
+  const counted: Pick<WholePaste, "foldsLines"> = paste.foldLines === "lines" ? { foldsLines: true } : {};
+  if (paste.image === undefined) return { images: 0, image: null, lines, literal: lines, ...counted };
   const image = new RegExp(paste.image, "uy");
   const pieces = pastePieces(text);
   const kept = pieces.filter((piece) => !(isUploadImagePath(piece) && imageFile(piece.trim())));
   const images = pieces.length - kept.length;
-  return { images, image, lines: images === 0 ? lines : kept.join("\n").split("\n"), literal: lines };
+  return { images, image, lines: images === 0 ? lines : kept.join("\n").split("\n"), literal: lines, ...counted };
 }
 
 /**
@@ -2081,7 +2125,9 @@ function boxHolds(frame: Frame, prefix: string, lines: readonly string[], collap
  * carries one, must say one line: each written line is its own write. A text written as ONE paste
  * (`whole`) first shows its image tokens, then may stand as one collapse form for all of it, whose
  * line count is exactly the line breaks the kept text holds (Claude Code counts `+M lines` as the
- * `\n`s in the paste; lab, 2.1.304), or else lands literally, never one line of it folded. Its tokens
+ * `\n`s in the paste; lab, 2.1.304), or its lines where the profile says the harness counts so
+ * (`paste.foldLines`, {@link WholePaste.foldsLines}: opencode, #749), or else lands literally, never
+ * one line of it folded. Its tokens
  * are read with white space taken out, since the box may wrap inside one. Without `whole` none of this
  * is read: a profile that writes per line keeps the rule above.
  */
@@ -2146,7 +2192,8 @@ function boxMatchesForm(box: string, prefix: string, lines: readonly string[], c
     const after = q;
     const m = whole.folds === false ? null : take(collapse);
     const count = m?.groups?.lines;
-    if (m !== null && q === squeezed.length && (count === undefined ? lines.length === 1 : Number(count) === lines.length - 1)) return true;
+    const expected = whole.foldsLines === true ? lines.length : lines.length - 1;
+    if (m !== null && q === squeezed.length && (count === undefined ? lines.length === 1 : Number(count) === expected)) return true;
     p = at[after]!;
   }
   for (const line of lines) {
@@ -2572,6 +2619,19 @@ const CLEARED_FREE_POLLS = 1;
 const DRAFT_LEFT_MS = 2000;
 /** Polls in a row with no pane before its held requests end `pane_gone`. */
 const MISSING_POLLS = 3;
+/**
+ * Poll reads in a row, each taken after the row ended, that show the pane's box empty under no modal
+ * before a held row that ended `typed_not_submitted` goes ({@link SendProtocol.tickTyped}). Two, as a
+ * queued card's idle-and-empty exit (queued.ts `IDLE_EMPTY_POLLS`): one read can be a frame on its way.
+ */
+const TYPED_GONE_POLLS = 2;
+/**
+ * The least time between two reads that count for {@link SendProtocol.tickTyped}. A poke after a send
+ * takes two reads a few milliseconds apart, and those are one look at the pane, not two.
+ */
+const TYPED_GONE_GAP_MS = 1500;
+/** No typed row goes sooner than this after it ended, so the person sees its card ({@link SendProtocol.tickTyped}). */
+const TYPED_GONE_SEEN_MS = 5000;
 
 /** The agent part of a pane generation (`<agent>:<session id>`): a session id that resolves or a /clear keeps it. */
 function agentOfGeneration(generation: string): string {
@@ -2694,6 +2754,8 @@ export class SendProtocol {
   private readonly openSends: OpenSend[] = [];
   /** Sends that settled `sent` + `queued`, with their texts, until the journal or the box closes them (ADR 0122). */
   private readonly queuedSends: QueuedSends;
+  /** Per ended `typed_not_submitted` row: the empty-box polls in a row since it ended, and the newest one's time ({@link tickTyped}). */
+  private readonly typedEmpty = new Map<string, { count: number; at: number }>();
   /** Releases that went back because their box was still starting ({@link RunState.startWait}): no turn can come from them. */
   private readonly startWaits = new Set<string>();
 
@@ -2744,6 +2806,64 @@ export class SendProtocol {
       const read = boxOf(paneId);
       if (read !== null) this.boxRead(session, paneId, { ...read, poll: true });
     }
+  }
+
+  /**
+   * The poll's tick for the held rows that ended `typed_not_submitted` (#739). Such a row says its text
+   * is still in the box and offers Submit and Discard on that box. It used to have no exit but a tap or
+   * the hour of {@link HoldStore.prune}: on a crew member's pane, where the card has no buttons, it stood
+   * over an empty box until the hour ran out, and a restart read it back from disk. It now ends the way
+   * a returned queued card does (queued.ts, ADR 0122), when a later read shows the box without it, with
+   * the stricter reading of "without it" that cannot misread a wrapped, folded or scrolled draft: the
+   * box found and EMPTY, under no modal and with no turn running, on {@link TYPED_GONE_POLLS} poll reads
+   * in a row, each taken after the row ended, at least {@link TYPED_GONE_GAP_MS} after the one before it,
+   * and while no send runs on the pane (during a run the box holds that send's own text). Any other read
+   * starts the count again. No row goes before {@link TYPED_GONE_SEEN_MS} after it ended, so a person
+   * sees its card. The row's file goes and nothing is pressed; a box that
+   * shows only Collie's probe characters is not empty here, the safe side. No harness name: every
+   * profile reads its empty box as `""` (`SurfaceShadow.boxOf`, a placeholder included).
+   * Returns the ids that went, for a test. Never throws.
+   */
+  tickTyped(session: string, readOf: (paneId: string) => { readonly box: string | null; readonly at: number; readonly turn: SurfaceTurn } | null, surfaceOf: (paneId: string) => Surface | undefined): string[] {
+    const holds = this.deps.holds;
+    if (holds === undefined) return [];
+    const gone: string[] = [];
+    const open = new Set<string>();
+    try {
+      for (const entry of holds.list(session)) {
+        if (entry.state !== "ended" || entry.outcome !== "typed_not_submitted") continue;
+        open.add(entry.id);
+        const read = readOf(entry.paneId);
+        const surface = surfaceOf(entry.paneId);
+        const endedAt = entry.endedAt ?? entry.heldAt;
+        // A read from before the row ended, or one already counted, says nothing new.
+        const last = this.typedEmpty.get(entry.id);
+        if (read === null || read.at <= endedAt || (last !== undefined && read.at <= last.at)) continue;
+        const running = this.deps.locks.busy(`${session}\u0000${entry.paneId}`, this.now());
+        if (running) continue;
+        // Empty, and at rest: a turn that runs may still draw into the box.
+        const empty = read.box === "" && read.turn !== "running" && surface !== undefined && surface.modal === "none" && surface.turn !== "running";
+        if (!empty) {
+          this.typedEmpty.delete(entry.id);
+          continue;
+        }
+        // A read too soon after the one counted is the same look at the pane.
+        if (last !== undefined && read.at - last.at < TYPED_GONE_GAP_MS) continue;
+        const count = Math.min((last?.count ?? 0) + 1, TYPED_GONE_POLLS);
+        if (count < TYPED_GONE_POLLS || read.at < endedAt + TYPED_GONE_SEEN_MS) {
+          this.typedEmpty.set(entry.id, { count, at: read.at });
+          continue;
+        }
+        this.typedEmpty.delete(entry.id);
+        if (holds.remove(entry.id)) gone.push(entry.id);
+      }
+    } catch (err) {
+      console.warn(`[send] typed rows on ${session} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // The count of a row that went another way (Dismiss, Submit, Discard, the hour) goes with it.
+    for (const id of this.typedEmpty.keys()) if (!open.has(id) && holds.get(id) === null) this.typedEmpty.delete(id);
+    if (gone.length > 0) console.log(`[send] ${String(gone.length)} typed row(s) on ${session} retired: the box reads empty`);
+    return gone;
   }
 
   /**
@@ -3475,6 +3595,52 @@ export class SendProtocol {
   }
 
   /**
+   * On start, before the first poll (issue 740). A held request whose budget ran out while the bridge was
+   * down ends `expired` at its own `expiresAt`, not at the first poll: replayed, it ended with a fresh end
+   * time, so its "Not sent" card stood for another {@link HOLD_ENDED_KEEP_MS} after every restart. Its
+   * request settles `expired` and the counters take it, as {@link endHeld} does. The row stays only for
+   * what is left of that window, so a person who has not seen the card yet still does; a row whose end
+   * (now or earlier, `expired`) is older than the window goes outright, text and all. Returns the ids of
+   * both, for the one log line on start.
+   */
+  static expireHoldsOnStart(holds: HoldStore, store: RequestStore, now: number, ledger?: SendLedger): HoldsOnStart {
+    const ended: string[] = [];
+    const dropped: string[] = [];
+    for (const entry of holds.list()) {
+      if (entry.state === "held" && now >= entry.expiresAt) {
+        SendProtocol.settleExpired(store, entry.id, ledger);
+        if (now - entry.expiresAt > HOLD_ENDED_KEEP_MS) {
+          if (holds.remove(entry.id)) dropped.push(entry.id);
+          continue;
+        }
+        if (holds.end(entry.id, "expired", undefined, entry.expiresAt) !== null) ended.push(entry.id);
+        continue;
+      }
+      if (entry.state !== "ended" || entry.outcome !== "expired") continue;
+      if (now - (entry.endedAt ?? entry.heldAt) <= HOLD_ENDED_KEEP_MS) continue;
+      if (holds.remove(entry.id)) dropped.push(entry.id);
+    }
+    return { ended, dropped };
+  }
+
+  /** The request of a held row whose budget ran out settles `expired`, and the counters take it ({@link expireHoldsOnStart}). */
+  private static settleExpired(store: RequestStore, id: string, ledger: SendLedger | undefined): void {
+    const record = store.get(id);
+    const held = record?.receipt;
+    if (record === null || held === undefined || record.phase !== "held") return;
+    const { reason: _none, queued: _never, detail: _noDetail, saw: _noSaw, ...rest } = held;
+    store.settle(id, { ...rest, outcome: "expired" });
+    try {
+      ledger?.send(
+        { harness: held.harness === "" ? "-" : held.harness, version: held.version ?? "-", profileId: held.profileId ?? "-", status: held.profileStatus ?? "-" },
+        { outcome: "expired", reason: undefined, probed: false },
+      );
+    } catch (err) {
+      console.warn(`[surface] counters failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
    * After a start, once the sessions are known: held requests of a session that no longer exists go,
    * text and all. A request still held settles `refused(pane_gone)`. Returns how many rows went.
    */
@@ -3890,7 +4056,7 @@ export class SendProtocol {
   private async steps(state: RunState): Promise<void> {
     const { request, match } = state;
     const profile = match?.profile ?? null;
-    let lines = sendLines(request.text);
+    const lines = sendLines(request.text);
     const leads = profile?.reservedLeads ?? GENERIC_LEADS;
     const writes = request.mode === "send" || request.mode === "command" || request.mode === "append" || request.mode === "replace";
 
@@ -4054,9 +4220,6 @@ export class SendProtocol {
         return;
     }
     if (request.mode !== "replace") this.lap(state, "s0");
-    // A dialog's own text field (`idle.frame.submitCloses`) may take a line break as its submit key, so
-    // its text goes in as one line, the lines joined with a space: the newline key never reaches it.
-    if (s0.frame?.submitCloses === true && lines.length > 1) lines = [lines.join(" ")];
 
     const prefix = request.mode === "append" && s0.frame !== null ? boxText(s0.frame) : "";
     const text = lines.join("");
@@ -4190,10 +4353,24 @@ export class SendProtocol {
   /** What every S0 read is held to before the mode's own rule: a held request's answer box, the manual Send's turn rule, the pane's generation. */
   private atS0(state: RunState, s0: Snap): void {
     // A held request is a message for the agent, in every mode a release runs (a send, a command, a
-    // Replace): a box that answers the agent's question would take it as the answer. It waits.
-    if (state.released === true && answersQuestion(state.match, s0)) {
-      state.answerWait = true;
-      throw new Ended("refused", "not_free", { surface: s0.surface, detail: ANSWER_BOX });
+    // Replace): a box that answers the agent's question would take it as the answer. It waits. So does
+    // every request that is no person's own send from the phone (a walky talky message, a hook, the
+    // CLI): only the person answers the agent's question.
+    if (answersQuestion(state.match, s0)) {
+      if (state.released === true || state.request.fromPhone !== true) {
+        state.answerWait = true;
+        throw new Ended("refused", "not_free", { surface: s0.surface, detail: state.released === true ? ANSWER_BOX : ANSWER_BOX_PERSON });
+      }
+      // A command the box would take as the answer, never run.
+      const leads = state.match?.profile.reservedLeads ?? GENERIC_LEADS;
+      const lead = reservedLead(sendLines(state.request.text)[0] ?? "", leads);
+      if (state.request.mode === "command" || (state.request.mode === "replace" && lead !== null)) {
+        throw new Ended("refused", "not_free", { surface: s0.surface, detail: ANSWER_BOX_COMMAND });
+      }
+    }
+    // A box whose line break submits it takes one line: a second line would go out as a second message.
+    if (s0.frame?.newlineSubmits === true && sendLines(state.request.text).length > 1) {
+      throw new Ended("refused", "multiline", { surface: s0.surface, detail: NEWLINE_SUBMITS });
     }
     state.manual = takesManualSend(s0.surface);
     if (state.manual) this.gateSteeringTurn(state, s0);
@@ -5436,7 +5613,8 @@ export class SendProtocol {
   /**
    * S2: the box emptied or a running sign showed. Anything else after the bound is `unknown`. A
    * `command` also passes when the box went away or no longer holds the text: a command may open its
-   * own screen (a picker, a panel) in the box's place.
+   * own screen (a picker, a panel) in the box's place. So does a send into a box that answers the
+   * agent's question (`idle.frame.answers`) once two reads in a row show no box: it closes on its answer.
    */
   private async awaitSent(state: RunState, s0: Snap, landing: Landing | null, lines: readonly string[]): Promise<void> {
     const { command, manual } = state;
@@ -5451,10 +5629,6 @@ export class SendProtocol {
     let witnessed = false;
     const test = (snap: Snap): Verdict => {
       if (!command && !witnessed && (labelFromWitness(state.match) || (!state.queued && enterQueues(state.match)))) witnessed = showsQueued(snap, state.match?.profile.keys.queuedRow, sentText);
-      // A dialog's own text field closes once the submit key takes its text (`idle.frame.submitCloses`),
-      // and Escape is never sent: a read without it is the evidence, whatever stands there now (the
-      // next question, the box behind it). Only a read cut inside a box waits.
-      if (s0.frame?.submitCloses === true) return snap.frame?.submitCloses === true || snap.surface.reason === "torn" ? "wait" : "pass";
       if (s0.frame !== null) {
         // Queued behind a running turn: a dialog that opened as the Enter went out may have taken it.
         // The Surface claiming a modal, or two reads in a row with no box, end the request on their
@@ -5464,7 +5638,10 @@ export class SendProtocol {
           dialog = true;
           return "fail";
         }
-        if (snap.frame === null) return command ? "pass" : "wait";
+        // A box that answers the agent's question closes when it takes the answer: the dialog it came from
+        // returns (a note), the next question opens or the composer comes back. S1 read the text in it and
+        // the submit key went out, so the box gone on two reads in a row (one may be torn) is the evidence.
+        if (snap.frame === null) return command || (s1Frame?.answers === true && frameless >= FRAMELESS_READS) ? "pass" : "wait";
         // A command's own screen drawn where the box stood ({@link screenInBox}) took the box as surely as no frame.
         if (command && screenInBox(snap, state)) return "pass";
         // Queued: the running sign showed before Enter, so only the box letting go of the text is

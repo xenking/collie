@@ -160,7 +160,10 @@ const DRAWS_THE_SAME_BOX = (name: string): boolean =>
   name.startsWith("pi--omo-") ||
   name.startsWith("hermes--") ||
   name === "pi--prose-quoted-omo-dialog-above-editor.txt" ||
-  name === "pi--v130-gentle-draft-wrapped.txt";
+  name === "pi--v130-gentle-draft-wrapped.txt" ||
+  // An extension's editor with `❯` in column 0 between pi's own rules (issue 722).
+  name.startsWith("pi--v150-gentle-quiet-") ||
+  name.startsWith("pi--v130-quiet-prompt-");
 
 describe("non-Claude fixtures", () => {
   it("yield null with the Claude profile, except the harnesses that draw the same box", () => {
@@ -416,6 +419,43 @@ describe("findInputFrame", () => {
     expect(findInputFrame(mixed, IDLE)!.placeholder).toBe(false);
     expect(findInputFrame(lines(RULE, "❯", RULE), IDLE)!.placeholder).toBe(false);
     expect(findInputFrame(lines(RULE, "❯", RULE), IDLE)!.interior.text).toBe("");
+  });
+
+  it("a cursor on the first glyph of a ghost suggestion is a placeholder, not a draft (issue 659)", () => {
+    // Claude Code with the next-steps plugin draws the suggestion in the empty box with its cursor, a
+    // reverse-video cell, on the first letter: `ESC[7m` + "A", then the dim rest.
+    const cursor = (text: string): AnsiSegment => ({ ...plainRun(text), inverse: true });
+    const box = (...runs: AnsiSegment[]): StyledLine[] => [styled(plainRun(RULE)), styled(plainRun("❯ "), ...runs), styled(plainRun(RULE))];
+
+    const ghost = findInputFrame(box(cursor("A"), dim("dd unit tests for parse_csv_line")), IDLE)!;
+    expect(ghost.placeholder).toBe(true);
+    expect(ghost.anchorsHit).toContain("placeholder-sgr");
+  });
+
+  it("a one-letter draft under the cursor stays a draft: nothing dim follows the cursor cell", () => {
+    const cursor = (text: string): AnsiSegment => ({ ...plainRun(text), inverse: true });
+    const box = (...runs: AnsiSegment[]): StyledLine[] => [styled(plainRun(RULE)), styled(plainRun("❯ "), ...runs), styled(plainRun(RULE))];
+
+    expect(findInputFrame(box(cursor("A")), IDLE)!.placeholder).toBe(false);
+    expect(findInputFrame(box(plainRun("a"), cursor(" ")), IDLE)!.placeholder).toBe(false);
+  });
+
+  it("a typed word before dim completion text stays a draft: typed cells are not dim", () => {
+    const cursor = (text: string): AnsiSegment => ({ ...plainRun(text), inverse: true });
+    const box = (...runs: AnsiSegment[]): StyledLine[] => [styled(plainRun(RULE)), styled(plainRun("❯ "), ...runs), styled(plainRun(RULE))];
+
+    expect(findInputFrame(box(plainRun("add"), dim(" unit tests")), IDLE)!.placeholder).toBe(false);
+    expect(findInputFrame(box(plainRun("add"), cursor(" "), dim("unit tests")), IDLE)!.placeholder).toBe(false);
+    // The cursor skip is for the first cell only: a reverse-video cell after typed text is no ghost cursor.
+    expect(findInputFrame(box(plainRun("a"), cursor("d"), dim("d unit tests")), IDLE)!.placeholder).toBe(false);
+  });
+
+  it("an all-dim hole is still a placeholder, and a non-dim cell after the cursor cell leaves a draft", () => {
+    const cursor = (text: string): AnsiSegment => ({ ...plainRun(text), inverse: true });
+    const box = (...runs: AnsiSegment[]): StyledLine[] => [styled(plainRun(RULE)), styled(plainRun("❯ "), ...runs), styled(plainRun(RULE))];
+
+    expect(findInputFrame(box(dim("add unit tests")), IDLE)!.placeholder).toBe(true);
+    expect(findInputFrame(box(cursor("a"), plainRun("dd unit tests")), IDLE)!.placeholder).toBe(false);
   });
 
   it("marks a placeholder by its colours alone: a whole hole in the placeholder colour, no faint attribute (issue 510)", () => {

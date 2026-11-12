@@ -15,7 +15,7 @@
 // preview shows the masked rows before anything leaves, so the person still reads them and can switch
 // them off. That door also adds the phone's own facts (`readClientFacts`) to the setup block.
 
-import { ExternalLink, Search } from "lucide-react";
+import { Icon } from "@/components/icons/icon";
 import { useEffect, useState, type MouseEvent } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -30,6 +30,7 @@ import { canCopyText, copyText } from "@/lib/clipboard";
 import { t, tn } from "@/lib/i18n";
 import { probeStandalone } from "@/lib/nav-entry";
 import { fitLink, hasTyped, reportFields, reportText, searchLink, type ClientFacts, type ReportContext, type ReportInput } from "@/lib/report/body";
+import { reportedSends } from "@/lib/report/signal";
 import { closeReport, readEpisodes, useReportTarget, type DialogTrouble, type Episode, type ReportTarget } from "@/lib/report/store";
 import { getServerBuild } from "@/lib/server-build";
 import { setStatus } from "@/lib/status";
@@ -42,12 +43,8 @@ export function ReportSheetHost() {
   return <ReportSheet target={target} onClose={closeReport} />;
 }
 
-/** The sends a report lists: the streak's own when the card named them and the bridge still has them, else the pane's recent ones. */
-export function reportedSends(rows: readonly SendReceiptRow[], requestIds: readonly string[] | undefined): SendReceiptRow[] {
-  if (requestIds === undefined || requestIds.length === 0) return [...rows];
-  const named = rows.filter((row) => requestIds.includes(row.requestId));
-  return named.length > 0 ? named : [...rows];
-}
+// The sends a report lists live beside the trouble signal (lib/report/signal.ts), which reads the same ones.
+export { reportedSends };
 
 /** What the phone knows about itself, for a report from the unread-dialog card. Read once per open. */
 export function readClientFacts(): ClientFacts {
@@ -294,12 +291,12 @@ export function ReportSheetView({ context, contextError, rows, episodes, fromSet
             onClick={link.clipboard ? (event) => void openWithClipboard(event) : undefined}
             className={cn(buttonVariants({ variant: "default" }), "h-11")}
           >
-            <ExternalLink className="size-4" />
+            <Icon name="open-external" className="size-4" />
             {t("report.sheet.open")}
           </a>
         ) : (
           <Button type="button" className="h-11" data-slot="report-open" disabled>
-            <ExternalLink className="size-4" />
+            <Icon name="open-external" className="size-4" />
             {t("report.sheet.open")}
           </Button>
         )}
@@ -315,7 +312,7 @@ export function ReportSheetView({ context, contextError, rows, episodes, fromSet
           rel="noopener noreferrer"
           className="inline-flex min-h-11 items-center justify-center gap-1.5 text-xs text-muted-foreground underline underline-offset-2"
         >
-          <Search className="size-3.5" />
+          <Icon name="search" className="size-3.5" />
           {t("report.sheet.search")}
         </a>
       </div>

@@ -20,6 +20,7 @@ import {
   fetchMachines,
   fetchPane,
   fetchPaneWalky,
+  fetchPanePins,
   fetchSnapshot,
   isApiErrorStatus,
   isPairingRefusal,
@@ -29,7 +30,7 @@ import { parseAnsi } from "@/lib/ansi";
 import { noteUpdateRun } from "./self-update";
 import { splitLines } from "@/lib/blocks";
 import { type CacheHold, holdCacheReadings } from "@/lib/cache-hold";
-import { isLostLatched, type ReadFailureKind, wakeStrikeHolds } from "@/lib/connection-health";
+import { isLostLatched, type ReadFailureKind, strikeHolds } from "@/lib/connection-health";
 import { markLive as markPaneLive, markSavedCopy } from "@/lib/liveness";
 import { paneGridOf, settleSessionCapabilities } from "@/lib/mux-capability";
 import { ambientSpaces, findPane } from "@/lib/hosts";
@@ -65,6 +66,7 @@ import type {
   PairedDeviceWire,
   PaneHistoryResponse,
   PaneReadResponse,
+  PinRow,
   ServerSummary,
   SessionSummary,
   SnapshotResponse,
@@ -751,6 +753,39 @@ async function readWalky(paneId: string, scope: Scope, signal: AbortSignal | und
   }
 }
 
+/** The last list of pins each pane answered, so a pane opened again shows its mark before the next read lands (M90). */
+const lastPins = new Map<string, { session: string | null; rows: PinRow[] }>();
+
+/** Forget every list of pins held, for a test: the lists outlive a pane view, so one case's would open the next. */
+export function resetPinsForTests(): void {
+  lastPins.clear();
+}
+
+/** The pins this phone last read for a pane, or `null` when it has not read any. */
+export function heldPins(paneId: string, scope: Scope | undefined, session: string | null = null): PinRow[] | null {
+  const held = lastPins.get(paneKey(paneId, scope));
+  return held?.session === session ? held.rows : null;
+}
+
+/**
+ * The pane's pinned messages, newest first, or `null` when they could not be read now (M90). Never throws: the
+ * list is a nicety on a Chat view, and a failed read (an older machine with no route, a pane with no session,
+ * a dropped link) leaves the mark as the pane's own `pins` count has it. A good read is kept, so the next
+ * visit to the pane starts from it.
+ */
+export async function readPins(paneId: string, scope: Scope | undefined, session: string | null = null, signal?: AbortSignal): Promise<PinRow[] | null> {
+  try {
+    const fresh = await fetchPanePins(scope, paneId, signal);
+    const key = paneKey(paneId, scope);
+    const previous = lastPins.get(key);
+    const rows = previous?.session === session ? shareEqual(previous.rows, fresh) : fresh;
+    lastPins.set(key, { session, rows });
+    return rows;
+  } catch {
+    return null;
+  }
+}
+
 export async function paneLoader({
   params,
   request,
@@ -878,9 +913,9 @@ export async function paneLoader({
     if (isAbortError(e)) throw e; // superseded revalidation — let React Router drop it
     rememberAuthError(scope, isAuthError(e));
     // Genuine network / server failure: show stale text flagged as degraded. A read that got no
-    // answer at all is the saved copy at once (see drawnFromSave), unless the wake's one strike
+    // answer at all is the saved copy at once (see drawnFromSave), unless the herd read's one strike
     // covers it: the herd read of the same poll did not latch either, and the retry decides.
-    const outage = readFailureKind(e) === "network" && !wakeStrikeHolds();
+    const outage = readFailureKind(e) === "network" && !strikeHolds();
     return stalePane(paneId, scope, lines, outage);
   }
 }

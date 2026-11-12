@@ -27,6 +27,7 @@ import type { CrewRequestInit, CrewTlsOptions } from "./transport.ts";
 import type { Warrant } from "./trust-store.ts";
 import { NARROW_VIEW, SESSIONS_ALL, SESSIONS_PARAM, SESSION_PARAM, type SnapshotView } from "../sessions.ts";
 import type { MuxConfig, SessionCard, SessionState } from "../types.ts";
+import type { CopiedRow } from "./standby-launchers.ts";
 import { parseCollisionReport, parsePairingReport, type PairingSync } from "./standby-devices.ts";
 import type { TakeoverBody } from "./takeover.ts";
 import { parseWarrant, parseWarrantActiveReport, type WarrantPush } from "./warrant.ts";
@@ -211,6 +212,21 @@ export const PANE_READ_BUDGET_MS = 5000;
  * Lead-local, never on the wire, so moving it needs no protocol bump.
  */
 export const PANE_WRITE_BUDGET_MS = 15000;
+
+/**
+ * How long a **forwarded worktree create** (`POST /api/worktree`, ADR 0126) may take before the lead gives up on
+ * it and tells the phone `write_outcome_unknown`.
+ *
+ * A create runs `git worktree add` on the member, opens the checkout as a space and may type a launcher into
+ * it: the member's own route holds its connection 90 s for that (`WORKTREE_ROUTE_BUDGET_S`, bridge/server.ts),
+ * and the phone waits 75 s (`WORKTREE_TIMEOUT_MS`, web/src/lib/api.ts). 5 s would read most creates on a real
+ * repo as unknown. 85 s stays inside the lead's own 90 s hold on the phone's connection, so the lead still
+ * answers. A phone that gave up first retries with the SAME request id, and the member answers from its receipt
+ * or joins the create in flight, so a long budget never makes two worktrees. The lead still dials it once.
+ *
+ * Lead-local, never on the wire, so moving it needs no protocol bump.
+ */
+export const WORKTREE_WRITE_BUDGET_MS = 85_000;
 
 /** How long a `hello` PROBE may take before the lead calls a member gone (§10.4), by default. */
 export const DEFAULT_CREW_HELLO_TIMEOUT_MS = 5000;
@@ -474,6 +490,9 @@ export type PeerOutcome<T> =
     }
   | (PeerFailure & { readonly ok: false; readonly receivedAt: number });
 
+/** How a launcher copy ended (ADR 0127 point 5): landed, a deputy without the route, or anything else. */
+export type LaunchersCopyAnswer = "applied" | "no_route" | "failed";
+
 /** What a `hello` reports about the member that answered it (§5). */
 export interface HelloResult {
   readonly protocol: number;
@@ -609,7 +628,13 @@ export interface PeerClientDeps {
  * Returns `null` when either check fails — the caller reports it as unreachable, because a member the
  * lead cannot form a URL for is, from the phone's point of view, exactly a member that is not there.
  */
-export function crewUrl(address: string, route: string, params?: Record<string, string>): string | null {
+/**
+ * A crew call's query. A key the phone (or the lead, ADR 0127's `?cwd=`) repeats is a list, sent as
+ * the same key once per value, so a member's `searchParams.getAll` reads every one of them.
+ */
+export type CrewParams = Readonly<Record<string, string | readonly string[]>>;
+
+export function crewUrl(address: string, route: string, params?: CrewParams): string | null {
   const withScheme = /^https?:\/\//i.test(address) ? address : `https://${address}`;
   let base: URL;
   try {
@@ -629,7 +654,13 @@ export function crewUrl(address: string, route: string, params?: Record<string, 
   // Defence in depth against a route assembled from anything but a literal upstream: `..` segments
   // are normalised by `new URL`, so this catches an escape after normalisation rather than before it.
   if (!url.pathname.startsWith(CREW_PREFIX)) return null;
-  for (const [k, v] of Object.entries(params ?? {})) url.searchParams.set(k, v);
+  for (const [k, v] of Object.entries(params ?? {})) {
+    if (typeof v === "string") {
+      url.searchParams.set(k, v);
+      continue;
+    }
+    for (const each of v) url.searchParams.append(k, each);
+  }
   return url.toString();
 }
 
@@ -755,6 +786,29 @@ export class PeerClient {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
     });
+  }
+
+  /**
+   * `POST /crew/v1/launchers-copy` — the crew's launcher rows to the DEPUTY (ADR 0127 point 5, §18.14).
+   *
+   * A passthrough dial, so the deputy's own status is kept: a 404 is a build before the route, and the
+   * lead stops sending to it until the next connect. Signed as the pairing sync is. Any other answer
+   * that is not a 2xx, or no answer, is `failed`, and the next sweep's report decides again.
+   */
+  async launchersCopy(link: CrewLink, rows: readonly CopiedRow[]): Promise<LaunchersCopyAnswer> {
+    const outcome = await this.proxy(
+      link,
+      "launchers-copy",
+      undefined,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows }) },
+      undefined,
+      true,
+    );
+    if (!outcome.ok) return "failed";
+    const status = outcome.value.status;
+    await outcome.value.body?.cancel().catch(() => {});
+    if (status === 404) return "no_route";
+    return status >= 200 && status < 300 ? "applied" : "failed";
   }
 
   /**
@@ -914,7 +968,7 @@ export class PeerClient {
   async proxy(
     link: CrewLink,
     route: string,
-    params?: Record<string, string>,
+    params?: CrewParams,
     init: CrewRequestInit = {},
     budgetMs?: number,
     sign = false,
@@ -954,7 +1008,7 @@ export class PeerClient {
   private async dial(
     link: CrewLink,
     route: string,
-    params: Record<string, string> | undefined,
+    params: CrewParams | undefined,
     init: CrewRequestInit,
     mode: "consumed" | "passthrough",
     // The one knob a caller may widen, and three callers do: the verdict probe's patient budget

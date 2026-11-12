@@ -1,5 +1,5 @@
 import { chmodSync, existsSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, networkInterfaces } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
@@ -22,6 +22,7 @@ import type { JournalRoots, ModelCatalogs } from "./journal/registry.ts";
 import { resolveMux } from "./mux/herdr-core/pick.ts";
 import { DEFAULT_MUX, muxEndpointVar } from "./mux/registry.ts";
 import { DEFAULT_MAX_UPLOAD_MB } from "./uploads.ts";
+import { PAIR_LIMIT } from "./walky/rate.ts";
 
 // All bridge configuration, resolved once at startup. Env-driven so the systemd unit and the
 // plugin launcher can configure it without code changes. Defaults are safe for a single-user,
@@ -472,6 +473,12 @@ export interface Config {
    */
   walky: boolean;
   /**
+   * The walky talky pair cap (`COLLIE_WALKY_PAIR_LIMIT`): messages in ten minutes between the same two
+   * panes, either direction, counted by this bridge alone. 6 by default, 1 to 100; a value outside that
+   * range, or one that is not an integer, warns and takes the default.
+   */
+  walkyPairLimit: number;
+  /**
    * Whether `tailscale serve` is bypassed (COLLIE_SKIP_SERVE=1) because an operator-run reverse
    * proxy (Caddy/Nginx) fronts the loopback bridge instead. The bridge itself handles every request
    * identically either way — this flag only informs the startup warnings: without `tailscale serve`
@@ -559,6 +566,41 @@ export function nonLoopbackBindRefusal(
 }
 
 /**
+ * The one `[bridge] FATAL:` line for a door that could not listen (issue 699). Both `Bun.serve`
+ * sites in `bridge/index.ts` print it and exit nonzero: a bridge that stays alive without its
+ * listener is invisible to launchd, systemd and the Windows task, which restart only an exit.
+ *
+ * The Bun message ("Failed to start server. Is port 8787 in use?") hides the real code, so the
+ * line carries the address, the port, `code` and `message`. When the host is a specific address
+ * (not loopback, not a wildcard) that no interface holds, it adds the likeliest cause: a crew
+ * member binds the tailnet address, and that address is absent until Tailscale is up after a boot.
+ *
+ * Pure: the interface addresses arrive as a plain string array, so a test needs no real network.
+ */
+export function listenFailureLine(opts: {
+  door: "front door" | "standby door";
+  host: string;
+  port: number;
+  code: string | undefined;
+  message: string;
+  interfaces: readonly string[];
+}): string {
+  const host = opts.host.trim().replace(/^\[|\]$/g, "");
+  const wildcard = host === "" || host === "0.0.0.0" || host === "::";
+  const absent =
+    !wildcard && !isLoopbackBindHost(host) && !opts.interfaces.some((address) => address.toLowerCase() === host.toLowerCase());
+  const shown = wildcard ? "every interface" : host;
+  const code = opts.code === undefined || opts.code === "" ? "no code" : opts.code;
+  const hint = absent ? "; address not on any interface yet (is Tailscale up?)" : "";
+  return `[bridge] FATAL: ${opts.door} cannot listen on ${shown}:${opts.port} (${code}: ${opts.message})${hint}`;
+}
+
+/** Every address of every network interface of this machine, as plain strings. */
+export function interfaceAddresses(): string[] {
+  return Object.values(networkInterfaces()).flatMap((list) => (list ?? []).map((entry) => entry.address));
+}
+
+/**
  * herdr's default socket location: `~/.config/herdr/herdr.sock` on Unix, `%APPDATA%\herdr\herdr.sock`
  * on Windows (herdr for Windows keeps its config root under AppData\Roaming). Pure so both branches
  * are unit-testable on any platform.
@@ -629,14 +671,17 @@ export function resolveJournalRoots(
       join(env.CODEX_HOME ?? join(home, ".codex"), "sessions"),
       env,
     ),
-    // TWO defaults, one adapter: Oh My Pi ships as `omp` and writes pi's own format into
-    // `~/.omp/agent/sessions`, so a host that runs it has a second home for the same log format.
-    // `PI_CODING_AGENT_DIR`, when the operator set it, is the one answer and neither is added.
+    // Pi, Oh My Pi and bundled Gentle Shell keep the same journal format in separate homes.
+    // An explicit Pi home still replaces the defaults; COLLIE_PI_ROOT can name several homes.
     pi: envRoots(
       "COLLIE_PI_ROOT",
       env.PI_CODING_AGENT_DIR
         ? join(env.PI_CODING_AGENT_DIR, "sessions")
-        : [join(home, ".omp", "agent", "sessions"), join(home, ".pi", "agent", "sessions")],
+        : [
+            join(home, ".omp", "agent", "sessions"),
+            join(home, ".pi", "agent", "sessions"),
+            join(home, ".gentle-shell", "agent", "sessions"),
+          ],
       env,
     ),
     // OpenCode keeps one SQLite database at the top of its XDG data dir, not per-session files.
@@ -851,6 +896,7 @@ export function loadConfig(
     surfaceShadow: envBool("COLLIE_SURFACE_SHADOW", false, env),
     sendProtocol: envBool("COLLIE_SEND_PROTOCOL", true, env),
     walky: envBool("COLLIE_WALKY", true, env),
+    walkyPairLimit: envInt("COLLIE_WALKY_PAIR_LIMIT", PAIR_LIMIT, { min: 1, max: 100 }, env),
     skipServe: envBool("COLLIE_SKIP_SERVE", false, env),
     basePath: normaliseBasePath(env.COLLIE_BASE_PATH),
   };

@@ -1,5 +1,5 @@
-import { ListTree, Network, Rows3 } from "lucide-react";
-import { useEffect, useMemo, useState, type RefObject } from "react";
+import { Icon } from "@/components/icons/icon";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useRevalidator } from "react-router";
 
 import { RouteHeader, SettingsGear } from "@/components/app-header";
@@ -18,7 +18,8 @@ import { BuildStamp } from "@/components/build-stamp";
 import { CrewFooterLink } from "@/components/crew-footer-link";
 import { useCrew } from "@/components/crew-provider";
 import { CrewTab } from "@/components/crew-tab";
-import { UpdateBanner } from "@/components/update-banner";
+import { TelemetryNotice } from "@/components/telemetry-notice";
+import { UpdateBanner, arriveAtUpdateLine } from "@/components/update-banner";
 import { Fab } from "@/components/ui/fab";
 import { useAnySheetOpen } from "@/components/ui/sheet";
 import { TabBar } from "@/components/ui/tab-bar";
@@ -28,11 +29,13 @@ import { useKeyboardOpen } from "@/hooks/use-keyboard";
 import { useLocale } from "@/hooks/use-locale";
 import { useNotifyPrefs } from "@/hooks/use-notify-prefs";
 import { useWorkspaceChangeCounts } from "@/hooks/use-workspace-change-counts";
+import { useNewTabOrSheet } from "@/hooks/use-new-tab-or-sheet";
 import { useSpaceActions } from "@/hooks/use-spaces";
 import { useNav } from "@/hooks/use-nav";
 import { usePaneOpen } from "@/hooks/use-pane-open";
 import { useScrollMemory } from "@/hooks/use-scroll-memory";
 import { showBadge } from "@/lib/app-badge";
+import { takeBundleFocus, useBundleFocusPending } from "@/lib/bundle-apply";
 import { useLaunchers } from "@/lib/launchers";
 import { useMuxCapability } from "@/lib/mux-capability";
 import { setStatus } from "@/lib/status";
@@ -123,7 +126,11 @@ function ChangesTabBody({
 export function HomeRoute() {
   const data = useRootData();
   const nav = useNav();
-  const { creatingSpace, newTab, creatingTab, launching } = useSpaceActions();
+  const spaceActions = useSpaceActions();
+  const { creatingSpace, creatingTab, launching } = spaceActions;
+  // A workspace heading's "+" offers that machine's agents in a sheet, or makes the shell (M91). One
+  // sheet for the whole list, keyed on the heading tapped.
+  const plus = useNewTabOrSheet(spaceActions, data.scope);
   // The New page's Favourites and Recent, read once ahead of the tap so the page opens at its final
   // height (lib/folders.ts). Once per mount, for the machine this view shows.
   const folderHost = data.scope?.host;
@@ -282,6 +289,18 @@ export function HomeRoute() {
   // scrolls, so nothing else restores this. Keyed on the scope (host + session), so two herdr
   // sessions — or two crew members — keep independent positions. See lib/scroll-memory.ts.
   const scrollRef = useScrollMemory<HTMLDivElement>(`home:${scopeKey(data.scope)}`);
+  // THE UPDATE LINE, BROUGHT INTO VIEW ONCE (2026-11-06). A tap on the header mark while the app is
+  // updating opens this screen and asks for the line that says what is happening
+  // (`lib/bundle-apply.ts`). Taken after mount, so the scroll memory's layout effect has already put
+  // the list back where it was and this moves it on from there; and taken in place too, for a tap
+  // made on this screen. A plain visit sets no flag and scrolls nowhere. Centred, because the New
+  // button floats over the foot of the list and `nearest` would park the line under it.
+  const updateLine = useRef<HTMLDivElement>(null);
+  const focusPending = useBundleFocusPending();
+  useEffect(() => {
+    if (!focusPending || !takeBundleFocus()) return;
+    arriveAtUpdateLine(updateLine.current);
+  }, [focusPending]);
   // "+ New" shrinks to the round "+" once the list has scrolled, and grows back at the top (card 3.2).
   const scrolled = useScrolledPast(scrollRef, 24);
   // The footer's tabs: Crew while a crew is configured, the Dashboard, and Files on a machine with a screen.
@@ -317,6 +336,8 @@ export function HomeRoute() {
             page gutter, not a full-bleed strip. Full-bleed it ran its left edge 16px outside the
             list it sat on top of — two left edges stacked, the loudest misalignment on the page. */}
         <ReadOnlyBanner device={data.device} />
+        {/* Once per device: the install count is on by default (M86 spec 02). Self-hides. */}
+        <TelemetryNotice />
 
         <main className="flex-1">
           {/* One list: every pane under the workspace it lives in, or one ranked list in Activity and
@@ -361,7 +382,7 @@ export function HomeRoute() {
                 scope: data.scope,
                 sessions: data.sessions,
                 creating: creatingTab,
-                onNewTab: (workspaceId, at) => void newTab(workspaceId, at),
+                onNewTab: plus.request,
               }}
               isolated={isolatedSpaces}
               hidden={prefs.hiddenSpaces}
@@ -428,7 +449,7 @@ export function HomeRoute() {
             available update / needed restart, then the build stamp (which bundle you're running,
             with a stale-cache nudge). The crew line self-hides on a solo install. */}
         <CrewFooterLink scope={data.scope} className="px-4 pt-3" />
-        <UpdateBanner className="px-4 pt-3" />
+        <UpdateBanner ref={updateLine} className="px-4 pt-3" />
         {/* The footer below owns the safe area now, so the stamp only keeps its own air. */}
         {/* With the New button drawn, the stamp's air grows so the last row scrolls clear of it:
             16px gap + 56px button + 8px, from the footer's top edge. Set by capability, not by the
@@ -454,20 +475,20 @@ export function HomeRoute() {
         items={[
           // Crew leads, drawn only while a crew is configured (ADR 0085). Network is the Crew icon
           // the Settings card, the switcher sheet and the footer line wear.
-          ...(multi ? [{ value: "crew" as const, label: t("crew.title"), icon: <Network className="size-5" /> }] : []),
+          ...(multi ? [{ value: "crew" as const, label: t("crew.title"), icon: <Icon name="crew" className="size-5" /> }] : []),
           // The Dashboard tab carries the corner mark the Focus tab wore (ADR 0066 point 7), always:
           // it is information about the herd, not a nag, so it shows with the switch on or off.
           {
             value: "dashboard",
             label: t("home.tabs.dashboard"),
-            icon: <Rows3 className="size-5" />,
+            icon: <Icon name="tab-dashboard" className="size-5" />,
             badge: blockedCount,
             dot: readyUnseen,
             badgeLabel: blockedCount > 0 ? tn("home.tabs.blocked", blockedCount) : t("home.tabs.unseen"),
           },
           // The Files tab (2026-10-06, ADR 0085): the stored value stays `changes`. ListTree is the
           // one Files icon: the pane belt's pill and the Files screen's Tree toggle wear it.
-          ...(screenless ? [] : [{ value: "changes" as const, label: t("files.title"), icon: <ListTree className="size-5" /> }]),
+          ...(screenless ? [] : [{ value: "changes" as const, label: t("files.title"), icon: <Icon name="files" className="size-5" /> }]),
         ]}
       />
       )}
@@ -497,6 +518,8 @@ export function HomeRoute() {
         <StatusArea />
       </ToastViewport>
 
+      {/* A workspace heading's New tab sheet (M91), one for the list. */}
+      {plus.sheet}
       {/* The pane menu a row's hold opens: the pane pill's sheet, with no read rows, so Pin to top
           leads. Mounted at the route's root, a sibling of the other sheets, for the stacking reason
           agent-chat.tsx gives for its own. */}

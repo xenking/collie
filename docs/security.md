@@ -77,6 +77,30 @@ that, the bridge refuses more than ten pairing attempts per source address per m
 `X-Forwarded-For` entry, the one the front door adds. From any other peer, that header is ignored. The
 counters live in memory and reset when the bridge restarts.
 
+### An agent does not pair a device
+
+`collie pair` refuses in a pane where an agent works. A paired device can read and drive every
+session. An agent that pairs one for itself skips every tap Collie asks of you. So the command asks
+the running bridge whether its pane runs an agent, and refuses there. `collie pair --json` refuses
+too. Run it in a shell pane or a terminal of your own. With no bridge running, or a bridge that does
+not know the pane, it does not refuse. The check is a speed bump, not a wall
+([What a program running as you can still do](#what-a-program-running-as-you-can-still-do)).
+
+Each pairing writes one `pair` line to the audit log. The line names the device's label, the route
+the claim came by, and the pane that made the code. The route is an address class: `loopback`,
+`tailnet`, `lan` or `internet`, never the address. Behind a front door on the same machine, such as
+`tailscale serve`, `forwardedFrom` gives the class of the address that door passed on. A local
+program can write that header itself, so `route` is the fact and `forwardedFrom` is a claim. The
+pane is `mintSession` and `mintPane`, or `not placed` when `collie pair` ran outside a pane or no
+bridge placed it. `collie pair` writes that pane into the pending code's file, and any program
+that runs as you can write that file too, so the pane is a hint, not proof. The label is the
+device's only id: `collie devices revoke` takes it. A refused `collie pair` writes a `pair-refused`
+line with the reason `agent-pane`. The log never holds the code or the token.
+
+```json
+{"ts":"2026-11-11T09:30:00.000Z","action":"pair","device":"pixel","detail":{"label":"pixel","route":"loopback","forwardedFrom":"tailnet","mintSession":"main","mintPane":"w1:p3"}}
+```
+
 ### The CLI's own reads
 
 At each start the bridge writes a new random secret to `local-secret` in its state folder.
@@ -141,10 +165,12 @@ bridge is out of reach. Every item below has a size bound and a lifetime.
 | Pairing token | localStorage | until unpair, revoke or expiry | deleted |
 | Settings: theme, language, pins | localStorage | until you change them | kept |
 | Unsent drafts | localStorage | 48 hours | deleted |
+| A theme you are trying | sessionStorage | until Keep, Back or the tab closes | kept |
 | Push endpoint | localStorage | until it changes | deleted |
 | App shell | Cache Storage | until the next build | kept |
 | Fonts and push titles | Cache Storage | until replaced | deleted |
 | Whistle speech model and engine files (only if you chose to copy them) | Cache Storage | until you remove them | deleted |
+| Math engine files this device used (only with an engine chosen) | Cache Storage | until the next build | deleted |
 | Herd and pane text, as last seen | IndexedDB `collie-store` | 24 hours | deleted |
 | Newest Chat turns of each pane | IndexedDB `collie-store` | 1 day, or the "Keep chat on this phone" setting | deleted |
 
@@ -201,11 +227,15 @@ Key security boundaries and risks:
   `~/.codex`, `~/.config/gh` or `~/.ssh` shows what is there. So does the `.env` of a second Collie
   whose config folder sits under the workspace. A hard link inside the folder to a file outside it is
   not caught either.
-- **A paired device can add launchers.** With the default `[phone] adds = true`, a phone may add a
-  row built from a recipe: an agent plus option chips whose flags the bridge picks from its own
+- **A paired device can add launchers.** With the default `[phone] adds = true` on the lead, a phone
+  may add a row built from a recipe: an agent plus option chips whose flags the bridge picks from its own
   table. A line typed by hand needs `free_text = true`, which is off by default. A recipe can still
   skip permission prompts. Such a row carries a "No prompts" badge, and each device confirms it once.
-  Revoking a device removes the rows it added. Set `adds = false` to turn off every phone-added row
+  Revoking a device removes the rows it added. Set `adds = false` to turn off every phone-added row.
+  The allowlist stays on the phone door: a phone names a row and never sends a line. A member
+  accepts a row definition only from its lead, over the pinned crew link, and refuses one that a phone
+  sends to it directly. The lead already holds the pairing, so this adds no power over what a paired
+  phone can do in a shell
   ([Your own launchers](configure.md#launchers-added-from-a-phone),
   [ADR 0094](../.adr/0094-launchers-added-from-a-phone.md)).
 - **A paired device can run a one-off command.** With the default `[phone] run = true`, a phone may
@@ -273,6 +303,31 @@ Key security boundaries and risks:
 Restrict access further with Tailscale ACLs and `COLLIE_TRUSTED_USER`. Provided as-is, without
 warranty.
 
+## What a program running as you can still do
+
+A person's tap guards pairing. A program that runs under your own user account can still get a
+write credential, or skip the tap. The list below states facts. It is not a list of fixes. The
+state folder is `~/.local/state/collie` unless `COLLIE_STATE_DIR` moves it, and the config folder
+holds the instance's `.env`.
+
+| File or door | What it gives a program that runs as you |
+| --- | --- |
+| `paired-devices.json` in the state folder | It holds hashes, not tokens, so a read gives nothing to spend. A program that adds its own entry, with the hash of a token it made up, has a paired device. The bridge reads the file on each request, so no restart is needed. |
+| `pairing-pending.json` in the state folder | A program that writes the hash of a code it chose can claim that code at `POST /api/pair`. It never runs `collie pair`, so the agent check never runs, and the audit line names whatever pane the file names, or `not placed`. |
+| A pairing code on screen | `collie pair` prints its code in a pane. A program that reads that pane through the multiplexer can claim the code before your phone does. The phone then hears that no code waits, and the audit log shows a pairing you did not make. |
+| `POST /api/pair` on loopback | It needs a live code. Its `Origin` rule stops a web page, not a local program: a local program writes its own `Origin` and `Host` headers, and a request with no `Origin` is taken from a loopback host name. |
+| `local-secret` in the state folder | The CLI's read credential. It reads every session through the bridge on the same machine. It never writes, and never opens the Files view. |
+| The profile of a paired browser | The browser keeps its token in local storage. A program that reads the profile files gets a full device token. A program that drives the browser, for example through a debugging port, taps as you. |
+| `.env` and `config.toml` in the config folder | A program can loosen a setting, such as `COLLIE_ALLOW_ANY_HOST=1` or `free_text = true` for the launchers a phone adds, then restart the user service. |
+| `standby-devices.json` on a crew deputy | A program on the deputy can add the hash of its own token. While the standby door is armed, that token can confirm a takeover, and the takeover adds it to the deputy's own paired devices. |
+| `crew-trust.json` in the state folder | It holds this machine's crew key and the crew secret. A program that reads it can speak to the crew as this machine. |
+| The multiplexer's socket | A program can type into any pane without Collie at all, a yes on an agent's permission prompt included. |
+| `audit.log` in the state folder | A program can change or delete lines. The log tells the truth only while nobody has changed it. |
+| Collie's own files: the binary, the checkout and the user service unit | A program that changes them changes what runs as Collie. |
+
+Collie's taps protect against a remote party and against an agent that follows the rules. They do
+not sandbox a program that runs as you.
+
 ## Durable agents
 
 A durable agent you attach is code you run or deploy, and Collie treats its text as untrusted. A private socket
@@ -339,10 +394,10 @@ entirely.
 Why it is built this way: [ADR 0096](../.adr/0096-speech-can-stay-on-the-phone.md). The setup steps
 are in [Voice input and Web Push](voice-and-push.md#whistle-speech-to-text-on-your-phone-or-your-host).
 
-## Walky talky
+## WalkyTalky
 
-Walky talky carries messages between agent sessions, so this section says what a message proves and
-what it does not. The commands are in [Walky talky](walky-talky.md).
+WalkyTalky carries messages between agent sessions, so this section says what a message proves and
+what it does not. The commands are in [WalkyTalky](walky-talky.md).
 
 ```sh
 # in .env, then run `collie restart`
@@ -382,7 +437,24 @@ That line makes this machine refuse every message for its panes. The CLI on the 
 > way between machines and tells the receiver which machine sent it. It does not protect you from a
 > program on the same machine that lies about itself.
 
-Walky talky adds no outbound call. A message to another machine rides the crew link that already
+The community theme list is another outbound call, and it also happens only on a tap: **Refresh** in
+the **Browse community themes** sheet of the **Theme** card. The bridge makes one anonymous HTTPS
+`GET`, with the user-agent `Collie/<version>` and nothing about you:
+
+```text
+https://colliepwa.dev/themes/registry.json
+```
+
+The address is fixed in the bridge. The one exception is `COLLIE_THEME_REGISTRY_URL`, for a test
+against a staged copy of the site ([Configure](configure.md#the-community-theme-list)). The bridge
+follows a redirect only on the address's own site, refuses a file that is not typed as JSON, over 1 MB or with more than 500 themes,
+and keeps a theme only when Collie's own theme parser accepts it. It keeps the list in the `themes` folder of its state folder.
+The phone checks every theme again before it draws one, and the page itself never calls colliepwa.dev.
+The refresh needs a write device, runs on the lead only, allows one fetch at a time and is audited.
+A refresh within a minute of a good fetch answers that copy and fetches nothing. A copy older than a
+week is not listed, so the next tap fetches again.
+
+WalkyTalky adds no outbound call. A message to another machine rides the crew link that already
 exists, and no model, cloud service or third party sees it.
 
 ## What leaves the machine is masked
@@ -481,6 +553,16 @@ the line. Every line goes through the secret mask before it leaves the machine.
 
 Why it is built this way: [ADR 0107](../.adr/0107-sent-keeps-shell-lines-per-machine.md).
 
+## Pinned messages
+
+A pin is a copy of the message text. The machine that owns the pane keeps it in `<stateDir>/pins/`,
+one file for each session, mode 0600 in a folder at 0700. The file holds the whole text, tool results
+included, and every paired device can read it. `COLLIE_REDACT` masks the text that leaves the machine,
+not the file: the file keeps the copy as it was. Unpin a message to delete its copy.
+
+A rollback to an older build leaves `pins/` and `math/` in the state folder. An older build does not
+read them, so they do no harm, and you can delete both folders by hand.
+
 ## Secret files on Windows
 
 On Windows (experimental), Collie keeps its secret files private to your account, SYSTEM and
@@ -514,19 +596,54 @@ error, with the fix. A folder that Collie cannot check is a warning: `cannot con
 
 ## What leaves your machine
 
-Nothing, by default and by policy. Collie sends no install events, no usage statistics, no crash
-reports and no analytics. There is no flag that enables them.
+From 1.27.0 each Collie bridge sends one small anonymous ping a day to our own analytics. It carries
+the Collie version, the operating system, how Collie was installed, and whether the bridge runs
+alone or in a crew, under a random ID made on your machine. No IP address is stored with the ping.
+Nothing else is sent: no host name, no folder, nothing you type or read. We need these numbers to
+spot regressions and slow degradations after a release, and to steer what gets built next. Up to
+1.26.x Collie sent nothing ([ADR 0129](../.adr/0129-an-anonymous-install-count-on-by-default.md)).
 
-The one unprompted outbound call is the update check: an anonymous HTTPS `GET` to GitHub's public
+When Collie shows one of its two trouble cards, the next ping also carries how often, in six fields:
+which card, the name and version of the agent program, the multiplexer it ran on, a count and, from
+1.27.4, a screen field on a dialog card. The screen field is a short hash of the dialog's key-hint
+row only, never a row with your text, never the screen or what you typed. It is absent unless that
+row is a short list of key hints, such as `enter select · esc back`.
+
+Turning it off is one switch: Settings, System, **Telemetry**. `COLLIE_TELEMETRY=0`,
+`telemetry = false` in `config.toml` or `DO_NOT_TRACK=1` do the same, and so does blocking the one
+host it goes to, `ping.colliepwa.dev`, in your firewall. The first ping waits a day after the first
+start of a build that has it. The exact message is written down in the contract in the repository,
+[`telemetry/README.md`](https://github.com/AltanS/collie/blob/main/telemetry/README.md).
+
+### What did not change
+
+Besides the daily ping, the one unprompted outbound call is the update check: an anonymous HTTPS `GET` to GitHub's public
 tags API (`bridge/update.ts`) that compares your version to the newest tag. It carries no data about
 you or your machine, only the static user-agent `collie-update-check`.
 
-The Whistle model download is the other outbound call. It happens only when a person taps **Download
+The Whistle model download is another outbound call. It happens only when a person taps **Download
 to host** or runs `collie stt whistle`, and it sends no data about you ([The speech engine
 (Whistle)](#the-speech-engine-whistle)).
 
-Walky talky adds no outbound call. A message to another machine rides the crew link and goes
-nowhere else ([Walky talky](#walky-talky)).
+The math engines download is another outbound call, and it also happens only on a tap: **Download
+the math engines**, or picking an engine in **Settings → Appearance → Math** while the host has
+none. The bridge makes two anonymous HTTPS `GET`s to GitHub, with the user-agent `Collie/<version>`
+and nothing about you:
+
+```text
+https://github.com/<repo>/releases/download/v<version>/collie-<version>.manifest.json
+https://github.com/<repo>/releases/download/v<version>/collie-math-<version>.tar.gz
+```
+
+`<version>` is the version the bridge runs. `<repo>` is `AltanS/collie`, or `COLLIE_UPDATE_REPO` when you set it. The
+bridge takes the pack's size and sha256 from that release's manifest, refuses a file over 64 MiB or
+with another hash, and unpacks it itself, with no child process. It keeps the engines in the `math`
+folder of its state folder until you remove them on the same card. The routes need a write device,
+run on the lead only, allow one download at a time and are audited. A development build never
+makes the call ([ADR 0132](../.adr/0132-the-math-engines-are-a-pack-the-host-downloads.md)).
+
+WalkyTalky adds no outbound call. A message to another machine rides the crew link and goes
+nowhere else ([WalkyTalky](#walkytalky)).
 
 Report a problem adds no outbound call. After failed sends the phone can open GitHub's new-issue
 form, filled in, as a link in your own browser. You read the whole text first and submit it yourself
@@ -539,10 +656,6 @@ start and once an hour. That call is yours to turn on, and it sends nothing abou
 If you attach a durable agent by URL, Collie calls that URL on every poll with the durable agent's bearer token in
 the `Authorization` header. That call is yours to turn on too, and nothing is sent until you attach
 one ([Security of a durable agent](durable-agents-security.md#the-token-transport)).
-
-If collection is ever added, explicit opt-in is the ceiling — off by default, asked as a visible
-question, never carried by a flag or a default. Removing that promise would be a breaking change
-([ADR 0034](../.adr/0034-collie-collects-nothing-and-opt-in-is-the-ceiling.md)).
 
 ---
 

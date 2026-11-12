@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { Command as Program, CommanderError } from "commander";
 
-import { type BeaconEmitDeps, runBeaconEmit } from "./beacon.ts";
+import { agentPidOf, type BeaconEmitDeps, readProcessInfo, runBeaconEmit } from "./beacon.ts";
 import { cmdBeaconStatusline, runShell, type StatusLineDeps } from "./statusline.ts";
 import { type HoldDeps, netConnect, runBeaconHold } from "./hold.ts";
 import { CODEX_NOTIFY_HARNESS, runCodexNotify } from "./codex-notify.ts";
@@ -114,10 +114,13 @@ import { HOST } from "../bridge/host.ts";
 import { cmdSupervise, realSuperviseDeps } from "./task-scheduler.ts";
 import { cmdApplyUpdate, cmdUpdate } from "./update.ts";
 import {
+  askPanePlace,
   askSocket,
   cmdWalky,
   cmdWalkyCancel,
   cmdWalkyInbox,
+  cmdWalkyOff,
+  cmdWalkyOn,
   cmdWalkyReply,
   cmdWalkySend,
   cmdWalkyStatus,
@@ -126,6 +129,8 @@ import {
   type WalkyDeps,
 } from "./walky.ts";
 import { cmdUpdateCheck, updateCheckDeps, wantsCheck } from "./update-check.ts";
+import { cmdTheme, cmdThemeCheck, realThemeFiles, THEME_SUBCOMMANDS } from "./theme-check.ts";
+import { cmdThemeSkill } from "./theme-skill.ts";
 
 // The `collie` binary's dispatch: argv in, exit code out. This module owns ONLY the dispatch —
 // every verb's behaviour lives in its own module under `cli/`, taking the resolved context as an
@@ -236,6 +241,8 @@ function pairingDeps(io: Io): PairingDeps {
     exec: realExec(ctx.env, ctx.home),
     // The bridge's own trail: `devices revoke` records the launcher rows it removes there (ADR 0094).
     appendAudit: (line) => appendFileSync(join(ctx.stateDir, "audit.log"), `${line}\n`, { mode: 0o600 }),
+    // `pair` asks the running bridge over the walky socket whether its pane runs an agent.
+    panePlace: () => askPanePlace(walkyDeps(io)),
   };
 }
 
@@ -325,6 +332,16 @@ const WALKY_TREE: readonly Subcommand[] = [
     summary: "take back a held message you sent: `walky cancel <id>` (it stays in the inbox, not typed)",
     run: (args, s) => cmdWalkyCancel(walkyDeps(s.io), args),
   },
+  {
+    name: "off",
+    summary: "turn this session's WalkyTalky off: other agents cannot message it, your operator still can",
+    run: (args, s) => cmdWalkyOff(walkyDeps(s.io), args),
+  },
+  {
+    name: "on",
+    summary: "turn this session's WalkyTalky on again",
+    run: (args, s) => cmdWalkyOn(walkyDeps(s.io), args),
+  },
 ];
 
 function sttDeps(io: Io): SttDeps {
@@ -347,8 +364,9 @@ function sttDeps(io: Io): SttDeps {
  *
  * There is no `Io` in this set, and that is the point — a hook's stdout is injected into the
  * conversation, so the verb has no way to print even by accident. The context's own stderr notes are
- * dropped for the same reason. `process.ppid` is the `claude` process: a hook command runs as its
- * direct child (probed 2026-08-20 — see `cli/beacon.ts`).
+ * dropped for the same reason. `process.ppid` is the `claude` process where `sh` execs the command
+ * (bash, macOS), and a short-lived dash where it does not, so the pid goes through `agentPidOf`
+ * (probed 2026-08-20, amended for issue 689 — see `cli/beacon.ts`).
  */
 /** `config`'s seams: the context (which already carries the file layer), the io and the filesystem. */
 function configVerbDeps(io: Io): ConfigDeps {
@@ -383,7 +401,7 @@ function beaconDeps(): BeaconEmitDeps {
     ctx: loadContext(() => {}),
     files: realFiles,
     readStdin: () => Bun.stdin.text(),
-    agentPid: process.ppid,
+    agentPid: agentPidOf(process.ppid, readProcessInfo),
     uid: process.getuid?.(),
   };
 }
@@ -404,7 +422,7 @@ function holdDeps(): HoldDeps {
     ctx: loadContext(() => {}),
     files: realFiles,
     readStdin: () => Bun.stdin.text(),
-    agentPid: process.ppid,
+    agentPid: agentPidOf(process.ppid, readProcessInfo),
     uid: process.getuid?.(),
     connect: netConnect,
     print: async (text) => {
@@ -975,9 +993,29 @@ export const COMMANDS: readonly Command[] = [
   // One spelling: `wt` was dropped before release, since Windows Terminal's binary is `wt.exe`.
   {
     name: "walky",
-    summary: `walky talky, messages between agent sessions: ${WALKY_SUBCOMMANDS.join(", ")}`,
+    summary: `WalkyTalky, messages between agent sessions: ${WALKY_SUBCOMMANDS.join(", ")}`,
     subcommands: WALKY_TREE,
     run: (args, s) => cmdWalky({ io: s.io }, args),
+  },
+  // ── Themes (M59 spec 05) ───────────────────────────────────────────────────
+  // `theme check` runs the app's own theme parser and contrast report over files on disk, for a
+  // theme repository's CI. No context and no state dir: it reads the files it is named and prints.
+  {
+    name: "theme",
+    summary: `check a theme file before you share it, or print the brief for an agent that writes one: ${THEME_SUBCOMMANDS.join(", ")}`,
+    subcommands: [
+      {
+        name: "check",
+        summary: "validate theme files with the app's parser; refusals, contrast warnings, exit 1 on a refusal (--json, --shipped)",
+        run: (args, s) => cmdThemeCheck({ io: s.io, files: realThemeFiles }, args),
+      },
+      {
+        name: "skill",
+        summary: "print the brief for an AI agent that writes a theme (also `collie theme --skill`)",
+        run: (_args, s) => cmdThemeSkill(s.io),
+      },
+    ],
+    run: (args, s) => cmdTheme({ io: s.io, files: realThemeFiles }, args),
   },
   // ── The crew (M4/07, renamed in M24) ──────────────────────────────────────
   // The only way a machine enters or leaves a crew. The verb is `crew`; `crew` is an alias onto the
@@ -1030,11 +1068,11 @@ export const COMMANDS: readonly Command[] = [
   {
     name: "skill",
     summary:
-      "print the agent-facing brief on Collie (also `collie --skill`), or install the walky talky skill into a harness: install, uninstall, sync, status, print",
+      "print the agent-facing brief on Collie (also `collie --skill`), or install the WalkyTalky skill into a harness: install, uninstall, sync, status, print",
     subcommands: [
       {
         name: "install",
-        summary: "write the walky talky skill: `skill install <claude|codex|opencode|pi|gemini|all>`",
+        summary: "write the WalkyTalky skill: `skill install <claude|codex|opencode|pi|gemini|all>`",
         run: (args, s) => cmdSkillInstall(skillDeps(s.io), args),
       },
       {

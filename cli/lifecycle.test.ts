@@ -10,6 +10,7 @@ import {
   type FakeFiles,
   fakeFiles,
   fakeLinkFs,
+  fakeOps,
   HANDLER_FILE,
   HOME,
   ROOT,
@@ -17,6 +18,7 @@ import {
   type Scripted,
 } from "./fakes.ts";
 import { leadStore, member, peerStore } from "../bridge/crew/fixtures.ts";
+import { TrustStore, type TrustStoreData } from "../bridge/crew/trust-store.ts";
 import { hostFor, type Host } from "../bridge/host.ts";
 import { serializeTrustStore } from "../bridge/crew/trust-store.ts";
 import { EXIT, type Io } from "./io.ts";
@@ -364,6 +366,111 @@ describe("the pidfile guard", () => {
       expect(h.exec.killed).toEqual([]);
       expect(h.files.exists(`${CONFIG}/collie.pid`)).toBe(false);
     }
+  });
+});
+
+// Where a multiplexer's machine list and the crew differ, after the banner (M84/04). The machine
+// lists are asked through the real providers over the fake `Exec`; only the answers are scripted.
+describe("start, and the crew delta", () => {
+  const CORE_LIST = "hc machine ls --json";
+  const ONE_MACHINE = JSON.stringify({ machines: [{ target: "vps", name: "vps" }] });
+  const LINE = "herdr-core knows 1 machine that is not in this crew: vps. Add it with `collie crew add`.";
+
+  const listAnswer = (stdout: string): NonNullable<Scripted["answers"]> => [[CORE_LIST, { stdout }]];
+
+  /** A start whose crew seams read `store`, with `hc` answering `list` (absent: no `hc` at all). */
+  function crewHarness(store: TrustStoreData | null, list: string | null, over: HarnessOptions = {}): Harness {
+    const h = harness({
+      ...over,
+      absent: ["herdr", "ssh", ...(list === null ? ["hc"] : [])],
+      answers: [...(list === null ? [] : listAnswer(list)), ...(over.answers ?? [])],
+    });
+    let contents = store === null ? null : serializeTrustStore(store);
+    h.deps.crew = {
+      store: new TrustStore("/state", { read: async () => contents, write: async (_p, d) => void (contents = d) }),
+      ops: fakeOps(),
+    };
+    return h;
+  }
+
+  test("prints the line on stderr after the banner on a lead", async () => {
+    const h = crewHarness(leadStore(), ONE_MACHINE);
+    expect(await cmdStart(h.deps)).toBe(EXIT.OK);
+    expect(h.io.stderr).toContain(LINE);
+    expect(h.io.stdout).not.toContain(LINE);
+    expect(h.io.stdout.some((l) => l.startsWith("bridge started"))).toBe(true);
+  });
+
+  test("prints it on a solo collie too", async () => {
+    const h = crewHarness(null, ONE_MACHINE);
+    expect(await cmdStart(h.deps)).toBe(EXIT.OK);
+    expect(h.io.stderr).toContain(LINE);
+  });
+
+  test("prints nothing on a peer, and asks nothing", async () => {
+    const h = crewHarness(peerStore(), ONE_MACHINE);
+    expect(await cmdStart(h.deps)).toBe(EXIT.OK);
+    expect(h.io.stderr).not.toContain(LINE);
+    expect(h.exec.calls).not.toContain(CORE_LIST);
+  });
+
+  test("prints nothing on Windows, and asks nothing", async () => {
+    const h = crewHarness(leadStore(), ONE_MACHINE, { host: hostFor("win32") });
+    await cmdStart(h.deps);
+    expect(h.io.stderr).not.toContain(LINE);
+    expect(h.exec.calls).not.toContain(CORE_LIST);
+  });
+
+  test("prints nothing when no multiplexer has a machine list", async () => {
+    const h = crewHarness(leadStore({ peers: [member({ memberId: "nas" })] }), null);
+    expect(await cmdStart(h.deps)).toBe(EXIT.OK);
+    expect(h.io.stderr.filter((l) => l.includes("machine"))).toEqual([]);
+  });
+
+  // ── THE HINT IS QUIET (M84 hardening) ────────────────────────────────────────
+  // It prints only for a machine the list knows that the crew lacks AND that `crew add` could pick.
+  const quietFor = async (list: string, store: TrustStoreData | null = leadStore()): Promise<string[]> => {
+    const h = crewHarness(store, list);
+    expect(await cmdStart(h.deps)).toBe(EXIT.OK);
+    return h.io.stderr.filter((l) => l.includes("not in this crew"));
+  };
+
+  test("a sandbox alone prints nothing", async () => {
+    expect(await quietFor(JSON.stringify({ machines: [{ target: "scratch", temporary: true }] }))).toEqual([]);
+  });
+
+  test("a machine the core reaches with its own command alone prints nothing", async () => {
+    expect(await quietFor(JSON.stringify({ machines: [{ target: "ssh -p 2222 op@10.0.0.7", via: true }] }))).toEqual([]);
+  });
+
+  test("a machine the crew already has, strongly or by a weak match, prints nothing", async () => {
+    const crew = leadStore({ peers: [member({ memberId: "nas", address: "100.64.0.9:8787" })] });
+    expect(await quietFor(JSON.stringify({ machines: [{ target: "op@100.64.0.9" }] }), crew)).toEqual([]);
+    expect(await quietFor(JSON.stringify({ machines: [{ target: "op@nas" }] }), crew)).toEqual([]);
+  });
+
+  test("an empty list, and a core that is not running, print nothing", async () => {
+    expect(await quietFor(JSON.stringify({ machines: [] }))).toEqual([]);
+    const stopped = harness({
+      absent: ["herdr", "ssh"],
+      answers: [[CORE_LIST, { code: 5, stdout: JSON.stringify({ error: { kind: "unavailable", message: "no core" } }) }]],
+    });
+    stopped.deps.crew = { store: new TrustStore("/state", { read: async () => null, write: async () => {} }), ops: fakeOps() };
+    expect(await cmdStart(stopped.deps)).toBe(EXIT.OK);
+    expect(stopped.io.stderr.filter((l) => l.includes("not in this crew"))).toEqual([]);
+  });
+
+  test("it names only the pickable machines when the list mixes kinds", async () => {
+    const list = JSON.stringify({
+      machines: [{ target: "vps" }, { target: "scratch", temporary: true }, { target: "fly ssh console", via: true }],
+    });
+    expect(await quietFor(list)).toEqual([LINE]);
+  });
+
+  test("a start that failed prints no delta", async () => {
+    const h = crewHarness(leadStore(), ONE_MACHINE, { answers: [["systemctl --user enable --now collie", { code: 1 }]] });
+    expect(await cmdStart(h.deps)).not.toBe(EXIT.OK);
+    expect(h.io.stderr).not.toContain(LINE);
   });
 });
 
@@ -815,7 +922,8 @@ describe("the Task Scheduler tier (Windows)", () => {
       answers: [...(over.answers ?? []), ...WHOAMI],
       files: { [WIN_BINARY]: "", ...over.files },
     });
-  const schtasks = (h: Harness): string[] => h.exec.calls.filter((c) => c.startsWith("schtasks"));
+  // The writes and runs only: the read-only `/Query` of #762 is asserted where it is the subject.
+  const schtasks = (h: Harness): string[] => h.exec.calls.filter((c) => c.startsWith("schtasks") && !c.startsWith("schtasks /Query"));
 
   describe("the tier", () => {
     test("Windows is Task Scheduler, and asks systemd nothing", () => {
@@ -877,6 +985,30 @@ describe("the Task Scheduler tier (Windows)", () => {
       expect(h.files.read(HANDLER_FILE)).toBe("https:443|desk.tail.ts.net:443|http://127.0.0.1:8787\n");
       expect(h.exec.calls).toContain("tailscale serve --bg --set-path=/ 8787");
       expect(h.io.stderr.join("\n")).not.toContain("front door did not come up");
+    });
+
+    test("a task that cannot be read is not registered over blind, and the slow bound is used (#762)", async () => {
+      const h = windows({
+        answers: [
+          ["schtasks /Query", { code: 1 }],
+          [QUERY, { code: 124 }],
+        ],
+      });
+      expect(await cmdStart(h.deps)).toBe(EXIT.FAIL);
+      expect(schtasks(h)).toEqual([]);
+      expect(h.io.stderr).toEqual([
+        "error: Collie could not read the task herdr.collie (PowerShell did not answer within 60s), so it did not register over it",
+        "       wait a minute and run: collie start",
+      ]);
+      expect(h.exec.timeouts.filter((t) => t.call.startsWith("powershell")).map((t) => t.ms)).toEqual([PROCESS_QUERY_SLOW_START_MS]);
+    });
+
+    test("a task schtasks reads in one call needs no PowerShell, and another install's is still refused", async () => {
+      const xml = `<Task><Settings><Enabled>true</Enabled></Settings><Exec><Command>${CONHOST}</Command><Arguments>--headless D:\\other\\bin\\collie.exe _supervise</Arguments></Exec></Task>`;
+      const h = windows({ answers: [["schtasks /Query", { stdout: xml }]] });
+      expect(await cmdStart(h.deps)).toBe(EXIT.FAIL);
+      expect(h.exec.calls.some((c) => c.startsWith("powershell"))).toBe(false);
+      expect(h.io.stderr.join("\n")).toContain("one Collie per Windows machine");
     });
 
     test("a path with a '%' is refused before the task is written: Task Scheduler would expand it", async () => {
@@ -1458,6 +1590,23 @@ describe("the Task Scheduler tier (Windows)", () => {
         expect(h.exec.killed).toEqual([7200]);
       });
 
+      test("a task that cannot be read in time is left alone, with one line that says so (#762)", async () => {
+        const h = windows({
+          files: { [RECORD]: V2(7100, 7200) },
+          ps: { 7100: OUR_LAUNCHER, 7200: OUR_BRIDGE },
+          answers: [
+            ["schtasks /Query", { code: 1 }],
+            [QUERY, { code: 124 }],
+          ],
+        });
+        expect(await cmdRestart(h.deps)).toBe(EXIT.OK);
+        expect(schtasks(h)).toEqual([]);
+        expect(h.io.stderr.join("\n")).toContain(
+          "could not read the task herdr.collie (PowerShell did not answer within 60s), so its priority was not checked",
+        );
+        expect(h.exec.killed).toEqual([7200]);
+      });
+
       test("start writes the priority into the task it registers", async () => {
         const h = windows();
         expect(await cmdStart(h.deps)).toBe(EXIT.OK);
@@ -1556,7 +1705,7 @@ describe("the Task Scheduler tier (Windows)", () => {
       };
       const ask = h.exec.capture.bind(h.exec);
       h.exec.capture = (tool, args, ...rest) => {
-        if (tool === "schtasks") order.push(`schtasks ${args[0]}`);
+        if (tool === "schtasks" && args[0] !== "/Query") order.push(`schtasks ${args[0]}`);
         return ask(tool, args, ...rest);
       };
       expect(await cmdRestart(h.deps)).toBe(EXIT.OK);
@@ -1742,6 +1891,27 @@ describe("the Task Scheduler tier (Windows)", () => {
       );
       const other = windows({ answers: [[QUERY, { stdout: taskAnswer('--headless "D:\\other\\bin\\collie.exe" _supervise') }]] });
       expect(serviceDescription(other.deps)).toBe("Task Scheduler (herdr.collie) · Running · runs another install: D:\\other\\bin\\collie.exe");
+    });
+
+    test("a task that cannot be read says so, with the time limit, and never says not registered (#762)", () => {
+      const slow = windows({
+        answers: [
+          ["schtasks /Query", { code: 1 }],
+          [QUERY, { code: 124 }],
+        ],
+        files: { [`${CONFIG}/collie.pid`]: "4242\n" },
+      });
+      const said = serviceDescription(slow.deps);
+      expect(said).toBe("Task Scheduler (herdr.collie) · could not read the task (PowerShell did not answer within 60s)");
+      expect(said).not.toContain("not registered");
+      expect(said).not.toContain("unsupervised");
+    });
+
+    test("schtasks alone answers a status: the state it can give is that the task is registered", () => {
+      const xml = `<Task><Settings><Enabled>true</Enabled></Settings><Exec><Command>${CONHOST}</Command><Arguments>--headless ${WIN_BINARY} _supervise</Arguments></Exec></Task>`;
+      const h = windows({ answers: [["schtasks /Query", { stdout: xml }]] });
+      expect(serviceDescription(h.deps)).toBe("Task Scheduler (herdr.collie) · registered · launcher: Collie's");
+      expect(h.exec.calls.some((c) => c.startsWith("powershell"))).toBe(false);
     });
 
     test("logs reads the log file the launcher appends to", () => {

@@ -2542,7 +2542,7 @@ assert_contains "$(cat "${BEACON_HOME}/.codex/AGENTS.md")" "Be brief."
 beacon_env skill status || fail "\`collie skill status\` failed after install: ${STDERR}"
 assert_contains "$STDOUT" "AGENTS.md: installed"
 beacon_env skill status --check || fail "a fresh install read as stale: ${STDERR}"
-sed -i.bak -e 's/Walky talky/Walky talky (older)/' "${BEACON_HOME}/.codex/AGENTS.md"
+sed -i.bak -e 's/WalkyTalky/WalkyTalky (older)/' "${BEACON_HOME}/.codex/AGENTS.md"
 rc=0
 beacon_env skill status --check || rc=$?
 assert_eq "$rc" "3"
